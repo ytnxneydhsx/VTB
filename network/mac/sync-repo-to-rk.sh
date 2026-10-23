@@ -30,5 +30,9 @@ cd -- "$repo_dir"
 test -d .git || { echo "remote repository missing: $repo_dir" >&2; exit 1; }
 test -z "$(git status --porcelain)" || { echo "remote worktree is not clean; refusing sync" >&2; exit 1; }
 git fetch --prune "$remote_name"
-if [ -n "$remote_branch" ]; then git pull --ff-only "$remote_name" "$remote_branch"; else git pull --ff-only; fi
+if [ -z "$remote_branch" ]; then
+  remote_branch=$(git branch --show-current)
+fi
+test -n "$remote_branch" || { echo 'remote repository is on a detached HEAD; set RK_REMOTE_BRANCH' >&2; exit 1; }
+git pull --ff-only "$remote_name" "$remote_branch"
 REMOTE_SCRIPT
