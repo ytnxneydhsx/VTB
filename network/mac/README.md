@@ -23,4 +23,7 @@ RK 启用 Avahi 后，`rk3588-ubuntu.local` 会随 DHCP 地址自动更新，因
 ./network/mac/ssh-rk.sh --lan
 ./network/mac/ssh-rk.sh --direct
 ./network/mac/ssh-rk.sh --frp
+
+# 在 macOS Terminal 新窗口中直接打开 RK 的 VTB 目录
+open ./network/mac/open-rk-lan.command
 ```
