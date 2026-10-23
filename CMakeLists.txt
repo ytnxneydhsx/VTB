@@ -1,7 +1,14 @@
 cmake_minimum_required(VERSION 3.16)
 
-project(vtb_camera_info LANGUAGES CXX)
+project(vtb LANGUAGES CXX)
 
-add_executable(camera-info src/main.cpp)
-target_compile_features(camera-info PRIVATE cxx_std_17)
-target_compile_options(camera-info PRIVATE -Wall -Wextra -Wpedantic)
+function(vtb_configure_target target)
+    target_compile_features(${target} PRIVATE cxx_std_17)
+    target_compile_options(${target} PRIVATE -Wall -Wextra -Wpedantic)
+endfunction()
+
+add_executable(vtb src/main.cpp)
+vtb_configure_target(vtb)
+
+add_executable(camera-info examples/camera-info/main.cpp)
+vtb_configure_target(camera-info)

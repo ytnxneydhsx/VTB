@@ -2,9 +2,10 @@
 
 Mac 与 RK3588 的直连调试、上网优先级和仓库同步脚本见 [`network/README.md`](network/README.md)。
 
-## C++ 摄像头信息示例
+## C++ 程序
 
-现在只有一个 C++ 文件：`src/main.cpp`。程序固定打开 `/dev/video0`，打印当前摄像头支持的格式、分辨率和帧率；它不会读取画面。代码按这台摄像头提供的离散分辨率和帧率编写。
+- `src/main.cpp`：新的 VTB 主程序入口，生成 `build/vtb`。
+- `examples/camera-info/main.cpp`：归档的摄像头信息示例，生成 `build/camera-info`。程序固定打开 `/dev/video0`，打印摄像头支持的格式、分辨率和帧率；它不会读取画面。
 
 构建：
 
@@ -16,10 +17,14 @@ cmake --build build
 运行：
 
 ```bash
+# 新的主程序
+./build/vtb
+
+# 归档的摄像头信息示例
 ./build/camera-info
 ```
 
-阅读代码时，先看 `open` 如何得到设备 fd，再按“格式 → 分辨率 → 帧率”看三个查询循环，最后看 `close`。
+阅读摄像头信息示例时，先看 `open` 如何得到设备 fd，再按“格式 → 分辨率 → 帧率”看三个查询循环，最后看 `close`。
 
 ## RTSP 推流
 
