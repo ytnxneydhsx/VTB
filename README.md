@@ -1,8 +1,8 @@
-# RK3588 USB 摄像头采集与 RTSP 推流
+# RK3588 USB 摄像头示例与 RTSP 推流
 
-## C++ V4L2 环形缓存
+## C++ 摄像头信息示例
 
-`vtb-capture` 使用 V4L2 MMAP 从 USB 摄像头取帧，随后立即复制到固定容量的线程安全环形缓存中。缓存写满后持续覆盖最旧槽位，不保存帧到磁盘。当前连接的 Realtek USB Camera 使用 `/dev/video0` 作为图像节点，默认采集其原生支持的 `MJPG 1280x720 @ 30 fps`。
+现在只有一个 C++ 文件：`src/main.cpp`。程序固定打开 `/dev/video0`，打印当前摄像头支持的格式、分辨率和帧率；它不会读取画面。代码按这台摄像头提供的离散分辨率和帧率编写。
 
 构建：
 
@@ -11,35 +11,13 @@ cmake -S . -B build -G Ninja
 cmake --build build
 ```
 
-持续采集，按 `Ctrl+C` 结束：
+运行：
 
 ```bash
-./build/vtb-capture
+./build/camera-info
 ```
 
-短时验证 60 帧：
-
-```bash
-./build/vtb-capture --frames 60
-```
-
-使用未压缩的 `YUYV 640x480 @ 30 fps`：
-
-```bash
-./build/vtb-capture \
-  --format YUYV \
-  --width 640 \
-  --height 480 \
-  --fps 30
-```
-
-常用选项可通过以下命令查看：
-
-```bash
-./build/vtb-capture --help
-```
-
-环形缓存默认包含 8 个槽位，每个槽位保存一帧数据及应用序号、V4L2 驱动序号、采集时间戳、像素格式和尺寸。`FrameRingBuffer::latest()` 可获取最新帧快照，`waitForLatest()` 可等待比指定序号更新的帧。快照拥有独立内存，因此缓存槽位被循环覆盖时，消费线程仍可安全处理已有帧。
+阅读代码时，先看 `open` 如何得到设备 fd，再按“格式 → 分辨率 → 帧率”看三个查询循环，最后看 `close`。
 
 ## RTSP 推流
 
