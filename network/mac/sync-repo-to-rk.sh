@@ -20,12 +20,15 @@ if [ "$apply" -eq 0 ]; then
 fi
 ssh -o BatchMode=yes -o ConnectTimeout=3 -o ConnectionAttempts=1 "${ssh_args[@]}" bash -s -- "$repo_dir" "$remote" "$branch" <<'REMOTE_SCRIPT'
 set -eu
-case "$1" in
-  '~/'*) set -- "$HOME/${1#~/}" "$2" "$3" ;;
+repo_dir=$1
+remote_name=$2
+remote_branch=${3:-}
+case "$repo_dir" in
+  '~/'*) repo_dir="$HOME/${repo_dir#~/}" ;;
 esac
-cd -- "$1"
-test -d .git || { echo "remote repository missing: $1" >&2; exit 1; }
+cd -- "$repo_dir"
+test -d .git || { echo "remote repository missing: $repo_dir" >&2; exit 1; }
 test -z "$(git status --porcelain)" || { echo "remote worktree is not clean; refusing sync" >&2; exit 1; }
-git fetch --prune "$2"
-if [ -n "$3" ]; then git pull --ff-only "$2" "$3"; else git pull --ff-only; fi
+git fetch --prune "$remote_name"
+if [ -n "$remote_branch" ]; then git pull --ff-only "$remote_name" "$remote_branch"; else git pull --ff-only; fi
 REMOTE_SCRIPT
