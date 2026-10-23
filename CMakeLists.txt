@@ -88,8 +88,14 @@ if(VTB_BUILD_OUTPUT_CLI)
     target_link_libraries(vtb-output-cli PRIVATE vtb_output_cli)
     vtb_configure_target(vtb-output-cli)
 endif()
+add_library(vtb_capture STATIC
+    src/v4l2_camera.cpp
+)
+target_include_directories(vtb_capture PUBLIC include)
+vtb_configure_target(vtb_capture)
 
 add_executable(vtb src/main.cpp)
+target_link_libraries(vtb PRIVATE vtb_capture)
 vtb_configure_target(vtb)
 
 add_executable(camera-info examples/camera-info/main.cpp)
