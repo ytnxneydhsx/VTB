@@ -189,7 +189,14 @@ run install -m 644 "$ROOT/systemd/vtb-uplink-policy.timer" "$SYSTEMD/vtb-uplink-
 run nmcli general reload
 run nmcli connection reload
 run nmcli device set "$MAC_IFACE" managed yes
-run nmcli connection up vtb-mac-link
+
+if [ "$APPLY" -eq 1 ]; then
+  if ! nmcli --wait 10 connection up vtb-mac-link; then
+    echo "$MAC_IFACE has no usable carrier; profile activation is deferred to NetworkManager." >&2
+  fi
+else
+  run nmcli --wait 10 connection up vtb-mac-link
+fi
 
 if [ "$APPLY" -eq 1 ]; then
   uplink_device=$(nmcli -g GENERAL.DEVICES connection show "$UPLINK_CONNECTION" | head -n 1)
@@ -200,4 +207,8 @@ fi
 
 run systemctl daemon-reload
 run systemctl enable --now vtb-uplink-policy.timer
-echo 'VTB network policy install complete.'
+if [ "$APPLY" -eq 1 ]; then
+  echo 'VTB network policy install complete.'
+else
+  echo 'VTB network policy install preview complete.'
+fi
