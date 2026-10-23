@@ -2,3 +2,5 @@ runtime/
 build/
 bin/mediamtx
 .DS_Store
+.stfolder/
+.stversions/

@@ -19,6 +19,7 @@ Mac en6 192.168.77.1/24  =====  RK end1 192.168.77.2/24
 
 - `network/mac/`：macOS 只读诊断、RK SSH 链路选择和仓库同步。
 - `network/rk/`：NetworkManager 直连配置、上联健康探测、路由提升/回退、systemd 定时器，以及可选的局域网 mDNS 名称发现。
+- `network/syncthing/`：Mac 与 RK 双向源码同步的边界、服务管理和冲突处理说明。
 - `.stignore`：Syncthing 只同步源码工作区；Git 元数据、构建产物、数据库和运行数据保留在各自设备。
 
 ## 路由决策
@@ -51,6 +52,9 @@ route metric 只表示路由选择顺序，不能证明对端真的可上网；�
 
 # RK 预览安装动作
 ./network/rk/install.sh
+
+# Mac 与 RK 的 Syncthing 只读状态
+./network/mac/syncthing-status.sh
 
 # 明确确认后在 RK 应用
 sudo ./network/rk/install.sh --apply
