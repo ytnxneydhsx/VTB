@@ -9,4 +9,6 @@
 
 远端仓库默认路径为 ~/VTB，可用 RK_REMOTE_REPO、RK_REMOTE_NAME、RK_REMOTE_BRANCH 覆盖。脚本不会执行 reset、clean、stash、强制推送或覆盖未提交文件。
 
-首次 direct/LAN 连接前，请人工核对并登记主机指纹；脚本使用 `StrictHostKeyChecking=yes`，不会自动接受新指纹。诊断只发起短超时 SSH 登录探测，不扫描其他端口，也不修改网络设置。
+`known_hosts` 保存了通过已认证 FRP 会话读取并核对的 RK ED25519 主机公钥，供 direct 与 LAN 共用。默认私钥为 `~/.ssh/id_ed25519_rk3588_aliyun`；可通过 `RK_SSH_IDENTITY` 和 `RK_KNOWN_HOSTS_FILE` 覆盖。脚本始终使用 `StrictHostKeyChecking=yes`，诊断只发起短超时 SSH 登录探测，不扫描其他端口，也不修改网络设置。
+
+RK 启用 Avahi 后，`rk3588-ubuntu.local` 会随 DHCP 地址自动更新，因此上级路由器换地址时无需改脚本。

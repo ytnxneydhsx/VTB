@@ -18,7 +18,7 @@ Mac en6 192.168.77.1/24  =====  RK end1 192.168.77.2/24
 ```
 
 - `network/mac/`：macOS 只读诊断、RK SSH 链路选择和仓库同步。
-- `network/rk/`：NetworkManager 直连配置、上联健康探测、路由提升/回退和 systemd 定时器。
+- `network/rk/`：NetworkManager 直连配置、上联健康探测、路由提升/回退、systemd 定时器，以及可选的局域网 mDNS 名称发现。
 
 ## 路由决策
 

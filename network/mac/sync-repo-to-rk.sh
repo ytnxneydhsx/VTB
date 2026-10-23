@@ -1,6 +1,8 @@
 #!/bin/bash
 set -eu
 root_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+# shellcheck source=ssh-common.sh
+. "$root_dir/ssh-common.sh"
 repo_dir=${RK_REMOTE_REPO:-'~/VTB'}
 remote=${RK_REMOTE_NAME:-origin}
 branch=${RK_REMOTE_BRANCH:-}
@@ -9,8 +11,8 @@ if [ "${1:-}" = "--apply" ]; then apply=1; shift; fi
 [ "$#" -eq 0 ] || { echo "usage: $0 [--apply]" >&2; exit 2; }
 candidate=$("$root_dir/rk-host.sh")
 case "$candidate" in
- direct) ssh_args=(-o StrictHostKeyChecking=yes -p "${RK_SSH_PORT:-22}" "${RK_SSH_USER:-huangnv}@192.168.77.2");;
- lan) ssh_args=(-o StrictHostKeyChecking=yes -p "${RK_SSH_PORT:-22}" "${RK_SSH_USER:-huangnv}@rk3588-ubuntu.local");;
+ direct) ssh_args=("${RK_SSH_PINNED[@]}" -p "$RK_SSH_PORT" "$RK_SSH_USER@192.168.77.2");;
+ lan) ssh_args=("${RK_SSH_PINNED[@]}" -p "$RK_SSH_PORT" "$RK_SSH_USER@rk3588-ubuntu.local");;
  frp) ssh_args=(rk3588-aliyun);;
 esac
 if [ "$apply" -eq 0 ]; then
