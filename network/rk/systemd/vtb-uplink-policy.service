@@ -1,0 +1,8 @@
+[Unit]
+Description=VTB RK uplink policy
+After=NetworkManager.service network-online.target
+Wants=network-online.target
+[Service]
+Type=oneshot
+EnvironmentFile=-/etc/default/vtb-network
+ExecStart=/usr/local/libexec/vtb/uplink-policy.sh

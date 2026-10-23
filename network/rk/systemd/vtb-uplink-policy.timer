@@ -1,0 +1,8 @@
+[Unit]
+Description=Run VTB RK uplink policy periodically
+[Timer]
+OnBootSec=15s
+OnUnitActiveSec=20s
+Persistent=true
+[Install]
+WantedBy=timers.target
