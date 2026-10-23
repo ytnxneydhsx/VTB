@@ -4,7 +4,9 @@ Mac 与 RK3588 的直连调试、上网优先级和仓库同步脚本见 [`netwo
 
 ## C++ 程序
 
-- `src/main.cpp`：新的 VTB 主程序入口，生成 `build/vtb`。
+- `src/main.cpp`：新的 VTB 主程序入口，生成 `build/vtb`。当前阶段打开 `/dev/video0`，请求并核对 `MJPG 1280×720 @ 30fps`；还没有申请帧缓冲或开始采集。
+- `include/vtb/capture_config.hpp`：请求参数和驱动协商结果。
+- `include/vtb/v4l2_camera.hpp`、`src/v4l2_camera.cpp`：V4L2 设备打开、能力检查、格式与帧率协商。
 - `examples/camera-info/main.cpp`：归档的摄像头信息示例，生成 `build/camera-info`。程序固定打开 `/dev/video0`，打印摄像头支持的格式、分辨率和帧率；它不会读取画面。
 
 构建：
