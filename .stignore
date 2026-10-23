@@ -1,0 +1,24 @@
+// Git metadata stays local to each machine.
+(?d).git
+
+// Build outputs and downloaded runtime binaries.
+(?d)build
+(?d)cmake-build-*
+(?d)bin
+(?d).cache
+(?d)CMakeFiles
+(?d)compile_commands.json
+(?d)*.o
+(?d)*.a
+(?d)*.so
+(?d)*.dylib
+
+// Runtime data is kept on the machine that produced it.
+(?d)logs
+(?d)recordings
+(?d)*.db
+(?d)*.db-wal
+(?d)*.db-shm
+
+// Platform metadata.
+(?d).DS_Store
