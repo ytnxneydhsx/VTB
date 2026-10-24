@@ -11,14 +11,6 @@
 namespace vtb {
 namespace {
 
-int ioctl_retry(int fd, unsigned long request, void* argument) {
-    int result;
-    do {
-        result = ioctl(fd, request, argument);
-    } while (result < 0 && errno == EINTR);
-    return result;
-}
-
 [[noreturn]] void throw_errno(const std::string& operation) {
     throw std::system_error(errno, std::generic_category(), operation);
 }
@@ -56,14 +48,14 @@ NegotiatedCaptureConfig V4l2Camera::open_and_configure() {
     }
 
     v4l2_capability capability{};
-    if (ioctl_retry(fd_, VIDIOC_QUERYCAP, &capability) < 0) {
+    if (ioctl(fd_, VIDIOC_QUERYCAP, &capability) < 0) {
         throw_errno("VIDIOC_QUERYCAP");
     }
 
-    const std::uint32_t device_capabilities =
-        (capability.capabilities & V4L2_CAP_DEVICE_CAPS) != 0
-            ? capability.device_caps
-            : capability.capabilities;
+    std::uint32_t device_capabilities = capability.capabilities;
+    if ((capability.capabilities & V4L2_CAP_DEVICE_CAPS) != 0) {
+        device_capabilities = capability.device_caps;
+    }
 
     if ((device_capabilities & V4L2_CAP_VIDEO_CAPTURE) == 0) {
         throw std::runtime_error(config_.device_path +
@@ -81,13 +73,13 @@ NegotiatedCaptureConfig V4l2Camera::open_and_configure() {
     format.fmt.pix.pixelformat = config_.pixel_format;
     format.fmt.pix.field = V4L2_FIELD_ANY;
 
-    if (ioctl_retry(fd_, VIDIOC_S_FMT, &format) < 0) {
+    if (ioctl(fd_, VIDIOC_S_FMT, &format) < 0) {
         throw_errno("VIDIOC_S_FMT");
     }
 
     v4l2_streamparm stream_parameters{};
     stream_parameters.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
-    if (ioctl_retry(fd_, VIDIOC_G_PARM, &stream_parameters) < 0) {
+    if (ioctl(fd_, VIDIOC_G_PARM, &stream_parameters) < 0) {
         throw_errno("VIDIOC_G_PARM");
     }
     if ((stream_parameters.parm.capture.capability & V4L2_CAP_TIMEPERFRAME) == 0) {
@@ -97,13 +89,13 @@ NegotiatedCaptureConfig V4l2Camera::open_and_configure() {
 
     stream_parameters.parm.capture.timeperframe.numerator = 1;
     stream_parameters.parm.capture.timeperframe.denominator = config_.fps;
-    if (ioctl_retry(fd_, VIDIOC_S_PARM, &stream_parameters) < 0) {
+    if (ioctl(fd_, VIDIOC_S_PARM, &stream_parameters) < 0) {
         throw_errno("VIDIOC_S_PARM");
     }
 
     v4l2_streamparm actual_stream_parameters{};
     actual_stream_parameters.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
-    if (ioctl_retry(fd_, VIDIOC_G_PARM, &actual_stream_parameters) < 0) {
+    if (ioctl(fd_, VIDIOC_G_PARM, &actual_stream_parameters) < 0) {
         throw_errno("VIDIOC_G_PARM after VIDIOC_S_PARM");
     }
 
