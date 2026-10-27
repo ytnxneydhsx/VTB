@@ -2,11 +2,12 @@
 
 #include "openvt_dmabuf_capture.h"
 
-#include "core/io/file_access.h"
 #include "core/object/callable_mp.h"
 #include "core/object/class_db.h"
 #include "core/os/memory.h"
+#include "core/os/mutex.h"
 #include "core/os/os.h"
+#include "core/os/thread.h"
 #include "core/string/print_string.h"
 #include "platform/linuxbsd/platform_egl.h"
 #include "platform/linuxbsd/platform_gl.h"
@@ -31,9 +32,12 @@
 #include <unistd.h>
 
 #include <cerrno>
+#include <algorithm>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
+#include <deque>
+#include <vector>
 
 namespace {
 
@@ -43,6 +47,7 @@ constexpr EGLint EGL_LINUX_DRM_FOURCC_ATTRIBUTE = 0x3271;
 constexpr EGLint EGL_DMA_BUF_PLANE0_FD_ATTRIBUTE = 0x3272;
 constexpr EGLint EGL_DMA_BUF_PLANE0_OFFSET_ATTRIBUTE = 0x3273;
 constexpr EGLint EGL_DMA_BUF_PLANE0_PITCH_ATTRIBUTE = 0x3274;
+constexpr int FRAME_SLOT_COUNT = 3;
 
 using EglCreateImageKhrProc = EGLImageKHR (*)(EGLDisplay, EGLContext, EGLenum, EGLClientBuffer, const EGLint *);
 using EglDestroyImageKhrProc = EGLBoolean (*)(EGLDisplay, EGLImageKHR);
@@ -305,10 +310,11 @@ public:
 
 	Error initialize(const DmaBuffer &p_input, const String &p_output_path, int p_width, int p_height,
 			int p_stride, int p_vertical_stride, int p_fps, String &r_error) {
-		output = FileAccess::open(p_output_path, FileAccess::WRITE);
-		if (output.is_null()) {
-			r_error = "open output file failed: " + p_output_path;
-			return FileAccess::get_open_error();
+		CharString output_path_utf8 = p_output_path.utf8();
+		output_fd.reset(open(output_path_utf8.get_data(), O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0644));
+		if (output_fd.get() < 0) {
+			r_error = errno_message("open output file failed: " + p_output_path);
+			return ERR_CANT_OPEN;
 		}
 
 		MPP_RET result = mpp_create(&context, &api);
@@ -430,12 +436,22 @@ public:
 			return ERR_INVALID_DATA;
 		}
 
-		bool stored = output->store_buffer(static_cast<const uint8_t *>(position), length);
-		mpp_packet_deinit(&packet);
-		if (!stored) {
-			r_error = "write encoded packet failed";
-			return ERR_FILE_CANT_WRITE;
+		const uint8_t *next_byte = static_cast<const uint8_t *>(position);
+		size_t remaining = length;
+		while (remaining > 0) {
+			ssize_t written = write(output_fd.get(), next_byte, remaining);
+			if (written < 0 && errno == EINTR) {
+				continue;
+			}
+			if (written <= 0) {
+				mpp_packet_deinit(&packet);
+				r_error = errno_message("write encoded packet failed");
+				return ERR_FILE_CANT_WRITE;
+			}
+			next_byte += written;
+			remaining -= static_cast<size_t>(written);
 		}
+		mpp_packet_deinit(&packet);
 
 		encoded_bytes += length;
 		return OK;
@@ -457,10 +473,7 @@ public:
 			mpp_destroy(context);
 			context = nullptr;
 		}
-		if (output.is_valid()) {
-			output->close();
-			output.unref();
-		}
+		output_fd.reset();
 	}
 
 	size_t get_encoded_bytes() const { return encoded_bytes; }
@@ -480,9 +493,63 @@ private:
 	MppEncCfg config = nullptr;
 	MppBuffer input_buffer = nullptr;
 	MppFrame frame = nullptr;
-	Ref<FileAccess> output;
+	UniqueFd output_fd;
 	int fps = 0;
 	size_t encoded_bytes = 0;
+};
+
+class FrameSlot {
+public:
+	enum class State {
+		FREE,
+		RESERVED,
+		READY,
+		CONSUMING,
+	};
+
+	FrameSlot() = default;
+	~FrameSlot() = default;
+
+	FrameSlot(const FrameSlot &) = delete;
+	FrameSlot &operator=(const FrameSlot &) = delete;
+	FrameSlot(FrameSlot &&) = delete;
+	FrameSlot &operator=(FrameSlot &&) = delete;
+
+	Error initialize(int p_index, const DmaBuffer &p_nv12_buffer, int p_width, int p_height,
+			int p_rgba_stride, int p_nv12_stride, int p_nv12_vertical_stride, size_t p_rgba_size,
+			String &r_error) {
+		index = p_index;
+		Error error = rgba_buffer.allocate(DMA_HEAP_PATH, p_rgba_size, r_error);
+		if (error != OK) {
+			return error;
+		}
+		error = dma_target.initialize(rgba_buffer, p_width, p_height, p_rgba_stride, r_error);
+		if (error != OK) {
+			return error;
+		}
+		error = rga_converter.initialize(rgba_buffer, p_nv12_buffer, p_width, p_height, p_rgba_stride,
+				p_nv12_stride, p_nv12_vertical_stride, r_error);
+		if (error != OK) {
+			return error;
+		}
+		return OK;
+	}
+
+	int get_index() const { return index; }
+	int get_rgba_fd() const { return rgba_buffer.get_fd(); }
+	GLuint get_framebuffer() const { return dma_target.get_framebuffer(); }
+	RgaConverter &get_rga_converter() { return rga_converter; }
+
+	State state = State::FREE;
+	int frame_index = -1;
+	bool end_of_stream = false;
+	uint64_t ready_usec = 0;
+
+private:
+	int index = -1;
+	DmaBuffer rgba_buffer;
+	ExternalDmaBufTarget dma_target;
+	RgaConverter rga_converter;
 };
 
 } // namespace
@@ -510,18 +577,21 @@ public:
 		size_t rgba_size = static_cast<size_t>(rgba_stride) * height;
 		size_t nv12_size = static_cast<size_t>(nv12_stride) * nv12_vertical_stride * 3 / 2;
 
-		Error error = rgba_buffer.allocate(DMA_HEAP_PATH, rgba_size, r_error);
+		Error error = nv12_buffer.allocate(DMA_HEAP_PATH, nv12_size, r_error);
 		if (error != OK) {
 			return error;
 		}
-		error = nv12_buffer.allocate(DMA_HEAP_PATH, nv12_size, r_error);
-		if (error != OK) {
-			return error;
+
+		for (int i = 0; i < FRAME_SLOT_COUNT; i++) {
+			slots[i] = memnew(FrameSlot);
+			error = slots[i]->initialize(i, nv12_buffer, width, height, rgba_stride, nv12_stride,
+					nv12_vertical_stride, rgba_size, r_error);
+			if (error != OK) {
+				return error;
+			}
+			free_slot_indices.push_back(i);
 		}
-		error = dma_target.initialize(rgba_buffer, width, height, rgba_stride, r_error);
-		if (error != OK) {
-			return error;
-		}
+		free_slots_available.post(FRAME_SLOT_COUNT);
 
 		glGenFramebuffers(1, &source_framebuffer);
 		if (source_framebuffer == 0) {
@@ -529,35 +599,104 @@ public:
 			return ERR_CANT_CREATE;
 		}
 
-		error = rga_converter.initialize(rgba_buffer, nv12_buffer, width, height, rgba_stride, nv12_stride,
-				nv12_vertical_stride, r_error);
-		if (error != OK) {
-			return error;
-		}
 		error = mpp_encoder.initialize(nv12_buffer, p_output_path, width, height, nv12_stride,
 				nv12_vertical_stride, fps, r_error);
 		if (error != OK) {
 			return error;
 		}
 
-		start_usec = OS::get_singleton()->get_ticks_usec();
-		print_line(vformat("OPENVT_DMABUF_CONFIG width=%d height=%d fps=%d frames=%d rgba_fd=%d nv12_fd=%d rgba_stride=%d nv12_stride=%d nv12_vertical_stride=%d heap=%s",
-				width, height, fps, total_frames, rgba_buffer.get_fd(), nv12_buffer.get_fd(), rgba_stride,
-				nv12_stride, nv12_vertical_stride, DMA_HEAP_PATH));
-		print_line("OPENVT_DMABUF_LAYOUT source=Godot_SubViewport_GL_Texture gpu_copy=glBlitFramebuffer rgba_drm_format=AB24 rgba_rga_format=RK_FORMAT_RGBA_8888 nv12_rga_format=RK_FORMAT_YCbCr_420_SP modifier=not-specified vertical_flip=disabled");
+		accepting_frames = true;
 		initialized = true;
+#ifdef THREADS_ENABLED
+		Thread::ID thread_id = media_thread.start(media_thread_entry, this);
+		if (thread_id == Thread::UNASSIGNED_ID) {
+			r_error = "failed to start DMA-BUF media worker";
+			return ERR_CANT_CREATE;
+		}
+#else
+		r_error = "Godot was built without thread support";
+		return ERR_UNAVAILABLE;
+#endif
+
+		start_usec = OS::get_singleton()->get_ticks_usec();
+		print_line(vformat("OPENVT_DMABUF_CONFIG width=%d height=%d fps=%d frames=%d slots=%d nv12_fd=%d rgba_stride=%d nv12_stride=%d nv12_vertical_stride=%d heap=%s",
+				width, height, fps, total_frames, FRAME_SLOT_COUNT, nv12_buffer.get_fd(), rgba_stride,
+				nv12_stride, nv12_vertical_stride, DMA_HEAP_PATH));
+		for (int i = 0; i < FRAME_SLOT_COUNT; i++) {
+			print_line(vformat("OPENVT_DMABUF_SLOT slot=%d rgba_fd=%d", i, slots[i]->get_rgba_fd()));
+		}
+		print_line("OPENVT_DMABUF_LAYOUT source=Godot_SubViewport_GL_Texture gpu_copy=glBlitFramebuffer rgba_drm_format=AB24 rgba_rga_format=RK_FORMAT_RGBA_8888 nv12_rga_format=RK_FORMAT_YCbCr_420_SP modifier=not-specified vertical_flip=disabled");
+		print_line("OPENVT_DMABUF_PIPELINE mode=two_stage rgba_slots=3 nv12_buffers=1 media_workers=1 gl_finish=enabled backpressure=blocking");
 		return OK;
 	}
 
-	Error capture(GLuint p_source_texture, int p_frame_index, bool p_end_of_stream, String &r_error) {
+	Error reserve_slot(int &r_slot_index, String &r_error) {
 		if (!initialized) {
 			r_error = "DMA-BUF pipeline is not initialized";
 			return ERR_UNCONFIGURED;
 		}
+
+		{
+			MutexLock lock(queue_mutex);
+			if (worker_error != OK) {
+				r_error = worker_error_message;
+				return worker_error;
+			}
+			if (!accepting_frames) {
+				r_error = "DMA-BUF pipeline is no longer accepting frames";
+				return ERR_UNAVAILABLE;
+			}
+		}
+
+		uint64_t wait_start = OS::get_singleton()->get_ticks_usec();
+		bool waited = false;
+		if (!free_slots_available.try_wait()) {
+			waited = true;
+			free_slots_available.wait();
+		}
+		uint64_t wait_end = OS::get_singleton()->get_ticks_usec();
+		producer_wait_samples.push_back(wait_end - wait_start);
+		if (waited) {
+			backpressure_count++;
+		}
+
+		MutexLock lock(queue_mutex);
+		if (worker_error != OK) {
+			r_error = worker_error_message;
+			return worker_error;
+		}
+		if (free_slot_indices.empty()) {
+			r_error = "free slot semaphore and queue are inconsistent";
+			return FAILED;
+		}
+		r_slot_index = free_slot_indices.front();
+		free_slot_indices.pop_front();
+		FrameSlot *slot = slots[r_slot_index];
+		if (slot->state != FrameSlot::State::FREE) {
+			r_error = "reserved DMA-BUF slot was not free";
+			return FAILED;
+		}
+		slot->state = FrameSlot::State::RESERVED;
+		return OK;
+	}
+
+	Error capture(GLuint p_source_texture, int p_slot_index, int p_frame_index, bool p_end_of_stream,
+			String &r_error) {
+		if (!initialized) {
+			r_error = "DMA-BUF pipeline is not initialized";
+			return ERR_UNCONFIGURED;
+		}
+		if (p_slot_index < 0 || p_slot_index >= FRAME_SLOT_COUNT) {
+			r_error = "DMA-BUF slot index is invalid";
+			return ERR_INVALID_PARAMETER;
+		}
 		if (p_source_texture == 0) {
+			release_reserved_slot(p_slot_index);
 			r_error = "Godot SubViewport texture native handle is zero";
 			return ERR_INVALID_DATA;
 		}
+
+		FrameSlot *slot = slots[p_slot_index];
 
 		uint64_t copy_start = OS::get_singleton()->get_ticks_usec();
 		GLint previous_read_framebuffer = 0;
@@ -572,77 +711,297 @@ public:
 		GLenum source_status = glCheckFramebufferStatus(GL_READ_FRAMEBUFFER);
 		if (source_status != GL_FRAMEBUFFER_COMPLETE) {
 			restore_gl_state(previous_read_framebuffer, previous_draw_framebuffer, previous_texture);
+			release_reserved_slot(p_slot_index);
 			r_error = "Godot source framebuffer is incomplete: " + itos(static_cast<int64_t>(source_status));
 			return ERR_INVALID_DATA;
 		}
 
-		glBindFramebuffer(GL_DRAW_FRAMEBUFFER, dma_target.get_framebuffer());
+		glBindFramebuffer(GL_DRAW_FRAMEBUFFER, slot->get_framebuffer());
 		glBlitFramebuffer(0, 0, width, height, 0, 0, width, height, GL_COLOR_BUFFER_BIT, GL_NEAREST);
 		glFinish();
 		GLenum gl_error = glGetError();
 		restore_gl_state(previous_read_framebuffer, previous_draw_framebuffer, previous_texture);
 		if (gl_error != GL_NO_ERROR) {
+			release_reserved_slot(p_slot_index);
 			r_error = "GPU copy into DMA-BUF failed: " + itos(static_cast<int64_t>(gl_error));
 			return FAILED;
 		}
 		uint64_t copy_end = OS::get_singleton()->get_ticks_usec();
 
-		Error error = rga_converter.convert(r_error);
-		if (error != OK) {
-			return error;
+		int ready_depth = 0;
+		{
+			MutexLock lock(queue_mutex);
+			if (worker_error != OK) {
+				r_error = worker_error_message;
+				release_slot_locked(p_slot_index);
+				free_slots_available.post();
+				return worker_error;
+			}
+			slot->frame_index = p_frame_index;
+			slot->end_of_stream = p_end_of_stream;
+			slot->ready_usec = copy_end;
+			slot->state = FrameSlot::State::READY;
+			ready_slot_indices.push_back(p_slot_index);
+			ready_depth = static_cast<int>(ready_slot_indices.size());
+			if (ready_depth > max_ready_queue_depth) {
+				max_ready_queue_depth = ready_depth;
+			}
+			submitted_frames++;
+			if (p_end_of_stream) {
+				accepting_frames = false;
+			}
 		}
-		uint64_t rga_end = OS::get_singleton()->get_ticks_usec();
-		error = mpp_encoder.encode_frame(p_frame_index, p_end_of_stream, r_error);
-		if (error != OK) {
-			return error;
+		gpu_copy_samples.push_back(copy_end - copy_start);
+		ready_slots_available.post();
+		if (submitted_frames == 1 || submitted_frames % fps == 0) {
+			print_line(vformat("OPENVT_DMABUF_SUBMIT frame=%d slot=%d source_texture=%d gpu_copy_ms=%.3f ready_depth=%d",
+					submitted_frames, p_slot_index, static_cast<uint64_t>(p_source_texture),
+					static_cast<double>(copy_end - copy_start) / 1000.0, ready_depth));
 		}
-		uint64_t mpp_end = OS::get_singleton()->get_ticks_usec();
+		return OK;
+	}
 
-		gpu_copy_total_usec += copy_end - copy_start;
-		rga_total_usec += rga_end - copy_end;
-		mpp_total_usec += mpp_end - rga_end;
-		captured_frames++;
-		if (captured_frames == 1 || captured_frames % fps == 0) {
-			print_line(vformat("OPENVT_DMABUF_FRAME frame=%d source_texture=%d gpu_copy_ms=%.3f rga_ms=%.3f mpp_ms=%.3f",
-					captured_frames, static_cast<uint64_t>(p_source_texture),
-					static_cast<double>(copy_end - copy_start) / 1000.0,
-					static_cast<double>(rga_end - copy_end) / 1000.0,
-					static_cast<double>(mpp_end - rga_end) / 1000.0));
+	void cancel_reserved_slot(int p_slot_index) {
+		release_reserved_slot(p_slot_index);
+	}
+
+	Error finish(String &r_error) {
+		if (!initialized || finished) {
+			return OK;
+		}
+		{
+			MutexLock lock(queue_mutex);
+			accepting_frames = false;
+			stop_requested = true;
+		}
+		ready_slots_available.post();
+		if (media_thread.is_started()) {
+			media_thread.wait_to_finish();
+		}
+		finished = true;
+
+		MutexLock lock(queue_mutex);
+		if (worker_error != OK) {
+			r_error = worker_error_message;
+			return worker_error;
+		}
+		if (encoded_frames != submitted_frames) {
+			r_error = vformat("encoded frame count mismatch: submitted=%d encoded=%d", submitted_frames,
+					encoded_frames);
+			return FAILED;
+		}
+		if (submitted_frames != total_frames) {
+			r_error = vformat("submitted frame count mismatch: expected=%d actual=%d", total_frames,
+					submitted_frames);
+			return FAILED;
+		}
+		if (!end_of_stream_encoded) {
+			r_error = "MPP end-of-stream frame was not encoded";
+			return FAILED;
 		}
 		return OK;
 	}
 
 	void shutdown() {
-		if (!initialized && source_framebuffer == 0) {
-			return;
+		if (media_thread.is_started()) {
+			{
+				MutexLock lock(queue_mutex);
+				accepting_frames = false;
+				stop_requested = true;
+			}
+			ready_slots_available.post();
+			media_thread.wait_to_finish();
 		}
-
-		uint64_t end_usec = OS::get_singleton()->get_ticks_usec();
-		if (captured_frames > 0) {
-			double elapsed_ms = static_cast<double>(end_usec - start_usec) / 1000.0;
-			print_line(vformat("OPENVT_DMABUF_RESULT frames=%d total_ms=%.3f throughput_fps=%.3f gpu_copy_avg_ms=%.3f rga_avg_ms=%.3f mpp_avg_ms=%.3f encoded_bytes=%d",
-					captured_frames, elapsed_ms, static_cast<double>(captured_frames) * 1000.0 / elapsed_ms,
-					static_cast<double>(gpu_copy_total_usec) / captured_frames / 1000.0,
-					static_cast<double>(rga_total_usec) / captured_frames / 1000.0,
-					static_cast<double>(mpp_total_usec) / captured_frames / 1000.0,
-					static_cast<uint64_t>(mpp_encoder.get_encoded_bytes())));
-		}
-
+		print_results();
 		mpp_encoder.shutdown();
-		rga_converter.shutdown();
 		if (source_framebuffer != 0) {
 			glDeleteFramebuffers(1, &source_framebuffer);
 			source_framebuffer = 0;
 		}
-		dma_target.shutdown();
+		for (int i = 0; i < FRAME_SLOT_COUNT; i++) {
+			if (slots[i] != nullptr) {
+				memdelete(slots[i]);
+				slots[i] = nullptr;
+			}
+		}
 		initialized = false;
 	}
 
 private:
+	static void media_thread_entry(void *p_userdata) {
+		OpenVTDmaBufPipeline *pipeline = static_cast<OpenVTDmaBufPipeline *>(p_userdata);
+		pipeline->media_thread_main();
+	}
+
+	void media_thread_main() {
+		Thread::set_name("OpenVT RGA MPP");
+		while (true) {
+			ready_slots_available.wait();
+			int slot_index = -1;
+			{
+				MutexLock lock(queue_mutex);
+				if (!ready_slot_indices.empty()) {
+					slot_index = ready_slot_indices.front();
+					ready_slot_indices.pop_front();
+					slots[slot_index]->state = FrameSlot::State::CONSUMING;
+				} else if (stop_requested) {
+					break;
+				}
+			}
+			if (slot_index < 0) {
+				continue;
+			}
+
+			FrameSlot *slot = slots[slot_index];
+			uint64_t media_start = OS::get_singleton()->get_ticks_usec();
+			uint64_t queue_wait = media_start - slot->ready_usec;
+			String error_message;
+			Error error = slot->get_rga_converter().convert(error_message);
+			uint64_t rga_end = OS::get_singleton()->get_ticks_usec();
+			if (error == OK) {
+				error = mpp_encoder.encode_frame(slot->frame_index, slot->end_of_stream, error_message);
+			}
+			uint64_t mpp_end = OS::get_singleton()->get_ticks_usec();
+
+			queue_wait_samples.push_back(queue_wait);
+			rga_samples.push_back(rga_end - media_start);
+			if (error == OK) {
+				mpp_samples.push_back(mpp_end - rga_end);
+				media_samples.push_back(mpp_end - media_start);
+				encoded_frames++;
+				if (slot->end_of_stream) {
+					end_of_stream_encoded = true;
+				}
+				release_consumed_slot(slot_index);
+				continue;
+			}
+
+			set_worker_error(error, error_message, slot_index);
+			break;
+		}
+	}
+
+	void set_worker_error(Error p_error, const String &p_message, int p_current_slot) {
+		int released_slots = 0;
+		{
+			MutexLock lock(queue_mutex);
+			if (worker_error == OK) {
+				worker_error = p_error;
+				worker_error_message = p_message;
+			}
+			accepting_frames = false;
+			stop_requested = true;
+			release_slot_locked(p_current_slot);
+			released_slots++;
+			while (!ready_slot_indices.empty()) {
+				int slot_index = ready_slot_indices.front();
+				ready_slot_indices.pop_front();
+				release_slot_locked(slot_index);
+				released_slots++;
+			}
+		}
+		free_slots_available.post(released_slots + FRAME_SLOT_COUNT);
+	}
+
+	void release_consumed_slot(int p_slot_index) {
+		{
+			MutexLock lock(queue_mutex);
+			release_slot_locked(p_slot_index);
+		}
+		free_slots_available.post();
+	}
+
+	void release_reserved_slot(int p_slot_index) {
+		if (p_slot_index < 0 || p_slot_index >= FRAME_SLOT_COUNT) {
+			return;
+		}
+		{
+			MutexLock lock(queue_mutex);
+			FrameSlot *slot = slots[p_slot_index];
+			if (slot == nullptr || slot->state != FrameSlot::State::RESERVED) {
+				return;
+			}
+			release_slot_locked(p_slot_index);
+		}
+		free_slots_available.post();
+	}
+
+	void release_slot_locked(int p_slot_index) {
+		FrameSlot *slot = slots[p_slot_index];
+		slot->state = FrameSlot::State::FREE;
+		slot->frame_index = -1;
+		slot->end_of_stream = false;
+		slot->ready_usec = 0;
+		free_slot_indices.push_back(p_slot_index);
+	}
+
 	void restore_gl_state(GLint p_read_framebuffer, GLint p_draw_framebuffer, GLint p_texture) {
 		glBindFramebuffer(GL_READ_FRAMEBUFFER, static_cast<GLuint>(p_read_framebuffer));
 		glBindFramebuffer(GL_DRAW_FRAMEBUFFER, static_cast<GLuint>(p_draw_framebuffer));
 		glBindTexture(GL_TEXTURE_2D, static_cast<GLuint>(p_texture));
+	}
+
+	static double average_ms(const std::vector<uint64_t> &p_samples) {
+		if (p_samples.empty()) {
+			return 0.0;
+		}
+		uint64_t total = 0;
+		for (uint64_t sample : p_samples) {
+			total += sample;
+		}
+		return static_cast<double>(total) / static_cast<double>(p_samples.size()) / 1000.0;
+	}
+
+	static double percentile_ms(const std::vector<uint64_t> &p_samples, size_t p_percentile) {
+		if (p_samples.empty()) {
+			return 0.0;
+		}
+		std::vector<uint64_t> sorted = p_samples;
+		std::sort(sorted.begin(), sorted.end());
+		size_t index = (sorted.size() * p_percentile + 99) / 100;
+		if (index > 0) {
+			index--;
+		}
+		if (index >= sorted.size()) {
+			index = sorted.size() - 1;
+		}
+		return static_cast<double>(sorted[index]) / 1000.0;
+	}
+
+	static double maximum_ms(const std::vector<uint64_t> &p_samples) {
+		if (p_samples.empty()) {
+			return 0.0;
+		}
+		return static_cast<double>(*std::max_element(p_samples.begin(), p_samples.end())) / 1000.0;
+	}
+
+	void print_stage_metrics(const String &p_stage, const std::vector<uint64_t> &p_samples) const {
+		print_line(vformat("OPENVT_DMABUF_STAGE stage=%s samples=%d avg_ms=%.3f p50_ms=%.3f p95_ms=%.3f p99_ms=%.3f max_ms=%.3f",
+				p_stage, static_cast<uint64_t>(p_samples.size()), average_ms(p_samples),
+				percentile_ms(p_samples, 50), percentile_ms(p_samples, 95), percentile_ms(p_samples, 99),
+				maximum_ms(p_samples)));
+	}
+
+	void print_results() {
+		if (results_printed || start_usec == 0) {
+			return;
+		}
+		results_printed = true;
+		uint64_t end_usec = OS::get_singleton()->get_ticks_usec();
+		double elapsed_ms = static_cast<double>(end_usec - start_usec) / 1000.0;
+		double throughput_fps = 0.0;
+		if (elapsed_ms > 0.0) {
+			throughput_fps = static_cast<double>(encoded_frames) * 1000.0 / elapsed_ms;
+		}
+		print_line(vformat("OPENVT_DMABUF_RESULT submitted=%d encoded=%d total_ms=%.3f throughput_fps=%.3f backpressure_count=%d max_ready_depth=%d encoded_bytes=%d",
+				submitted_frames, encoded_frames, elapsed_ms, throughput_fps, backpressure_count,
+				max_ready_queue_depth, static_cast<uint64_t>(mpp_encoder.get_encoded_bytes())));
+		print_stage_metrics("producer_wait", producer_wait_samples);
+		print_stage_metrics("gpu_copy", gpu_copy_samples);
+		print_stage_metrics("queue_wait", queue_wait_samples);
+		print_stage_metrics("rga", rga_samples);
+		print_stage_metrics("mpp", mpp_samples);
+		print_stage_metrics("media", media_samples);
 	}
 
 	int width = 0;
@@ -653,17 +1012,34 @@ private:
 	int nv12_stride = 0;
 	int nv12_vertical_stride = 0;
 	bool initialized = false;
+	bool finished = false;
+	bool accepting_frames = false;
+	bool stop_requested = false;
+	bool end_of_stream_encoded = false;
+	bool results_printed = false;
 	GLuint source_framebuffer = 0;
-	DmaBuffer rgba_buffer;
 	DmaBuffer nv12_buffer;
-	ExternalDmaBufTarget dma_target;
-	RgaConverter rga_converter;
+	FrameSlot *slots[FRAME_SLOT_COUNT] = {};
 	MppEncoder mpp_encoder;
+	Thread media_thread;
+	BinaryMutex queue_mutex;
+	Semaphore free_slots_available;
+	Semaphore ready_slots_available;
+	std::deque<int> free_slot_indices;
+	std::deque<int> ready_slot_indices;
+	Error worker_error = OK;
+	String worker_error_message;
 	uint64_t start_usec = 0;
-	uint64_t gpu_copy_total_usec = 0;
-	uint64_t rga_total_usec = 0;
-	uint64_t mpp_total_usec = 0;
-	int captured_frames = 0;
+	int submitted_frames = 0;
+	int encoded_frames = 0;
+	int backpressure_count = 0;
+	int max_ready_queue_depth = 0;
+	std::vector<uint64_t> producer_wait_samples;
+	std::vector<uint64_t> gpu_copy_samples;
+	std::vector<uint64_t> queue_wait_samples;
+	std::vector<uint64_t> rga_samples;
+	std::vector<uint64_t> mpp_samples;
+	std::vector<uint64_t> media_samples;
 };
 
 OpenVTDmaBufCapture::~OpenVTDmaBufCapture() {
@@ -717,11 +1093,30 @@ Error OpenVTDmaBufCapture::capture_frame(RID p_viewport, int p_frame_index, bool
 		return ERR_INVALID_PARAMETER;
 	}
 
+	if (pipeline == nullptr) {
+		operation_error = OK;
+		operation_error_message = String();
+		RenderingServer::get_singleton()->call_on_render_thread(
+				callable_mp(this, &OpenVTDmaBufCapture::_initialize_pipeline_render_thread));
+		operation_finished.wait();
+		if (operation_error != OK) {
+			return operation_error;
+		}
+	}
+
+	int slot_index = -1;
+	String reserve_error_message;
+	Error reserve_error = pipeline->reserve_slot(slot_index, reserve_error_message);
+	if (reserve_error != OK) {
+		operation_error_message = reserve_error_message;
+		return reserve_error;
+	}
+
 	operation_error = OK;
 	operation_error_message = String();
 	RenderingServer::get_singleton()->call_on_render_thread(
 			callable_mp(this, &OpenVTDmaBufCapture::_capture_frame_render_thread)
-					.bind(p_viewport, p_frame_index, p_end_of_stream));
+					.bind(p_viewport, slot_index, p_frame_index, p_end_of_stream));
 	operation_finished.wait();
 	return operation_error;
 }
@@ -748,36 +1143,47 @@ String OpenVTDmaBufCapture::get_last_error() const {
 	return operation_error_message;
 }
 
-void OpenVTDmaBufCapture::_capture_frame_render_thread(RID p_viewport, int p_frame_index, bool p_end_of_stream) {
+void OpenVTDmaBufCapture::_initialize_pipeline_render_thread() {
 	String error_message;
-	if (pipeline == nullptr) {
-		pipeline = memnew(OpenVTDmaBufPipeline);
-		Error init_error = pipeline->initialize(output_path, width, height, fps, total_frames, error_message);
-		if (init_error != OK) {
-			memdelete(pipeline);
-			pipeline = nullptr;
-			_complete_operation(init_error, error_message);
-			return;
-		}
+	if (pipeline != nullptr) {
+		_complete_operation(OK, String());
+		return;
 	}
+	pipeline = memnew(OpenVTDmaBufPipeline);
+	Error init_error = pipeline->initialize(output_path, width, height, fps, total_frames, error_message);
+	if (init_error != OK) {
+		memdelete(pipeline);
+		pipeline = nullptr;
+		_complete_operation(init_error, error_message);
+		return;
+	}
+	_complete_operation(OK, String());
+}
 
+void OpenVTDmaBufCapture::_capture_frame_render_thread(RID p_viewport, int p_slot_index, int p_frame_index,
+		bool p_end_of_stream) {
+	String error_message;
 	RID texture = RenderingServer::get_singleton()->viewport_get_texture(p_viewport);
 	if (!texture.is_valid()) {
+		pipeline->cancel_reserved_slot(p_slot_index);
 		_complete_operation(ERR_INVALID_DATA, "Godot SubViewport render-target texture RID is invalid");
 		return;
 	}
 	uint64_t native_handle = RenderingServer::get_singleton()->texture_get_native_handle(texture, false);
-	Error capture_error = pipeline->capture(static_cast<GLuint>(native_handle), p_frame_index,
+	Error capture_error = pipeline->capture(static_cast<GLuint>(native_handle), p_slot_index, p_frame_index,
 			p_end_of_stream, error_message);
 	_complete_operation(capture_error, error_message);
 }
 
 void OpenVTDmaBufCapture::_finish_render_thread() {
+	Error finish_error = OK;
+	String error_message;
 	if (pipeline != nullptr) {
+		finish_error = pipeline->finish(error_message);
 		memdelete(pipeline);
 		pipeline = nullptr;
 	}
-	_complete_operation(OK, String());
+	_complete_operation(finish_error, error_message);
 }
 
 void OpenVTDmaBufCapture::_complete_operation(Error p_error, const String &p_message) {
