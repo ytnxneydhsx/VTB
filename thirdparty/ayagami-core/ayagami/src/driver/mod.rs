@@ -419,6 +419,7 @@ pub struct Driver<T: Model> {
     part: ItemState<T, PartState>,
     order_changed: bool,
     perftest_mode: bool,
+    buffer_reuse_enabled: bool,
 }
 
 #[derive(Default, Debug)]
@@ -499,7 +500,15 @@ impl<T: Model> Driver<T> {
             root_drawnodes: Default::default(),
             order_changed: true,
             perftest_mode: false,
+            buffer_reuse_enabled: false,
         }
+    }
+
+    /// Reuse vertex buffers owned by cached driver states when a state is
+    /// recalculated. This changes allocation behavior only; interpolation and
+    /// deformation order remain unchanged.
+    pub fn set_buffer_reuse_enabled(&mut self, enabled: bool) {
+        self.buffer_reuse_enabled = enabled;
     }
 
     pub fn apply_pose(&mut self, pose: &pose::Pose) {
@@ -709,7 +718,7 @@ impl<T: Model> Driver<T> {
                     st.affine = r.affine * st.affine;
                 }
                 DeformerSubState::Warp(w) => {
-                    let mut p = vec![
+                    let mut p = [
                         st.affine.translation,
                         st.affine.translation + vec2(0., -0.1),
                     ];
@@ -735,6 +744,7 @@ impl<T: Model> Driver<T> {
         deformer: &T::Deformer<'model>,
         warp: <T::Deformer<'model> as Deformer<'model>>::WarpRef<'model>,
         visible: bool,
+        mut vertices: Vec<Coord>,
     ) -> WarpState {
         let Some((forms, weights)) = self.get_form_set(
             model,
@@ -752,7 +762,6 @@ impl<T: Model> Driver<T> {
         let arrays: Vec<&[Coord]> = forms.into_iter().map(|f| f.vertices()).collect();
 
         let form = blend(&values, &weights);
-        let mut vertices = Vec::new();
         vertices.resize(warp.vertex_count(), Vec2::ZERO);
 
         blend_arrays(&arrays, &mut vertices, &weights);
@@ -875,9 +884,25 @@ impl<T: Model> Driver<T> {
             st.updated
         );
 
+        let reusable_warp_vertices = if self.buffer_reuse_enabled {
+            let st = self.deformer.get_mut(deformer.uid());
+            match st.sub.take() {
+                Some(DeformerSubState::Warp(warp_state)) => warp_state.vertices,
+                _ => Vec::new(),
+            }
+        } else {
+            Vec::new()
+        };
+
         let new_state = match deformer.typed() {
             TypedDeformer::Warp(w) => {
-                DeformerSubState::Warp(self.calc_warp(model, deformer, w, visible))
+                DeformerSubState::Warp(self.calc_warp(
+                    model,
+                    deformer,
+                    w,
+                    visible,
+                    reusable_warp_vertices,
+                ))
             }
             TypedDeformer::Rotation(r) => {
                 DeformerSubState::Rot(self.calc_rot(model, deformer, r, visible))
@@ -1221,12 +1246,22 @@ impl<T: Model> Driver<T> {
             // Short circuit if ArtMesh is invisible
             if !visible {
                 debug!("ArtMesh #{} {}: Invisible", artmesh.uid(), artmesh.id());
-                let st = ArtMeshState {
-                    initialized: true,
-                    updated: true,
-                    ..Default::default()
-                };
-                self.artmesh.insert(artmesh.uid(), st);
+                if self.buffer_reuse_enabled {
+                    let st = self.artmesh.get_mut(artmesh.uid());
+                    st.initialized = true;
+                    st.updated = true;
+                    st.visual = Default::default();
+                    st.depth = 0;
+                    st.vertices.clear();
+                    st.glued_vertices = None;
+                } else {
+                    let st = ArtMeshState {
+                        initialized: true,
+                        updated: true,
+                        ..Default::default()
+                    };
+                    self.artmesh.insert(artmesh.uid(), st);
+                }
                 continue;
             }
 
@@ -1238,13 +1273,23 @@ impl<T: Model> Driver<T> {
             ) else {
                 // Out of range, return default (invisible) state
                 debug!("ArtMesh #{} {}: Out of range", artmesh.uid(), artmesh.id());
-                let st = ArtMeshState {
-                    initialized: true,
-                    updated: true,
-                    depth: old_depth,
-                    ..Default::default()
-                };
-                self.artmesh.insert(artmesh.uid(), st);
+                if self.buffer_reuse_enabled {
+                    let st = self.artmesh.get_mut(artmesh.uid());
+                    st.initialized = true;
+                    st.updated = true;
+                    st.visual = Default::default();
+                    st.depth = old_depth;
+                    st.vertices.clear();
+                    st.glued_vertices = None;
+                } else {
+                    let st = ArtMeshState {
+                        initialized: true,
+                        updated: true,
+                        depth: old_depth,
+                        ..Default::default()
+                    };
+                    self.artmesh.insert(artmesh.uid(), st);
+                }
                 continue;
             };
 
@@ -1254,7 +1299,13 @@ impl<T: Model> Driver<T> {
             let arrays: Vec<&[Coord]> = forms.into_iter().map(|f| f.vertices()).collect();
 
             let form = blend(&values, &weights);
-            let mut vertices = Vec::new();
+            let mut vertices = if self.buffer_reuse_enabled {
+                let st = self.artmesh.get_mut(artmesh.uid());
+                st.glued_vertices = None;
+                std::mem::take(&mut st.vertices)
+            } else {
+                Vec::new()
+            };
             vertices.resize(artmesh.vertex_count() as usize, Vec2::ZERO);
 
             blend_arrays(&arrays, &mut vertices, &weights);
@@ -1275,15 +1326,25 @@ impl<T: Model> Driver<T> {
             visual.opacity *= part_opacity;
 
             debug!("Updated ArtMesh #{}: {}", artmesh.uid(), artmesh.id());
-            let st = ArtMeshState {
-                initialized: true,
-                updated: true,
-                visual,
-                depth,
-                vertices,
-                glued_vertices: None,
-            };
-            self.artmesh.insert(artmesh.uid(), st);
+            if self.buffer_reuse_enabled {
+                let st = self.artmesh.get_mut(artmesh.uid());
+                st.initialized = true;
+                st.updated = true;
+                st.visual = visual;
+                st.depth = depth;
+                st.vertices = vertices;
+                st.glued_vertices = None;
+            } else {
+                let st = ArtMeshState {
+                    initialized: true,
+                    updated: true,
+                    visual,
+                    depth,
+                    vertices,
+                    glued_vertices: None,
+                };
+                self.artmesh.insert(artmesh.uid(), st);
+            }
         }
 
         // Propagate glue invalidation forwards and backwards
