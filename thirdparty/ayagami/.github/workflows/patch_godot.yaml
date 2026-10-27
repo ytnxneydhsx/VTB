@@ -1,0 +1,64 @@
+name: Build Patched Godot
+on:
+  push:
+    paths:
+      - "patches/*"
+  workflow_dispatch:
+
+env:
+  GODOT_VERSION: 4.7.1
+
+jobs:
+  patch:
+    name: Build Godot ${{ matrix.platform }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    strategy:
+      matrix:
+        include:
+          - platform: linuxbsd
+            editor_flags: debug_symbols=no use_llvm=yes
+    steps:
+      - name: Checkout godot engine
+        uses: actions/checkout@v6
+        with:
+          repository: godotengine/godot
+          ref: "${{ env.GODOT_VERSION }}-stable"
+          submodules: recursive
+      - name: Checkout patches
+        uses: actions/checkout@v6
+        with:
+          path: ./ayagami
+      - name: Apply patches
+        shell: bash
+        run: |
+          for file in ./ayagami/patches/*; do
+            git apply < $file
+          done
+      - name: Setup Dependencies
+        uses: ./.github/actions/godot-deps
+      - name: Compile editor
+        uses: ./.github/actions/godot-build
+        with:
+          platform: ${{ matrix.platform }}
+          target: editor
+          scons-flags: ${{ matrix.editor_flags }}
+      - name: Compile release template
+        uses: ./.github/actions/godot-build
+        with:
+          platform: ${{ matrix.platform }}
+          target: template_release
+      - name: Upload artifact
+        uses: ./.github/actions/upload-artifact
+        with:
+          name: ${{ matrix.platform }}
+      - uses: ncipollo/release-action@v1
+        with:
+          artifacts: bin/*
+          allowUpdates: true
+          name: Godot ${{ env.GODOT_VERSION }} Ayagami
+          body: Prepatched distribution of Godot supporting features required of Ayagami.
+          tag: godot
+          commit: main
+          prerelease: true
