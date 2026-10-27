@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::Instant;
 
 use ayagami::meta::DisplayInfo;
 use godot::classes::file_access::ModeFlags;
@@ -74,6 +75,15 @@ struct MaskRenderCache {
     dependent_meshes: Vec<Gd<MeshInstance2D>>,
 }
 
+#[derive(Default)]
+struct FrameProfile {
+    frames: u64,
+    drive_ns: u128,
+    mesh_submit_ns: u128,
+    masks_ns: u128,
+    reorder_ns: u128,
+}
+
 #[derive(GodotClass)]
 #[class(tool, init, base = Node2D)]
 pub struct AyagamiModel {
@@ -97,6 +107,8 @@ pub struct AyagamiModel {
     masks: Vec<MaskRenderCache>,
     state_cache_enabled: bool,
     driver_buffer_reuse_enabled: bool,
+    profile_enabled: bool,
+    frame_profile: FrameProfile,
     mask_layout_dirty: bool,
     last_mask_base_scale: Option<f32>,
     last_mask_resolution: i32,
@@ -161,14 +173,16 @@ impl AyagamiModel {
         self.state_cache_enabled = env_flag("OPENVT_AYAGAMI_STATE_CACHE", true);
         self.driver_buffer_reuse_enabled =
             env_flag("OPENVT_AYAGAMI_DRIVER_BUFFER_REUSE", true);
+        self.profile_enabled = env_flag("OPENVT_AYAGAMI_PROFILE", false);
 
         let mut driver = Driver::new(&*model.as_ref());
         driver.set_buffer_reuse_enabled(self.driver_buffer_reuse_enabled);
 
         godot_print!(
-            "AYAGAMI_OPTIMIZATION state_cache={} driver_buffer_reuse={}",
+            "AYAGAMI_OPTIMIZATION state_cache={} driver_buffer_reuse={} profile={}",
             self.state_cache_enabled,
             self.driver_buffer_reuse_enabled,
+            self.profile_enabled,
         );
 
         let loaded = LoadedModel { model, driver };
@@ -200,12 +214,52 @@ impl AyagamiModel {
         }
     }
 
+    fn drive_model(&mut self) {
+        let md = self.model.as_mut().unwrap();
+        md.driver.drive(md.model.as_ref());
+    }
+
+    fn record_frame_profile(
+        &mut self,
+        drive_ns: u128,
+        mesh_submit_ns: u128,
+        masks_ns: u128,
+        reorder_ns: u128,
+    ) {
+        const REPORT_INTERVAL: u64 = 600;
+
+        self.frame_profile.frames += 1;
+        self.frame_profile.drive_ns += drive_ns;
+        self.frame_profile.mesh_submit_ns += mesh_submit_ns;
+        self.frame_profile.masks_ns += masks_ns;
+        self.frame_profile.reorder_ns += reorder_ns;
+
+        if self.frame_profile.frames < REPORT_INTERVAL {
+            return;
+        }
+
+        let frames = self.frame_profile.frames as f64;
+        let ns_to_ms = |ns: u128| ns as f64 / frames / 1_000_000.0;
+        let pipeline_ns = self.frame_profile.drive_ns
+            + self.frame_profile.mesh_submit_ns
+            + self.frame_profile.masks_ns
+            + self.frame_profile.reorder_ns;
+        godot_print!(
+            "AYAGAMI_PROFILE frames={} drive_ms={:.6} mesh_submit_ms={:.6} masks_ms={:.6} reorder_ms={:.6} pipeline_ms={:.6}",
+            self.frame_profile.frames,
+            ns_to_ms(self.frame_profile.drive_ns),
+            ns_to_ms(self.frame_profile.mesh_submit_ns),
+            ns_to_ms(self.frame_profile.masks_ns),
+            ns_to_ms(self.frame_profile.reorder_ns),
+            ns_to_ms(pipeline_ns),
+        );
+        self.frame_profile = FrameProfile::default();
+    }
+
     fn update_meshes(&mut self, force: bool) {
         let state_cache_enabled = self.state_cache_enabled;
         let mut mask_layout_changed = force;
         let md = self.model.as_mut().unwrap();
-        let m = md.model.as_ref();
-        md.driver.drive(m);
 
         let px_size = md.model.canvas_properties().scale;
 
@@ -498,6 +552,7 @@ impl INode2D for AyagamiModel {
             self.mask_layout_dirty = true;
             self.last_mask_base_scale = None;
 
+            self.drive_model();
             self.update_meshes(true);
             self.update_masks();
             self.reorder_meshes();
@@ -559,9 +614,36 @@ impl INode2D for AyagamiModel {
             self.model.as_mut().unwrap().driver.apply_pose(&output_pose);
             self.last_pose = Some(output_pose.clone());
 
+            let drive_start = self.profile_enabled.then(Instant::now);
+            self.drive_model();
+            let drive_ns = drive_start.map(|start| start.elapsed().as_nanos()).unwrap_or(0);
+
+            let mesh_submit_start = self.profile_enabled.then(Instant::now);
             self.update_meshes(false);
+            let mesh_submit_ns = mesh_submit_start
+                .map(|start| start.elapsed().as_nanos())
+                .unwrap_or(0);
+
+            let masks_start = self.profile_enabled.then(Instant::now);
             self.update_masks();
+            let masks_ns = masks_start
+                .map(|start| start.elapsed().as_nanos())
+                .unwrap_or(0);
+
+            let reorder_start = self.profile_enabled.then(Instant::now);
             self.reorder_meshes();
+            let reorder_ns = reorder_start
+                .map(|start| start.elapsed().as_nanos())
+                .unwrap_or(0);
+
+            if self.profile_enabled {
+                self.record_frame_profile(
+                    drive_ns,
+                    mesh_submit_ns,
+                    masks_ns,
+                    reorder_ns,
+                );
+            }
         }
     }
 
