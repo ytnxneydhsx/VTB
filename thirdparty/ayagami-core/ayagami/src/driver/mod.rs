@@ -420,6 +420,7 @@ pub struct Driver<T: Model> {
     order_changed: bool,
     perftest_mode: bool,
     buffer_reuse_enabled: bool,
+    updated_artmeshes: Vec<T::Uid>,
 }
 
 #[derive(Default, Debug)]
@@ -501,6 +502,7 @@ impl<T: Model> Driver<T> {
             order_changed: true,
             perftest_mode: false,
             buffer_reuse_enabled: false,
+            updated_artmeshes: Vec::new(),
         }
     }
 
@@ -509,6 +511,12 @@ impl<T: Model> Driver<T> {
     /// deformation order remain unchanged.
     pub fn set_buffer_reuse_enabled(&mut self, enabled: bool) {
         self.buffer_reuse_enabled = enabled;
+    }
+
+    /// ArtMeshes whose geometry or visual state changed during the latest
+    /// `drive()` call. Glue invalidation is included in this list.
+    pub fn updated_artmeshes(&self) -> &[T::Uid] {
+        &self.updated_artmeshes
     }
 
     pub fn apply_pose(&mut self, pose: &pose::Pose) {
@@ -1048,6 +1056,7 @@ impl<T: Model> Driver<T> {
 
     pub fn drive(&mut self, model: &T) {
         self.order_changed = false;
+        self.updated_artmeshes.clear();
 
         for param in model.params() {
             let pstate = self.param.lookup(param.uid());
@@ -1262,6 +1271,7 @@ impl<T: Model> Driver<T> {
                     };
                     self.artmesh.insert(artmesh.uid(), st);
                 }
+                self.updated_artmeshes.push(artmesh.uid());
                 continue;
             }
 
@@ -1290,6 +1300,7 @@ impl<T: Model> Driver<T> {
                     };
                     self.artmesh.insert(artmesh.uid(), st);
                 }
+                self.updated_artmeshes.push(artmesh.uid());
                 continue;
             };
 
@@ -1345,6 +1356,7 @@ impl<T: Model> Driver<T> {
                 };
                 self.artmesh.insert(artmesh.uid(), st);
             }
+            self.updated_artmeshes.push(artmesh.uid());
         }
 
         // Propagate glue invalidation forwards and backwards
@@ -1361,6 +1373,7 @@ impl<T: Model> Driver<T> {
                     if !st.updated {
                         progress = true;
                         st.updated = true;
+                        self.updated_artmeshes.push(uid_2);
                     }
                     st.glued_vertices = None;
                 }
@@ -1369,6 +1382,7 @@ impl<T: Model> Driver<T> {
                     if !st.updated {
                         progress = true;
                         st.updated = true;
+                        self.updated_artmeshes.push(uid_1);
                     }
                     st.glued_vertices = None;
                 }

@@ -1,0 +1,6 @@
+[gd_scene load_steps=2 format=3]
+
+[ext_resource path="res://experiments/ayagami-updated-mesh-list-benchmark/updated_mesh_list_benchmark.gd" type="Script" id="1_benchmark"]
+
+[node name="UpdatedMeshListBenchmark" type="Node"]
+script = ExtResource("1_benchmark")

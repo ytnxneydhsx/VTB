@@ -78,6 +78,7 @@ struct MaskRenderCache {
 #[derive(Default)]
 struct FrameProfile {
     frames: u64,
+    mesh_candidates: u64,
     drive_ns: u128,
     mesh_submit_ns: u128,
     masks_ns: u128,
@@ -104,11 +105,15 @@ pub struct AyagamiModel {
 
     mesh_group: Option<Gd<Node2D>>,
     meshes: HashMap<u32, MeshRenderCache>,
+    all_mesh_uids: Vec<u32>,
+    updated_mesh_uids: Vec<u32>,
     masks: Vec<MaskRenderCache>,
     state_cache_enabled: bool,
     driver_buffer_reuse_enabled: bool,
+    updated_mesh_list_enabled: bool,
     profile_enabled: bool,
     frame_profile: FrameProfile,
+    last_mesh_candidates: u64,
     mask_layout_dirty: bool,
     last_mask_base_scale: Option<f32>,
     last_mask_resolution: i32,
@@ -173,15 +178,17 @@ impl AyagamiModel {
         self.state_cache_enabled = env_flag("OPENVT_AYAGAMI_STATE_CACHE", true);
         self.driver_buffer_reuse_enabled =
             env_flag("OPENVT_AYAGAMI_DRIVER_BUFFER_REUSE", true);
+        self.updated_mesh_list_enabled = env_flag("OPENVT_AYAGAMI_UPDATED_MESH_LIST", true);
         self.profile_enabled = env_flag("OPENVT_AYAGAMI_PROFILE", false);
 
         let mut driver = Driver::new(&*model.as_ref());
         driver.set_buffer_reuse_enabled(self.driver_buffer_reuse_enabled);
 
         godot_print!(
-            "AYAGAMI_OPTIMIZATION state_cache={} driver_buffer_reuse={} profile={}",
+            "AYAGAMI_OPTIMIZATION state_cache={} driver_buffer_reuse={} updated_mesh_list={} profile={}",
             self.state_cache_enabled,
             self.driver_buffer_reuse_enabled,
+            self.updated_mesh_list_enabled,
             self.profile_enabled,
         );
 
@@ -217,6 +224,9 @@ impl AyagamiModel {
     fn drive_model(&mut self) {
         let md = self.model.as_mut().unwrap();
         md.driver.drive(md.model.as_ref());
+        self.updated_mesh_uids.clear();
+        self.updated_mesh_uids
+            .extend_from_slice(md.driver.updated_artmeshes());
     }
 
     fn record_frame_profile(
@@ -229,6 +239,7 @@ impl AyagamiModel {
         const REPORT_INTERVAL: u64 = 600;
 
         self.frame_profile.frames += 1;
+        self.frame_profile.mesh_candidates += self.last_mesh_candidates;
         self.frame_profile.drive_ns += drive_ns;
         self.frame_profile.mesh_submit_ns += mesh_submit_ns;
         self.frame_profile.masks_ns += masks_ns;
@@ -245,8 +256,9 @@ impl AyagamiModel {
             + self.frame_profile.masks_ns
             + self.frame_profile.reorder_ns;
         godot_print!(
-            "AYAGAMI_PROFILE frames={} drive_ms={:.6} mesh_submit_ms={:.6} masks_ms={:.6} reorder_ms={:.6} pipeline_ms={:.6}",
+            "AYAGAMI_PROFILE frames={} mesh_candidates_avg={:.3} drive_ms={:.6} mesh_submit_ms={:.6} masks_ms={:.6} reorder_ms={:.6} pipeline_ms={:.6}",
             self.frame_profile.frames,
+            self.frame_profile.mesh_candidates as f64 / frames,
             ns_to_ms(self.frame_profile.drive_ns),
             ns_to_ms(self.frame_profile.mesh_submit_ns),
             ns_to_ms(self.frame_profile.masks_ns),
@@ -259,19 +271,31 @@ impl AyagamiModel {
     fn update_meshes(&mut self, force: bool) {
         let state_cache_enabled = self.state_cache_enabled;
         let mut mask_layout_changed = force;
+        let use_updated_mesh_list = self.updated_mesh_list_enabled && !force;
+        self.last_mesh_candidates = if use_updated_mesh_list {
+            self.updated_mesh_uids.len() as u64
+        } else {
+            self.all_mesh_uids.len() as u64
+        };
+        let selected_uids = if use_updated_mesh_list {
+            &self.updated_mesh_uids
+        } else {
+            &self.all_mesh_uids
+        };
         let md = self.model.as_mut().unwrap();
 
         let px_size = md.model.canvas_properties().scale;
 
         // update mesh vertices and submit visual state only when it changed
-        for (uid, cache) in self.meshes.iter_mut() {
+        for uid in selected_uids.iter().copied() {
+            let cache = self.meshes.get_mut(&uid).unwrap();
             let mut mesh = if state_cache_enabled {
                 cache.mesh.clone()
             } else {
                 cache.instance.get_mesh().unwrap().cast::<ArrayMesh>()
             };
             let mesh_instance = &mut cache.instance;
-            let m = md.driver.artmesh_state(*uid).unwrap();
+            let m = md.driver.artmesh_state(uid).unwrap();
             let verts = m.vertices;
             let count = verts.len();
 
@@ -549,6 +573,7 @@ impl INode2D for AyagamiModel {
                     }
                 })
                 .collect();
+            self.all_mesh_uids = self.meshes.keys().copied().collect();
             self.mask_layout_dirty = true;
             self.last_mask_base_scale = None;
 
