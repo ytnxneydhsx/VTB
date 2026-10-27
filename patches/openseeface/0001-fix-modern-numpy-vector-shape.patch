@@ -1,0 +1,20 @@
+diff --git a/tracker.py b/tracker.py
+index 3110061..459a51e 100644
+--- a/tracker.py
++++ b/tracker.py
+@@ -831,12 +831,13 @@ class Tracker():
+                 pt = (pts_3d[42] * d1 + pts_3d[45] * d2) / d
+             if i < 2:
+                 reference = rmat.dot(pt)
+-                reference = reference + face_info.translation
++                translation_vector = np.asarray(face_info.translation).reshape(3)
++                reference = reference + translation_vector
+                 reference = self.camera.dot(reference)
+                 depth = reference[2]
+                 pt_3d = np.array([lms[66+i][0] * depth, lms[66+i][1] * depth, depth], np.float32)
+                 pt_3d = self.inverse_camera.dot(pt_3d)
+-                pt_3d = pt_3d - face_info.translation
++                pt_3d = pt_3d - translation_vector
+                 pt_3d = inverse_rotation.dot(pt_3d)
+                 pts_3d[66+i,:] = pt_3d[:]
+         pts_3d[np.isnan(pts_3d).any(axis=1)] = np.array([0.,0.,0.], dtype=np.float32)
