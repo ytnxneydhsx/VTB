@@ -1,6 +1,11 @@
 runtime/
 build/
 bin/mediamtx
+models/openseeface/*.onnx
+models/openseeface/*.rknn
+third_party/openseeface/
+__pycache__/
+*.pyc
 .DS_Store
 .stfolder/
 .stversions/

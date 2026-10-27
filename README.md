@@ -78,7 +78,72 @@ quit
 ```
 
 这个独立 CLI 不生成媒体包，主要用于验证配置、生命周期和状态。处理链接入后由同一进程调用 `OutputManager::publish()` 发送数据。执行 `start` 会打开网络或设备资源；UVC/UAC2 的物理测试需要先确认 Gadget、设备路径和 ALSA 方向，并按测试授权单独进行。
+## 本地人脸关键点模型
 
+人脸跟踪模块采用与 VTube Studio 摄像头跟踪同源的 OpenSeeFace 模型。当前固定使用：
+
+- `mnv3_detection_opt.onnx`：人脸检测。
+- `lm_model3_opt.onnx`：高质量 66 点人脸关键点检测。
+
+下载到本地并校验模型：
+
+```bash
+./scripts/install-openseeface-models.sh
+```
+
+模型保存在 `models/openseeface/`，具体来源、版本和转换说明见 [`models/openseeface/README.md`](models/openseeface/README.md)。下述本地预览只绘制跟踪结果；浏览器推流链路见后续章节。
+
+安装 OpenSeeFace Python 运行代码并启动黑底三维点预览：
+
+```bash
+./scripts/install-openseeface-runtime.sh
+python3 -m venv build/openseeface-venv
+build/openseeface-venv/bin/python -m pip install -r requirements/openseeface-preview.txt
+build/openseeface-venv/bin/python tools/openseeface_3d_preview.py --capture 0
+```
+
+预览只绘制整体置信度和 66 个三维点，不显示摄像头原始画面。需要显示官方人脸拓扑连线时增加 `--show-lines`。按 `Q` 或 `Esc` 关闭窗口。
+
+## 浏览器低延迟预览
+
+RK3588 上的 EMEET SmartCam C60E 4K 使用 `/dev/video0` 输出图像，支持 MJPEG `1280×720 @ 60fps`；`/dev/video1` 是 UVC 元数据节点。浏览器链路为：
+
+```text
+/dev/video0 → OpenSeeFace/RKNN NPU → 黑底66点画布 → H.264 → MediaMTX → WebRTC浏览器
+```
+
+浏览器推流默认使用 `rknn` 后端：`mnv3_detection_fp16.rknn` 在 NPU Core0
+执行人脸检测，`lm_model3_fp16.rknn` 在 NPU Core1 执行 66 点推理。只有诊断
+CPU 版本时才设置 `VTB_FACE3D_BACKEND=onnx`。
+
+前台启动：
+
+```bash
+./scripts/run-face3d-browser-stream.sh
+```
+
+Mac 浏览器访问：
+
+```text
+http://rk3588-ubuntu.local:8889/face3d
+```
+
+MediaMTX 使用 TCP `8889` 提供 WebRTC 页面和信令，局域网媒体使用 UDP
+`8189`。Mac 与 RK 无法直接互访时，通过现有 FRP SSH 建立 TCP 媒体回退：
+
+```bash
+ssh -fN \
+  -L 127.0.0.1:8889:127.0.0.1:8889 \
+  -L 127.0.0.1:18189:127.0.0.1:18189 \
+  rk3588-aliyun
+```
+
+随后访问 `http://127.0.0.1:8889/face3d/`。当前 FFmpeg 使用 `libx264`
+的无 B 帧、`zerolatency` 配置；RK 上现有 FFmpeg 没有 `h264_rkmpp`，MPP
+设备权限也尚未提供给普通用户，因此硬件编码留待单独验证。采集线程始终
+覆盖旧帧，推理只读取最新帧，避免处理速度下降时持续累积延迟。
+
+验证时分别记录摄像头取帧到推理完成、画布生成到 H.264 输出、WebRTC 接收播放的 P50/P95 延迟。首版的主要目标是保持延迟有界；帧率随实际模型吞吐量变化。
 ## RTSP 推流
 
 本项目使用 MediaMTX `v1.21.2` Linux ARM64 官方可执行文件作为 RTSP 服务。FFmpeg 从 `/dev/video0` 读取 `MJPG 1280x720 @ 30 fps`，解码后以低延迟 H.264 Baseline 编码发布到 `/camera`。MediaMTX 二进制保留在本机 `bin/mediamtx`，Git 仓库只保存安装脚本与配置。

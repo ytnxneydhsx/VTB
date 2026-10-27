@@ -11,7 +11,12 @@ rtspAddress: :8554
 
 rtmp: false
 hls: false
-webrtc: false
+webrtc: true
+webrtcAddress: :8889
+webrtcLocalUDPAddress: :8189
+webrtcLocalTCPAddress: :18189
+webrtcIPsFromInterfaces: true
+webrtcAdditionalHosts: [127.0.0.1]
 srt: false
 moq: false
 
