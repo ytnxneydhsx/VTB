@@ -45,6 +45,35 @@ pub struct LoadedModel<T: Model, R: AsRef<T>> {
     pub driver: Driver<T>,
 }
 
+fn env_flag(name: &str, default: bool) -> bool {
+    let Ok(value) = std::env::var(name) else {
+        return default;
+    };
+
+    match value.to_ascii_lowercase().as_str() {
+        "0" | "false" | "no" | "off" => false,
+        "1" | "true" | "yes" | "on" => true,
+        _ => default,
+    }
+}
+
+struct MeshRenderCache {
+    instance: Gd<MeshInstance2D>,
+    mesh: Gd<ArrayMesh>,
+    use_driver_colors: bool,
+    last_visible: Option<bool>,
+    last_opacity: Option<f32>,
+    last_multiply: Option<Color>,
+    last_screen: Option<Color>,
+    vertices: PackedVector2Array,
+}
+
+struct MaskRenderCache {
+    viewport: Gd<SubViewport>,
+    source_meshes: Vec<Gd<ArrayMesh>>,
+    dependent_meshes: Vec<Gd<MeshInstance2D>>,
+}
+
 #[derive(GodotClass)]
 #[class(tool, init, base = Node2D)]
 pub struct AyagamiModel {
@@ -64,9 +93,13 @@ pub struct AyagamiModel {
     dirty: bool,
 
     mesh_group: Option<Gd<Node2D>>,
-    meshes: HashMap<u32, Gd<MeshInstance2D>>,
-    masks: Vec<Gd<SubViewport>>,
-    mask_lookup: HashMap<StringName, Vec<Gd<MeshInstance2D>>>,
+    meshes: HashMap<u32, MeshRenderCache>,
+    masks: Vec<MaskRenderCache>,
+    state_cache_enabled: bool,
+    driver_buffer_reuse_enabled: bool,
+    mask_layout_dirty: bool,
+    last_mask_base_scale: Option<f32>,
+    last_mask_resolution: i32,
 
     pub pose: Option<Pose>,
     pub pose_map: Arc<PoseMap>,
@@ -125,7 +158,18 @@ impl AyagamiModel {
             pose.flatten();
             Some(pose)
         };
-        let driver = Driver::new(&*model.as_ref());
+        self.state_cache_enabled = env_flag("OPENVT_AYAGAMI_STATE_CACHE", true);
+        self.driver_buffer_reuse_enabled =
+            env_flag("OPENVT_AYAGAMI_DRIVER_BUFFER_REUSE", true);
+
+        let mut driver = Driver::new(&*model.as_ref());
+        driver.set_buffer_reuse_enabled(self.driver_buffer_reuse_enabled);
+
+        godot_print!(
+            "AYAGAMI_OPTIMIZATION state_cache={} driver_buffer_reuse={}",
+            self.state_cache_enabled,
+            self.driver_buffer_reuse_enabled,
+        );
 
         let loaded = LoadedModel { model, driver };
         self.model = Some(loaded);
@@ -148,7 +192,7 @@ impl AyagamiModel {
                 let DrawNode::ArtMesh(uid) = node else {
                     continue;
                 };
-                let mesh_instance = &self.meshes[uid];
+                let mesh_instance = &self.meshes[uid].instance;
 
                 mesh_group.move_child(mesh_instance, order as i32);
                 order += 1;
@@ -157,56 +201,79 @@ impl AyagamiModel {
     }
 
     fn update_meshes(&mut self, force: bool) {
-        let binding = self.model.as_mut();
-        let md = binding.unwrap();
+        let state_cache_enabled = self.state_cache_enabled;
+        let mut mask_layout_changed = force;
+        let md = self.model.as_mut().unwrap();
         let m = md.model.as_ref();
         md.driver.drive(m);
 
         let px_size = md.model.canvas_properties().scale;
 
-        // update mesh vertices
-        for (uid, child) in self.meshes.iter() {
-            let mut mesh_instance = child.to_owned().cast::<MeshInstance2D>();
-            let mut mesh = mesh_instance.get_mesh().unwrap().cast::<ArrayMesh>();
-
+        // update mesh vertices and submit visual state only when it changed
+        for (uid, cache) in self.meshes.iter_mut() {
+            let mut mesh = if state_cache_enabled {
+                cache.mesh.clone()
+            } else {
+                cache.instance.get_mesh().unwrap().cast::<ArrayMesh>()
+            };
+            let mesh_instance = &mut cache.instance;
             let m = md.driver.artmesh_state(*uid).unwrap();
-
             let verts = m.vertices;
             let count = verts.len();
 
             if count < 3 {
-                mesh_instance.set_visible(false);
+                if !state_cache_enabled || cache.last_visible != Some(false) {
+                    mesh_instance.set_visible(false);
+                }
+                cache.last_visible = Some(false);
                 continue;
             }
 
-            mesh_instance.set_visible(m.visual.visible);
-            mesh_instance.set_self_modulate(Color {
-                r: 1.0,
-                g: 1.0,
-                b: 1.0,
-                a: m.visual.opacity,
-            });
-            if mesh_instance.get_instance_shader_parameter("color_override") != true.to_variant() {
-                mesh_instance.set_instance_shader_parameter(
-                    "color_multiply",
-                    &Color {
-                        r: m.visual.multiply_color.x,
-                        g: m.visual.multiply_color.y,
-                        b: m.visual.multiply_color.z,
-                        a: 1.0,
-                    }
-                    .to_variant(),
-                );
-                mesh_instance.set_instance_shader_parameter(
-                    "color_screen",
-                    &Color {
-                        r: m.visual.screen_color.x,
-                        g: m.visual.screen_color.y,
-                        b: m.visual.screen_color.z,
-                        a: 1.0,
-                    }
-                    .to_variant(),
-                );
+            if !state_cache_enabled || cache.last_visible != Some(m.visual.visible) {
+                mesh_instance.set_visible(m.visual.visible);
+            }
+            cache.last_visible = Some(m.visual.visible);
+
+            if !state_cache_enabled || cache.last_opacity != Some(m.visual.opacity) {
+                mesh_instance.set_self_modulate(Color {
+                    r: 1.0,
+                    g: 1.0,
+                    b: 1.0,
+                    a: m.visual.opacity,
+                });
+            }
+            cache.last_opacity = Some(m.visual.opacity);
+
+            let use_driver_colors = if state_cache_enabled {
+                cache.use_driver_colors
+            } else {
+                mesh_instance.get_instance_shader_parameter("color_override") != true.to_variant()
+            };
+            if use_driver_colors {
+                let multiply = Color {
+                    r: m.visual.multiply_color.x,
+                    g: m.visual.multiply_color.y,
+                    b: m.visual.multiply_color.z,
+                    a: 1.0,
+                };
+                let screen = Color {
+                    r: m.visual.screen_color.x,
+                    g: m.visual.screen_color.y,
+                    b: m.visual.screen_color.z,
+                    a: 1.0,
+                };
+                if !state_cache_enabled || cache.last_multiply != Some(multiply) {
+                    mesh_instance.set_instance_shader_parameter(
+                        "color_multiply",
+                        &multiply.to_variant(),
+                    );
+                }
+                if !state_cache_enabled || cache.last_screen != Some(screen) {
+                    mesh_instance
+                        .set_instance_shader_parameter("color_screen", &screen.to_variant());
+                }
+                cache.last_multiply = Some(multiply);
+                cache.last_screen = Some(screen);
             }
 
             if !force {
@@ -219,7 +286,11 @@ impl AyagamiModel {
                 }
             }
 
-            let mut ary = PackedVector2Array::new();
+            let mut ary = if state_cache_enabled {
+                std::mem::replace(&mut cache.vertices, PackedVector2Array::new())
+            } else {
+                PackedVector2Array::new()
+            };
             ary.resize(count);
 
             let mut vtx_min = Vector3::new(f32::MAX, f32::MAX, 0.0); // top-left
@@ -237,39 +308,45 @@ impl AyagamiModel {
             }
 
             mesh.surface_update_vertex_region(0, 0, &ary.to_byte_array());
+            if state_cache_enabled {
+                cache.vertices = ary;
+            }
 
             // aabb does not get automatically updated when directly updating the vertex region
             let aabb = Aabb::new(Vector3::new(vtx_min.x, vtx_min.y, 0.0), vtx_max - vtx_min);
             let existing_aabb = mesh.get_custom_aabb();
 
-            // only mark as dirty of the bounds of the mesh have shifted so that we may
+            // only mark as dirty if the bounds of the mesh have shifted so that we may
             // update affected mask viewports
             if aabb != existing_aabb {
                 mesh.set_custom_aabb(aabb);
+                mask_layout_changed = true;
             }
+        }
+
+        if mask_layout_changed {
+            self.mask_layout_dirty = true;
         }
     }
 
     fn update_masks(&mut self) {
-        let base_scale = self.base_mut().get_global_scale().x.min(1.0);
+        let base_scale = self.base().get_global_scale().x.min(1.0);
+        let mask_inputs_changed = self.last_mask_base_scale != Some(base_scale)
+            || self.last_mask_resolution != self.mask_resolution;
+
+        if self.state_cache_enabled && !self.mask_layout_dirty && !mask_inputs_changed {
+            return;
+        }
+
         // update viewport dimensions and transform for masks
         for mask in self.masks.iter_mut() {
-            let meshes: Vec<Gd<MeshInstance2D>> = mask
-                .get_children()
-                .iter_shared()
-                .map(|n| n.cast::<MeshInstance2D>())
-                .collect();
-            let mut group_aabb: Aabb = {
-                let node = &meshes[0];
-                let mesh = node.get_mesh().unwrap().cast::<ArrayMesh>();
+            if mask.source_meshes.is_empty() {
+                continue;
+            }
 
-                mesh.get_custom_aabb()
-            };
-
-            for node in meshes.iter() {
-                let mesh = node.get_mesh().unwrap().cast::<ArrayMesh>();
-                let aabb = mesh.get_custom_aabb();
-                group_aabb = group_aabb.merge(aabb);
+            let mut group_aabb = mask.source_meshes[0].get_custom_aabb();
+            for mesh in mask.source_meshes.iter().skip(1) {
+                group_aabb = group_aabb.merge(mesh.get_custom_aabb());
             }
 
             group_aabb = group_aabb.grow(4.0);
@@ -278,7 +355,6 @@ impl AyagamiModel {
                 x: group_aabb.size.x as f32,
                 y: group_aabb.size.y as f32,
             };
-
             let offset = Vector2 {
                 x: group_aabb.position.x,
                 y: group_aabb.position.y,
@@ -295,15 +371,32 @@ impl AyagamiModel {
             let transform =
                 Transform2D::from_angle_origin(0.0, -offset).scaled(Vector2::ONE * scale);
 
-            mask.set_size(dimensions.to_vector2i());
-            mask.set_canvas_transform(transform);
+            mask.viewport.set_size(dimensions.to_vector2i());
+            mask.viewport.set_canvas_transform(transform);
 
-            let dependent_meshes = self.mask_lookup.get_mut(&mask.get_name()).unwrap();
-            for node in dependent_meshes.iter_mut() {
+            for node in mask.dependent_meshes.iter_mut() {
                 node.set_instance_shader_parameter("mask_offset", &offset.to_variant());
                 node.set_instance_shader_parameter("mask_scale", &scale.to_variant());
             }
         }
+
+        self.mask_layout_dirty = false;
+        self.last_mask_base_scale = Some(base_scale);
+        self.last_mask_resolution = self.mask_resolution;
+    }
+
+    #[func]
+    pub fn invalidate_render_state_cache(&mut self) {
+        for cache in self.meshes.values_mut() {
+            cache.use_driver_colors =
+                cache.instance.get_instance_shader_parameter("color_override") != true.to_variant();
+            cache.last_visible = None;
+            cache.last_opacity = None;
+            cache.last_multiply = None;
+            cache.last_screen = None;
+        }
+        self.mask_layout_dirty = true;
+        self.last_mask_base_scale = None;
     }
 
     #[func]
@@ -354,7 +447,25 @@ impl INode2D for AyagamiModel {
                     .get_children()
                     .iter_shared()
                     .fold(HashMap::new(), |mut acc, n| {
-                        acc.insert(n.get_meta("uid").to::<u32>(), n.cast::<MeshInstance2D>());
+                        let uid = n.get_meta("uid").to::<u32>();
+                        let instance = n.cast::<MeshInstance2D>();
+                        let mesh = instance.get_mesh().unwrap().cast::<ArrayMesh>();
+                        let use_driver_colors = instance
+                            .get_instance_shader_parameter("color_override")
+                            != true.to_variant();
+                        acc.insert(
+                            uid,
+                            MeshRenderCache {
+                                instance,
+                                mesh,
+                                use_driver_colors,
+                                last_visible: None,
+                                last_opacity: None,
+                                last_multiply: None,
+                                last_screen: None,
+                                vertices: PackedVector2Array::new(),
+                            },
+                        );
                         acc
                     });
 
@@ -362,23 +473,30 @@ impl INode2D for AyagamiModel {
             self.masks = mask_group
                 .get_children()
                 .iter_shared()
-                .map(|n| n.cast::<SubViewport>())
-                .collect();
-            self.mask_lookup = self
-                .masks
-                .clone()
-                .into_iter()
-                .fold(HashMap::new(), |mut acc, n| {
-                    let meshes = n
+                .map(|n| {
+                    let viewport = n.cast::<SubViewport>();
+                    let source_meshes = viewport
+                        .get_children()
+                        .iter_shared()
+                        .map(|child| child.cast::<MeshInstance2D>())
+                        .map(|instance| instance.get_mesh().unwrap().cast::<ArrayMesh>())
+                        .collect();
+                    let dependent_meshes = viewport
                         .get_meta("meshes")
                         .to::<VarArray>()
                         .iter_shared()
                         .map(|np| np.to::<NodePath>())
                         .map(|path| self.base().get_node_as::<MeshInstance2D>(&path))
                         .collect();
-                    acc.insert(n.get_name(), meshes);
-                    acc
-                });
+                    MaskRenderCache {
+                        viewport,
+                        source_meshes,
+                        dependent_meshes,
+                    }
+                })
+                .collect();
+            self.mask_layout_dirty = true;
+            self.last_mask_base_scale = None;
 
             self.update_meshes(true);
             self.update_masks();
