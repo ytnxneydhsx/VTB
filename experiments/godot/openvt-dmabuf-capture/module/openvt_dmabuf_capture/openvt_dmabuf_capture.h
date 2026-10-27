@@ -28,7 +28,8 @@ protected:
 	static void _bind_methods();
 
 private:
-	void _capture_frame_render_thread(RID p_viewport, int p_frame_index, bool p_end_of_stream);
+	void _initialize_pipeline_render_thread();
+	void _capture_frame_render_thread(RID p_viewport, int p_slot_index, int p_frame_index, bool p_end_of_stream);
 	void _finish_render_thread();
 	void _complete_operation(Error p_error, const String &p_message);
 
