@@ -11,6 +11,13 @@ canvas_width="${VTB_FACE3D_CANVAS_WIDTH:-1280}"
 canvas_height="${VTB_FACE3D_CANVAS_HEIGHT:-720}"
 stream_fps="${VTB_FACE3D_STREAM_FPS:-30}"
 stream_url="${VTB_FACE3D_RTSP_URL:-rtsp://127.0.0.1:8554/face3d}"
+inference_backend="${VTB_FACE3D_BACKEND:-rknn}"
+rknn_model_dir="${VTB_FACE3D_RKNN_MODEL_DIR:-$project_dir/models/openseeface}"
+publisher_bin="${VTB_MPP_OUTPUT_PUBLISHER:-$project_dir/build/vtb-mpp-output-publisher}"
+stream_bitrate="${VTB_FACE3D_STREAM_BITRATE:-1200000}"
+dma_heap="${VTB_FACE3D_DMA_HEAP:-/dev/dma_heap/system-uncached}"
+diagnostics_port="${VTB_FACE3D_DIAGNOSTICS_PORT:-8890}"
+diagnostics_page="${VTB_FACE3D_DIAGNOSTICS_PAGE:-$project_dir/web/face3d-latency.html}"
 
 if [[ ! -x "$python_bin" ]]; then
   echo "Python environment is missing: $python_bin" >&2
@@ -23,46 +30,47 @@ if [[ ! -e "$capture_device" ]]; then
   exit 1
 fi
 
-if ! command -v ffmpeg >/dev/null 2>&1; then
-  echo "ffmpeg is required." >&2
+if [[ ! -x "$publisher_bin" ]]; then
+  echo "MPP output publisher is missing: $publisher_bin" >&2
   exit 1
 fi
 
-exec ffmpeg \
-  -hide_banner \
-  -loglevel warning \
-  -fflags nobuffer \
-  -f rawvideo \
-  -pixel_format bgr24 \
-  -video_size "${canvas_width}x${canvas_height}" \
-  -framerate "$stream_fps" \
-  -i <(
-    exec "$python_bin" "$project_dir/tools/openseeface_3d_preview.py" \
-      --capture "$capture_device" \
-      --width "$capture_width" \
-      --height "$capture_height" \
-      --fps "$capture_fps" \
-      --canvas-width "$canvas_width" \
-      --canvas-height "$canvas_height" \
-      --raw-output \
-      --no-window
-  ) \
-  -an \
-  -vf format=yuv420p \
-  -fps_mode passthrough \
-  -c:v libx264 \
-  -preset ultrafast \
-  -tune zerolatency \
-  -profile:v baseline \
-  -level:v 3.1 \
-  -g "$stream_fps" \
-  -keyint_min "$stream_fps" \
-  -sc_threshold 0 \
-  -bf 0 \
-  -b:v 1200k \
-  -maxrate 1200k \
-  -bufsize 600k \
-  -flush_packets 1 \
-  -f rtsp \
-  -rtsp_transport tcp \
-  "$stream_url"
+if [[ ! -f "$diagnostics_page" ]]; then
+  echo "Latency diagnostics page is missing: $diagnostics_page" >&2
+  exit 1
+fi
+
+publisher_command=("$publisher_bin")
+if [[ ! -r /dev/mpp_service || ! -w /dev/mpp_service ||
+      ! -r "$dma_heap" || ! -w "$dma_heap" ]]; then
+  if ! sudo -n true >/dev/null 2>&1; then
+    echo "MPP and DMA heap access require non-interactive sudo on this BSP." >&2
+    exit 1
+  fi
+  publisher_command=(sudo -n "$publisher_bin")
+fi
+
+"$python_bin" "$project_dir/tools/openseeface_3d_preview.py" \
+  --capture "$capture_device" \
+  --width "$capture_width" \
+  --height "$capture_height" \
+  --fps "$capture_fps" \
+  --canvas-width "$canvas_width" \
+  --canvas-height "$canvas_height" \
+  --timed-raw-output \
+  --backend "$inference_backend" \
+  --rknn-model-dir "$rknn_model_dir" \
+  --no-window | \
+exec "${publisher_command[@]}" \
+  --rtsp-url "$stream_url" \
+  --stream-id face3d-video \
+  --width "$canvas_width" \
+  --height "$canvas_height" \
+  --fps "$stream_fps" \
+  --bitrate "$stream_bitrate" \
+  --gop "$stream_fps" \
+  --queue 8 \
+  --dma-heap "$dma_heap" \
+  --timed-input \
+  --diagnostics-port "$diagnostics_port" \
+  --diagnostics-page "$diagnostics_page"

@@ -1,0 +1,346 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Face3D 延迟诊断</title>
+    <style>
+      :root {
+        color-scheme: dark;
+        font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+        background: #0b0f14;
+        color: #d8e2ed;
+      }
+      * { box-sizing: border-box; }
+      body { margin: 0; min-height: 100vh; }
+      main {
+        display: grid;
+        grid-template-columns: minmax(0, 1fr) 440px;
+        gap: 14px;
+        padding: 14px;
+      }
+      .panel {
+        background: #111822;
+        border: 1px solid #263342;
+        border-radius: 10px;
+        overflow: hidden;
+      }
+      .video-wrap { position: relative; min-height: 360px; background: #000; }
+      video { display: block; width: 100%; height: auto; background: #000; }
+      .video-status {
+        position: absolute;
+        left: 12px;
+        top: 12px;
+        padding: 7px 10px;
+        border-radius: 6px;
+        background: rgba(0, 0, 0, 0.72);
+        color: #a9e6b1;
+        font-size: 13px;
+      }
+      .summary {
+        display: grid;
+        grid-template-columns: repeat(4, 1fr);
+        gap: 10px;
+        padding: 12px;
+      }
+      .card { padding: 10px; border-radius: 8px; background: #182231; }
+      .label { color: #8fa4b8; font-size: 12px; }
+      .value { margin-top: 5px; font-size: 20px; color: #7dd3fc; }
+      h1 { margin: 0; padding: 14px 16px; font-size: 18px; }
+      table { width: 100%; border-collapse: collapse; font-size: 12px; }
+      th, td { padding: 7px 8px; border-top: 1px solid #263342; text-align: right; }
+      th:first-child, td:first-child { text-align: left; }
+      th { color: #8fa4b8; position: sticky; top: 0; background: #111822; }
+      .metrics { max-height: calc(100vh - 80px); overflow: auto; }
+      .good { color: #86efac; }
+      .warn { color: #facc15; }
+      .bad { color: #fca5a5; }
+      #error { padding: 10px 14px; color: #fca5a5; white-space: pre-wrap; }
+      canvas { display: none; }
+      @media (max-width: 1100px) {
+        main { grid-template-columns: 1fr; }
+        .metrics { max-height: none; }
+      }
+    </style>
+  </head>
+  <body>
+    <main>
+      <section>
+        <div class="panel video-wrap">
+          <video id="video" muted autoplay playsinline></video>
+          <div id="video-status" class="video-status">正在连接 WebRTC…</div>
+        </div>
+        <div class="summary">
+          <div class="card"><div class="label">端到端 current</div><div id="e2e" class="value">--</div></div>
+          <div class="card"><div class="label">端到端 P95</div><div id="e2e-p95" class="value">--</div></div>
+          <div class="card"><div class="label">时钟最低 RTT</div><div id="clock-rtt" class="value">--</div></div>
+          <div class="card"><div class="label">估计误差 ±</div><div id="clock-error" class="value">--</div></div>
+        </div>
+        <div id="error"></div>
+      </section>
+
+      <section class="panel metrics">
+        <h1>同一帧分阶段延迟（ms）</h1>
+        <table>
+          <thead><tr><th>阶段</th><th>当前</th><th>P50</th><th>P95</th><th>P99</th></tr></thead>
+          <tbody id="metrics-body"></tbody>
+        </table>
+      </section>
+    </main>
+    <canvas id="decode-canvas"></canvas>
+
+    <script>
+      "use strict";
+
+      const METRICS = [
+        ["capture_handoff", "采集就绪 → 推理开始"],
+        ["detector", "RKNN 人脸检测"],
+        ["landmark", "RKNN 关键点"],
+        ["inference", "完整 tracker.predict"],
+        ["canvas", "关键点 → 画布完成"],
+        ["pipe", "Python → C++ 帧传输"],
+        ["rga", "RGA BGR → NV12"],
+        ["mpp", "MPP H.264 编码"],
+        ["publish", "OutputManager 入队"],
+        ["output_queue", "输出队列等待"],
+        ["rtsp_write", "RTSP/libavformat 写出"],
+        ["rk_total", "RK 采集就绪 → RTSP 写出"],
+        ["network_display", "网络/解码/显示"],
+        ["end_to_end", "完整端到端"],
+      ];
+
+      const samples = new Map(METRICS.map(([key]) => [key, []]));
+      const latest = new Map();
+      const traces = new Map();
+      const pendingPresentations = new Map();
+      const maxSamples = 600;
+      let lastTraceId = 0;
+      let currentSessionId = null;
+      let rkMinusBrowserNs = null;
+      let clockUncertaintyNs = null;
+      let reader = null;
+
+      const video = document.getElementById("video");
+      const videoStatus = document.getElementById("video-status");
+      const errorBox = document.getElementById("error");
+      const canvas = document.getElementById("decode-canvas");
+      const context = canvas.getContext("2d", { willReadFrequently: true });
+
+      function ms(deltaNs) { return deltaNs / 1_000_000; }
+      function format(value) { return Number.isFinite(value) ? value.toFixed(3) : "--"; }
+      function percentile(values, ratio) {
+        if (values.length === 0) return NaN;
+        const sorted = [...values].sort((a, b) => a - b);
+        const index = Math.min(sorted.length - 1, Math.ceil(sorted.length * ratio) - 1);
+        return sorted[Math.max(0, index)];
+      }
+      function pushMetric(key, value) {
+        if (!Number.isFinite(value) || value < -1) return;
+        const values = samples.get(key);
+        values.push(value);
+        if (values.length > maxSamples) values.shift();
+        latest.set(key, value);
+      }
+      function resetSession(sessionId) {
+        currentSessionId = sessionId;
+        lastTraceId = 0;
+        traces.clear();
+        pendingPresentations.clear();
+        latest.clear();
+        for (const values of samples.values()) values.length = 0;
+      }
+      function renderMetrics() {
+        const body = document.getElementById("metrics-body");
+        body.innerHTML = METRICS.map(([key, label]) => {
+          const values = samples.get(key);
+          return `<tr><td>${label}</td><td>${format(latest.get(key))}</td>` +
+            `<td>${format(percentile(values, 0.50))}</td>` +
+            `<td>${format(percentile(values, 0.95))}</td>` +
+            `<td>${format(percentile(values, 0.99))}</td></tr>`;
+        }).join("");
+        document.getElementById("e2e").textContent = `${format(latest.get("end_to_end"))} ms`;
+        document.getElementById("e2e-p95").textContent = `${format(percentile(samples.get("end_to_end"), 0.95))} ms`;
+      }
+
+      function traceMetrics(trace) {
+        pushMetric("capture_handoff", ms(trace.inference_start_ns - trace.capture_ready_ns));
+        if (trace.detector_start_ns > 0 && trace.detector_end_ns >= trace.detector_start_ns) {
+          pushMetric("detector", ms(trace.detector_end_ns - trace.detector_start_ns));
+        }
+        if (trace.landmark_start_ns > 0 && trace.landmark_end_ns >= trace.landmark_start_ns) {
+          pushMetric("landmark", ms(trace.landmark_end_ns - trace.landmark_start_ns));
+        }
+        pushMetric("inference", ms(trace.points_ready_ns - trace.inference_start_ns));
+        pushMetric("canvas", ms(trace.canvas_ready_ns - trace.points_ready_ns));
+        pushMetric("pipe", ms(trace.cpp_frame_received_ns - trace.canvas_ready_ns));
+        pushMetric("rga", ms(trace.rga_done_ns - trace.cpp_frame_received_ns));
+        pushMetric("mpp", ms(trace.mpp_done_ns - trace.rga_done_ns));
+        pushMetric("publish", ms(trace.output_published_ns - trace.output_enqueue_start_ns));
+        pushMetric("output_queue", ms(Math.max(0, trace.rtsp_write_start_ns - trace.output_published_ns)));
+        pushMetric("rtsp_write", ms(trace.rtsp_write_end_ns - trace.rtsp_write_start_ns));
+        pushMetric("rk_total", ms(trace.rtsp_write_end_ns - trace.capture_ready_ns));
+      }
+
+      function matchPresentation(frameId, browserNowNs) {
+        const trace = traces.get(frameId);
+        if (!trace || rkMinusBrowserNs === null) {
+          pendingPresentations.set(frameId, browserNowNs);
+          return;
+        }
+        const captureBrowserNs = trace.capture_ready_ns - rkMinusBrowserNs;
+        const rtspBrowserNs = trace.rtsp_write_end_ns - rkMinusBrowserNs;
+        pushMetric("network_display", ms(browserNowNs - rtspBrowserNs));
+        pushMetric("end_to_end", ms(browserNowNs - captureBrowserNs));
+        pendingPresentations.delete(frameId);
+        renderMetrics();
+      }
+
+      async function fetchTraces() {
+        try {
+          const response = await fetch(`/api/traces?after=${lastTraceId}`, { cache: "no-store" });
+          if (!response.ok) throw new Error(`trace HTTP ${response.status}`);
+          const payload = await response.json();
+          if (currentSessionId !== payload.session_id) {
+            resetSession(payload.session_id);
+          }
+          for (const trace of payload.traces) {
+            lastTraceId = Math.max(lastTraceId, trace.frame_id);
+            traces.set(trace.frame_id, trace);
+            if (traces.size > 900) traces.delete(traces.keys().next().value);
+            traceMetrics(trace);
+            if (pendingPresentations.has(trace.frame_id)) {
+              matchPresentation(trace.frame_id, pendingPresentations.get(trace.frame_id));
+            }
+          }
+          renderMetrics();
+        } catch (error) {
+          errorBox.textContent = `Trace读取失败：${error.message}`;
+        }
+      }
+
+      async function clockProbe() {
+        const browserSendNs = performance.now() * 1_000_000;
+        const response = await fetch("/api/clock", { cache: "no-store" });
+        const clock = await response.json();
+        const browserReceiveNs = performance.now() * 1_000_000;
+        const networkRttNs = (browserReceiveNs - browserSendNs) -
+          (clock.rk_send_ns - clock.rk_receive_ns);
+        const offsetNs = ((clock.rk_receive_ns - browserSendNs) +
+          (clock.rk_send_ns - browserReceiveNs)) / 2;
+        return { networkRttNs, offsetNs };
+      }
+
+      async function synchronizeClock() {
+        const values = [];
+        for (let index = 0; index < 20; index += 1) {
+          try { values.push(await clockProbe()); } catch (_) { }
+        }
+        if (values.length === 0) {
+          errorBox.textContent = "时钟校准失败";
+          return;
+        }
+        values.sort((a, b) => a.networkRttNs - b.networkRttNs);
+        const selected = values.slice(0, Math.min(5, values.length));
+        const offsets = selected.map((value) => value.offsetNs).sort((a, b) => a - b);
+        rkMinusBrowserNs = offsets[Math.floor(offsets.length / 2)];
+        clockUncertaintyNs = Math.max(0, selected[0].networkRttNs / 2);
+        document.getElementById("clock-rtt").textContent = `${format(ms(selected[0].networkRttNs))} ms`;
+        document.getElementById("clock-error").textContent = `${format(ms(clockUncertaintyNs))} ms`;
+      }
+
+      function decodeFrameId() {
+        if (video.videoWidth === 0 || video.videoHeight === 0) return null;
+        if (canvas.width !== video.videoWidth || canvas.height !== video.videoHeight) {
+          canvas.width = video.videoWidth;
+          canvas.height = video.videoHeight;
+        }
+        context.drawImage(video, 0, 0, canvas.width, canvas.height);
+        const cell = 16;
+        const bitCount = 48;
+        const rows = 3;
+        const width = bitCount * cell;
+        const originX = Math.floor((canvas.width - width) / 2);
+        const originY = canvas.height - rows * cell;
+        const pixels = context.getImageData(originX, originY, width, rows * cell).data;
+        const bytes = new Uint8Array(6);
+        for (let bit = 0; bit < bitCount; bit += 1) {
+          let whiteVotes = 0;
+          for (let row = 0; row < rows; row += 1) {
+            const x = bit * cell + Math.floor(cell / 2);
+            const y = row * cell + Math.floor(cell / 2);
+            const offset = (y * width + x) * 4;
+            if (pixels[offset] + pixels[offset + 1] + pixels[offset + 2] > 384) whiteVotes += 1;
+          }
+          if (whiteVotes >= 2) bytes[Math.floor(bit / 8)] |= 1 << (7 - (bit % 8));
+        }
+        if (bytes[0] !== 0xD3) return null;
+        let checksum = 0;
+        for (let index = 0; index < 5; index += 1) checksum ^= bytes[index];
+        if (checksum !== bytes[5]) return null;
+        return (((bytes[1] * 0x1000000) + (bytes[2] << 16) +
+          (bytes[3] << 8) + bytes[4]) >>> 0);
+      }
+
+      function onPresented(now) {
+        const frameId = decodeFrameId();
+        if (frameId !== null) {
+          videoStatus.textContent = `WebRTC播放中 · frame ${frameId}`;
+          matchPresentation(frameId, now * 1_000_000);
+        } else {
+          videoStatus.textContent = "WebRTC播放中 · 等待帧标记";
+        }
+      }
+
+      function startPresentationLoop() {
+        if (typeof video.requestVideoFrameCallback === "function") {
+          const callback = (now) => {
+            onPresented(now);
+            video.requestVideoFrameCallback(callback);
+          };
+          video.requestVideoFrameCallback(callback);
+          return;
+        }
+        setInterval(() => onPresented(performance.now()), 33);
+      }
+
+      function loadReaderScript() {
+        return new Promise((resolve, reject) => {
+          const script = document.createElement("script");
+          script.src = `http://${location.hostname}:8889/face3d/reader.js`;
+          script.onload = resolve;
+          script.onerror = () => reject(new Error("无法加载 MediaMTX reader.js"));
+          document.head.appendChild(script);
+        });
+      }
+
+      async function startVideo() {
+        await loadReaderScript();
+        reader = new MediaMTXWebRTCReader({
+          url: `http://${location.hostname}:8889/face3d/whep`,
+          onError: (error) => {
+            videoStatus.textContent = `WebRTC错误：${error}`;
+          },
+          onTrack: (event) => {
+            video.srcObject = event.streams[0];
+            video.play().catch(() => {});
+            startPresentationLoop();
+          },
+          onDataChannel: () => {},
+        });
+      }
+
+      window.addEventListener("beforeunload", () => {
+        if (reader !== null) reader.close();
+      });
+
+      renderMetrics();
+      synchronizeClock();
+      setInterval(synchronizeClock, 10_000);
+      fetchTraces();
+      setInterval(fetchTraces, 200);
+      startVideo().catch((error) => {
+        errorBox.textContent = error.message;
+      });
+    </script>
+  </body>
+</html>

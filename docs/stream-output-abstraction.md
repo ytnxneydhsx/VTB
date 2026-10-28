@@ -71,6 +71,24 @@
 
 公共输出层以进程内 C++ 库形式提供，调用方直接管理流、出口和 `publish()`。交互式命令行是默认关闭的诊断示例，可由命令注册流、创建出口并执行 `list`、`start`、`stop`、`bind`、`unbind`、`remove` 和 `quit`。HTTP、Unix Socket 控制、启动配置文件和配置自动保存留到出现实际调用方后再实现。
 
+## 真实编码包入口
+
+`vtb-media-output-publisher` 是公共输出层的首个真实媒体包生产者。它从非 seekable 的 FFmpeg 输入读取 H.264 包，取得 SPS/PPS、时间戳和关键帧标记，映射到单调时钟纳秒后调用 `OutputManager::publish()`。Face3D 链路使用 MPEG-TS 管道保留编码包边界和时间戳，FFmpeg 仅负责编码，RTSP 连接、队列、重连和发送全部由 `RtspOutput` 完成。
+
+`RtspOutput` 的 I/O 超时由 FFmpeg interrupt callback 和单调时钟 deadline 控制。RTSP muxer 参数只传入它实际消费的 `rtsp_transport`；不再重复传入部分 FFmpeg 版本不会消费的 `rw_timeout`，避免连接已经建立后被误判为未知输出选项。
+
+更简单的旧路径是让 FFmpeg CLI 直接发布 RTSP。它可以显示画面，但会绕过公共输出层，无法验证多出口共用的队列、故障隔离和状态统计。当前入口保留一个额外本地进程和一次编码包复制，首阶段以接口真实性和可观测性为目标；后续只有在测量证明进程边界或复制成为瓶颈时，才把编码器直接嵌入 C++ 生产链。
+
+验收至少同时满足：`RtspOutput` 进入 running、`written` 持续增加且无错误、MediaMTX 接收到 `face3d` 发布流、Mac 浏览器持续解码 WebRTC 视频帧。仅监听端口或打开 WebRTC 页面不足以证明媒体链成功。
+
+### RK3588 直接硬件编码入口
+
+`vtb-mpp-output-publisher` 用于 RK3588 实时 Face3D 链路。它从标准输入读取连续 BGR24 帧，将 CPU 写入的 BGR DMA-BUF 通过 RGA 同步转换成 NV12 DMA-BUF，再由 MPP 输出 H.264 Annex B 包，并直接构造 `MediaPacket` 调用 `OutputManager::publish()`。MPP 提供的 SPS/PPS用于注册 `StreamDescriptor`，IDR NAL用于关键帧标记。
+
+这条路径移除了 FFmpeg 编码进程、MPEG-TS Pipe、容器封装和 C++ 解复用；保留 Python/RKNN 到 C++ 的 BGR Pipe，因此仍有原始帧的跨进程复制。首版沿用已验证探针的单缓冲同步调用，先验证正确性并记录 RGA、MPP 和输出队列耗时；多缓冲和进一步减少 BGR 搬运只在测量后实施。
+
+当前 BSP 将 `/dev/mpp_service` 和 DMA heap 设为 root-only。测试脚本只在普通用户无法访问这些节点时，通过已有的无交互 sudo 启动 `vtb-mpp-output-publisher`；Python、MediaMTX 和监督脚本仍以普通用户运行。长期部署需要单独审查并配置最小 udev 用户组权限。
+
 ## 分阶段验证
 
 ### 里程碑 C：单出口正确性

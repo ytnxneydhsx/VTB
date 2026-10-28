@@ -8,6 +8,10 @@ option(VTB_ENABLE_RTSP_OUTPUT "Build the libavformat RTSP output" ON)
 option(VTB_ENABLE_UVC_OUTPUT "Build the Linux V4L2 UVC Gadget output" ON)
 option(VTB_ENABLE_UAC2_OUTPUT "Build the ALSA UAC2 Gadget output" ON)
 option(VTB_BUILD_OUTPUT_CLI "Build the optional output control example" OFF)
+option(VTB_ENABLE_ROCKCHIP_MPP_PUBLISHER
+    "Build the RK3588 RGA/MPP RTSP publisher" OFF)
+set(VTB_ROCKCHIP_SYSROOT "" CACHE PATH
+    "Target-board sysroot containing Rockchip MPP and RGA development files")
 
 function(vtb_configure_target target)
     target_compile_features(${target} PRIVATE cxx_std_17)
@@ -45,6 +49,57 @@ if(VTB_ENABLE_RTSP_OUTPUT)
     )
     vtb_configure_target(vtb_output_rtsp)
     target_link_libraries(vtb_output INTERFACE vtb_output_rtsp)
+
+    add_executable(vtb-media-output-publisher
+        examples/media-output-publisher/main.cpp
+    )
+    target_link_libraries(vtb-media-output-publisher
+        PRIVATE
+            vtb_output_core
+            vtb_output_rtsp
+            PkgConfig::VTB_FFMPEG
+    )
+    vtb_configure_target(vtb-media-output-publisher)
+
+    if(VTB_ENABLE_ROCKCHIP_MPP_PUBLISHER)
+        if(VTB_ROCKCHIP_SYSROOT STREQUAL "")
+            message(FATAL_ERROR
+                "VTB_ROCKCHIP_SYSROOT is required for the Rockchip MPP publisher")
+        endif()
+        find_path(VTB_RGA_INCLUDE_DIR rga/im2d.h
+            PATHS "${VTB_ROCKCHIP_SYSROOT}/usr/include"
+            NO_DEFAULT_PATH
+            REQUIRED)
+        find_path(VTB_MPP_INCLUDE_DIR rockchip/rk_mpi.h
+            PATHS "${VTB_ROCKCHIP_SYSROOT}/usr/include"
+            NO_DEFAULT_PATH
+            REQUIRED)
+        find_library(VTB_RGA_LIBRARY rga
+            PATHS "${VTB_ROCKCHIP_SYSROOT}/usr/lib/aarch64-linux-gnu"
+            NO_DEFAULT_PATH
+            REQUIRED)
+        find_library(VTB_MPP_LIBRARY rockchip_mpp
+            PATHS "${VTB_ROCKCHIP_SYSROOT}/usr/lib/aarch64-linux-gnu"
+            NO_DEFAULT_PATH
+            REQUIRED)
+
+        add_executable(vtb-mpp-output-publisher
+            examples/mpp-output-publisher/main.cpp
+        )
+        target_include_directories(vtb-mpp-output-publisher SYSTEM PRIVATE
+            "${VTB_RGA_INCLUDE_DIR}"
+            "${VTB_MPP_INCLUDE_DIR}"
+        )
+        target_link_libraries(vtb-mpp-output-publisher
+            PRIVATE
+                vtb_output_core
+                vtb_output_rtsp
+                PkgConfig::VTB_FFMPEG
+                "${VTB_RGA_LIBRARY}"
+                "${VTB_MPP_LIBRARY}"
+        )
+        vtb_configure_target(vtb-mpp-output-publisher)
+    endif()
 endif()
 
 if(VTB_ENABLE_UVC_OUTPUT)

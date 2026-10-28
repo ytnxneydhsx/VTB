@@ -2,14 +2,25 @@
 
 import argparse
 import math
+import os
+import secrets
+import struct
 import sys
 import threading
+import time
 from pathlib import Path
 from typing import Optional
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_RUNTIME_DIR = PROJECT_ROOT / "third_party" / "openseeface"
+DEFAULT_RKNN_MODEL_DIR = PROJECT_ROOT / "models" / "openseeface"
+TIMED_FRAME_MAGIC = b"VTBF"
+TIMED_FRAME_VERSION = 1
+TIMED_FRAME_HEADER = struct.Struct("<4sHH" + "Q" * 11 + "II")
+TRACE_MARKER_SYNC = 0xD3
+TRACE_MARKER_CELL_SIZE = 16
+TRACE_MARKER_ROWS = 3
 
 # Same point connections used by OpenSeeFace's OpenSeeShowPoints Unity component.
 LINE_TARGETS = [
@@ -43,10 +54,38 @@ def parse_arguments() -> argparse.Namespace:
     parser.add_argument("--view-pitch", type=float, default=0.0, help="Virtual 3D view pitch in degrees")
     parser.add_argument("--show-lines", action="store_true", help="Connect points using the official OpenSeeFace face topology")
     parser.add_argument("--runtime-dir", type=Path, default=DEFAULT_RUNTIME_DIR)
+    parser.add_argument(
+        "--backend",
+        choices=("onnx", "rknn"),
+        default="onnx",
+        help="Inference backend for face detection and 66-point landmarks",
+    )
+    parser.add_argument(
+        "--rknn-model-dir",
+        type=Path,
+        default=DEFAULT_RKNN_MODEL_DIR,
+        help="Directory containing the OpenSeeFace RKNN models",
+    )
     parser.add_argument("--output-image", type=Path, help="Write the most recent rendered frame")
     parser.add_argument("--raw-output", action="store_true", help="Write consecutive BGR24 canvas frames to standard output")
+    parser.add_argument(
+        "--timed-raw-output",
+        action="store_true",
+        help="Write framed BGR24 records with monotonic stage timestamps",
+    )
     parser.add_argument("--no-window", action="store_true", help="Disable the local preview window")
     parser.add_argument("--max-frames", type=int, default=0, help="Stop after this many frames; zero runs continuously")
+    parser.add_argument(
+        "--latency-stats",
+        action="store_true",
+        help="Report live capture-to-points latency when the process exits",
+    )
+    parser.add_argument(
+        "--latency-warmup-frames",
+        type=int,
+        default=30,
+        help="Frames excluded from latency statistics",
+    )
     return parser.parse_args()
 
 
@@ -55,6 +94,7 @@ class LatestFrameCapture:
         self._capture = capture
         self._condition = threading.Condition()
         self._frame = None
+        self._frame_ready_at = None
         self._sequence = 0
         self._closed = False
         self._stop_requested = False
@@ -68,6 +108,7 @@ class LatestFrameCapture:
                     break
 
             frame_available, frame = self._capture.read()
+            frame_ready_at = time.monotonic_ns()
             if not frame_available:
                 with self._condition:
                     self._closed = True
@@ -76,6 +117,7 @@ class LatestFrameCapture:
 
             with self._condition:
                 self._frame = frame
+                self._frame_ready_at = frame_ready_at
                 self._sequence += 1
                 self._condition.notify_all()
 
@@ -93,9 +135,14 @@ class LatestFrameCapture:
                 self._condition.wait(timeout=1.0)
 
             if self._sequence <= previous_sequence or self._frame is None:
-                return False, previous_sequence, None
+                return False, previous_sequence, None, None
 
-            return True, self._sequence, self._frame.copy()
+            return (
+                True,
+                self._sequence,
+                self._frame.copy(),
+                self._frame_ready_at,
+            )
 
     def close(self) -> None:
         with self._condition:
@@ -310,9 +357,17 @@ def open_capture(cv2, capture_value: str, width: int, height: int, fps: int):
     return capture, is_live_camera
 
 
-def create_tracker(Tracker, model_dir: Path, frame, threads: int):
+def create_tracker(
+    Tracker,
+    model_dir: Path,
+    frame,
+    threads: int,
+    backend: str,
+    rknn_model_dir: Path,
+    measure_latency: bool,
+):
     frame_height, frame_width = frame.shape[:2]
-    return Tracker(
+    tracker = Tracker(
         frame_width,
         frame_height,
         model_type=3,
@@ -324,6 +379,38 @@ def create_tracker(Tracker, model_dir: Path, frame, threads: int):
         max_threads=threads,
         silent=True,
         static_model=True,
+    )
+    if backend == "rknn":
+        from openseeface_rknn_backend import attach_rknn_backend
+
+        attach_rknn_backend(
+            tracker,
+            rknn_model_dir,
+            enable_timing=measure_latency,
+        )
+    return tracker
+
+
+def latency_summary(np, samples):
+    values = np.asarray(samples, dtype=np.float64)
+    return {
+        "count": int(values.size),
+        "mean": float(values.mean()),
+        "p50": float(np.percentile(values, 50)),
+        "p95": float(np.percentile(values, 95)),
+        "maximum": float(values.max()),
+    }
+
+
+def print_latency_summary(np, label: str, samples) -> None:
+    if not samples:
+        return
+    summary = latency_summary(np, samples)
+    print(
+        f"LATENCY {label}: count={summary['count']} "
+        f"mean={summary['mean']:.3f}ms p50={summary['p50']:.3f}ms "
+        f"p95={summary['p95']:.3f}ms max={summary['maximum']:.3f}ms",
+        file=sys.stderr,
     )
 
 
@@ -344,8 +431,100 @@ def write_raw_frame(canvas) -> bool:
     return True
 
 
+def trace_marker_bytes(frame_id: int) -> bytes:
+    marker = bytes([TRACE_MARKER_SYNC]) + (frame_id & 0xFFFFFFFF).to_bytes(
+        4, byteorder="big"
+    )
+    checksum = 0
+    for value in marker:
+        checksum ^= value
+    return marker + bytes([checksum])
+
+
+def render_trace_marker(cv2, canvas, frame_id: int) -> None:
+    marker = trace_marker_bytes(frame_id)
+    bits = []
+    for value in marker:
+        for shift in range(7, -1, -1):
+            bits.append((value >> shift) & 1)
+
+    marker_width = len(bits) * TRACE_MARKER_CELL_SIZE
+    marker_height = TRACE_MARKER_ROWS * TRACE_MARKER_CELL_SIZE
+    canvas_height, canvas_width = canvas.shape[:2]
+    if marker_width > canvas_width or marker_height > canvas_height:
+        raise RuntimeError("Trace marker does not fit inside the output canvas")
+
+    origin_x = (canvas_width - marker_width) // 2
+    origin_y = canvas_height - marker_height
+    cv2.rectangle(
+        canvas,
+        (origin_x, origin_y),
+        (origin_x + marker_width - 1, canvas_height - 1),
+        (0, 0, 0),
+        thickness=-1,
+    )
+    for row in range(TRACE_MARKER_ROWS):
+        top = origin_y + row * TRACE_MARKER_CELL_SIZE
+        bottom = top + TRACE_MARKER_CELL_SIZE - 1
+        for index, bit in enumerate(bits):
+            if bit == 0:
+                continue
+            left = origin_x + index * TRACE_MARKER_CELL_SIZE
+            right = left + TRACE_MARKER_CELL_SIZE - 1
+            cv2.rectangle(
+                canvas,
+                (left, top),
+                (right, bottom),
+                (255, 255, 255),
+                thickness=-1,
+            )
+
+
+def write_all_vectors(fd: int, vectors) -> None:
+    pending = [memoryview(vector).cast("B") for vector in vectors]
+    while pending:
+        written = os.writev(fd, pending)
+        if written <= 0:
+            raise BrokenPipeError("Timed frame pipe stopped accepting data")
+        while pending and written >= len(pending[0]):
+            written -= len(pending[0])
+            pending.pop(0)
+        if pending and written > 0:
+            pending[0] = pending[0][written:]
+
+
+def write_timed_frame(canvas, timing) -> bool:
+    payload = memoryview(canvas).cast("B")
+    header = TIMED_FRAME_HEADER.pack(
+        TIMED_FRAME_MAGIC,
+        TIMED_FRAME_VERSION,
+        TIMED_FRAME_HEADER.size,
+        timing["session_id"],
+        timing["frame_id"],
+        timing["capture_sequence"],
+        timing["capture_ready_ns"],
+        timing["inference_start_ns"],
+        timing["detector_start_ns"],
+        timing["detector_end_ns"],
+        timing["landmark_start_ns"],
+        timing["landmark_end_ns"],
+        timing["points_ready_ns"],
+        timing["canvas_ready_ns"],
+        len(payload),
+        1,
+    )
+    try:
+        write_all_vectors(sys.stdout.fileno(), (header, payload))
+    except BrokenPipeError:
+        return False
+    return True
+
+
 def main() -> int:
     args = parse_arguments()
+    if args.raw_output and args.timed_raw_output:
+        print("Choose either --raw-output or --timed-raw-output.", file=sys.stderr)
+        return 2
 
     try:
         import cv2
@@ -389,31 +568,90 @@ def main() -> int:
     tracker = None
     frame_count = 0
     capture_sequence = 0
+    trace_session_id = secrets.randbits(53)
+    if trace_session_id == 0:
+        trace_session_id = 1
     last_canvas = render_no_face(cv2, np, args.canvas_width, args.canvas_height)
+    capture_to_points_ms = []
+    frame_handoff_ms = []
+    tracker_predict_ms = []
+    measurement_started_at = None
+    measurement_finished_at = None
 
     try:
         while True:
             if image is not None:
                 frame = image.copy()
                 frame_available = True
+                frame_ready_at = time.monotonic_ns()
             elif latest_capture is not None:
-                frame_available, capture_sequence, frame = latest_capture.read_after(
-                    capture_sequence
-                )
+                (
+                    frame_available,
+                    capture_sequence,
+                    frame,
+                    frame_ready_at,
+                ) = latest_capture.read_after(capture_sequence)
             else:
                 frame_available, frame = capture.read()
+                frame_ready_at = time.monotonic_ns()
 
             if not frame_available:
                 break
 
             if tracker is None:
-                tracker = create_tracker(Tracker, model_dir, frame, args.threads)
+                tracker = create_tracker(
+                    Tracker,
+                    model_dir,
+                    frame,
+                    args.threads,
+                    args.backend,
+                    args.rknn_model_dir.resolve(),
+                    args.latency_stats or args.timed_raw_output,
+                )
                 if args.assume_face_crop:
                     frame_height, frame_width = frame.shape[:2]
                     tracker.detected = 1
                     tracker.faces = [(0, 0, frame_width, frame_height)]
 
+            if args.backend == "rknn" and args.timed_raw_output:
+                from openseeface_rknn_backend import begin_rknn_frame_trace
+
+                begin_rknn_frame_trace(tracker)
+
+            processing_started_at = time.monotonic_ns()
             faces = tracker.predict(frame)
+            points_ready_at = time.monotonic_ns()
+            detector_start_ns = 0
+            detector_end_ns = 0
+            landmark_start_ns = 0
+            landmark_end_ns = 0
+            if args.backend == "rknn" and args.timed_raw_output:
+                from openseeface_rknn_backend import rknn_frame_trace
+
+                rknn_trace = rknn_frame_trace(tracker)
+                detector_start_ns, detector_end_ns = rknn_trace.get(
+                    "detector", (0, 0)
+                )
+                landmark_start_ns, landmark_end_ns = rknn_trace.get(
+                    "landmark", (0, 0)
+                )
+            if (
+                args.latency_stats
+                and frame_ready_at is not None
+                and frame_count >= args.latency_warmup_frames
+            ):
+                if measurement_started_at is None:
+                    measurement_started_at = processing_started_at
+                measurement_finished_at = points_ready_at
+                frame_handoff_ms.append(
+                    (processing_started_at - frame_ready_at) / 1_000_000.0
+                )
+                tracker_predict_ms.append(
+                    (points_ready_at - processing_started_at) / 1_000_000.0
+                )
+                capture_to_points_ms.append(
+                    (points_ready_at - frame_ready_at) / 1_000_000.0
+                )
             if len(faces) > 0:
                 last_canvas = render_face(
                     cv2,
@@ -429,7 +667,27 @@ def main() -> int:
                     cv2, np, args.canvas_width, args.canvas_height
                 )
 
-            frame_count += 1
+            frame_id = frame_count + 1
+            if args.timed_raw_output:
+                render_trace_marker(cv2, last_canvas, frame_id)
+            canvas_ready_at = time.monotonic_ns()
+            frame_count = frame_id
+            if args.timed_raw_output:
+                timing = {
+                    "session_id": trace_session_id,
+                    "frame_id": frame_id,
+                    "capture_sequence": capture_sequence,
+                    "capture_ready_ns": frame_ready_at,
+                    "inference_start_ns": processing_started_at,
+                    "detector_start_ns": detector_start_ns,
+                    "detector_end_ns": detector_end_ns,
+                    "landmark_start_ns": landmark_start_ns,
+                    "landmark_end_ns": landmark_end_ns,
+                    "points_ready_ns": points_ready_at,
+                    "canvas_ready_ns": canvas_ready_at,
+                }
+                if not write_timed_frame(last_canvas, timing):
+                    break
             if args.raw_output and not write_raw_frame(last_canvas):
                 break
             if not args.no_window:
@@ -449,6 +707,34 @@ def main() -> int:
             capture.release()
         if not args.no_window:
             cv2.destroyAllWindows()
+        if tracker is not None and args.backend == "rknn":
+            if args.latency_stats:
+                from openseeface_rknn_backend import rknn_timing_samples
+
+                for label, samples in rknn_timing_samples(tracker).items():
+                    print_latency_summary(np, f"rknn_{label}", samples)
+            from openseeface_rknn_backend import release_rknn_backend
+
+            release_rknn_backend(tracker)
+
+    if args.latency_stats:
+        print_latency_summary(np, "frame_handoff", frame_handoff_ms)
+        print_latency_summary(np, "tracker_predict", tracker_predict_ms)
+        print_latency_summary(np, "capture_ready_to_points", capture_to_points_ms)
+        if (
+            measurement_started_at is not None
+            and measurement_finished_at is not None
+            and measurement_finished_at > measurement_started_at
+        ):
+            duration = (
+                measurement_finished_at - measurement_started_at
+            ) / 1_000_000_000.0
+            throughput = len(capture_to_points_ms) / duration
+            print(
+                f"LATENCY throughput: frames={len(capture_to_points_ms)} "
+                f"duration={duration:.3f}s fps={throughput:.3f}",
+                file=sys.stderr,
+            )
 
     write_output_image(cv2, args.output_image, last_canvas)
     return 0

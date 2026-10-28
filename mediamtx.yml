@@ -14,8 +14,9 @@ hls: false
 webrtc: true
 webrtcAddress: :8889
 webrtcLocalUDPAddress: :8189
-webrtcLocalTCPAddress: ""
+webrtcLocalTCPAddress: :18189
 webrtcIPsFromInterfaces: true
+webrtcAdditionalHosts: [127.0.0.1]
 srt: false
 moq: false
 

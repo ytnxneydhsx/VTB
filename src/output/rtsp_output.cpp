@@ -274,12 +274,6 @@ void RtspOutput::start(const std::vector<StreamDescriptor>& descriptors) {
             av_dict_free(&options);
             throw_ffmpeg_error("av_dict_set(rtsp_transport)", result);
         }
-        const std::string timeout_us = std::to_string(io_timeout_.count() * 1000);
-        result = av_dict_set(&options, "rw_timeout", timeout_us.c_str(), 0);
-        if (result < 0) {
-            av_dict_free(&options);
-            throw_ffmpeg_error("av_dict_set(rw_timeout)", result);
-        }
         result = avformat_write_header(context_, &options);
         if (result >= 0) {
             header_written_ = true;
