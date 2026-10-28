@@ -7,7 +7,7 @@ Mac 与 RK3588 的直连调试、上网优先级和仓库同步脚本见 [`netwo
 - `src/main.cpp`：新的 VTB 主程序入口，生成 `build/vtb`。
 - `examples/camera-info/main.cpp`：归档的摄像头信息示例，生成 `build/camera-info`。程序固定打开 `/dev/video0`，打印摄像头支持的格式、分辨率和帧率；它不会读取画面。
 
-构建：
+在按 `AGENTS.md` 准备好的远端 ARM64 交叉编译任务目录中构建：
 
 ```bash
 cmake -S . -B build -G Ninja
@@ -25,6 +25,57 @@ cmake --build build
 ```
 
 阅读摄像头信息示例时，先看 `open` 如何得到设备 fd，再按“格式 → 分辨率 → 帧率”看三个查询循环，最后看 `close`。
+
+## 公共媒体输出层
+
+公共输出层接收上游已经编码或格式化的媒体包，并把它们分发到独立的 RTSP、UVC 和 UAC2 出口。它不执行视频或音频编解码，也不创建或修改 USB Gadget configfs 配置。设计理由、失败边界和验证指标见 [`docs/stream-output-abstraction.md`](docs/stream-output-abstraction.md)。
+
+主要入口：
+
+- `StreamDescriptor`：注册固定的视频或音频格式；
+- `MediaPacket`：携带流 ID、单调时钟纳秒时间戳和不可变共享负载；
+- `OutputManager`：管理出口、绑定、有界队列、工作线程、重试和状态；
+- `RtspOutput`：使用 libavformat 向 RTSP/MediaMTX 发布已编码数据；
+- `UvcOutput`：使用 V4L2 Video Output 向已配置的 UVC Gadget 节点写帧；
+- `Uac2Output`：使用 ALSA PLAYBACK 向已确认映射的 UAC2 Gadget PCM 写入 PCM 数据。
+
+构建选项默认全部启用：
+
+```text
+VTB_ENABLE_RTSP_OUTPUT=ON
+VTB_ENABLE_UVC_OUTPUT=ON
+VTB_ENABLE_UAC2_OUTPUT=ON
+```
+
+目标 ARM64 sysroot 需要提供 FFmpeg 的 `libavformat`、`libavcodec`、`libavutil` 开发文件及 ALSA 开发文件。实际构建遵守 `AGENTS.md` 的远端交叉编译流程；缺少工具链或 sysroot 时不回退到 Mac 或 RK3588 本地构建。
+
+只验证公共契约、队列和 FakeOutput 测试时，可以在远端 ARM64 交叉构建中显式关闭设备后端：
+
+```bash
+cmake -S . -B build-core -G Ninja \
+  -DVTB_ENABLE_RTSP_OUTPUT=OFF \
+  -DVTB_ENABLE_UVC_OUTPUT=OFF \
+  -DVTB_ENABLE_UAC2_OUTPUT=OFF
+```
+
+`vtb-output-cli` 提供首版交互控制面：
+
+```text
+help
+register-video <id> <version> <format> <width> <height> <fps_num> <fps_den> <encoded 0|1> [codec_config_hex]
+register-audio <id> <version> <format> <rate> <channels> <encoded 0|1> [codec_config_hex]
+add-rtsp <id> <url> [queue]
+add-uvc <id> <device> [queue]
+add-uac2 <id> <pcm> [queue]
+bind <output-id> <stream-id>
+start <output-id>
+stop <output-id>
+list
+remove <output-id>
+quit
+```
+
+这个独立 CLI 不生成媒体包，主要用于验证配置、生命周期和状态。处理链接入后由同一进程调用 `OutputManager::publish()` 发送数据。执行 `start` 会打开网络或设备资源；UVC/UAC2 的物理测试需要先确认 Gadget、设备路径和 ALSA 方向，并按测试授权单独进行。
 
 ## RTSP 推流
 
