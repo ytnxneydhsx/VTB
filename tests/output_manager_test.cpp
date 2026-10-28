@@ -239,9 +239,9 @@ void test_failure_isolation() {
     assert(broken_error_observed);
     assert(healthy->writes() == 1);
     assert(broken->stop_ran_on_start_thread());
-    assert(healthy->stop_ran_on_start_thread());
     manager.stop("broken");
     manager.stop("healthy");
+    assert(healthy->stop_ran_on_start_thread());
 }
 
 void test_stop_wakes_blocked_write() {
