@@ -101,7 +101,7 @@ quit
 ./scripts/install-openseeface-models.sh
 ```
 
-模型保存在 `models/openseeface/`，具体来源、版本和阶段边界见 [`models/openseeface/README.md`](models/openseeface/README.md)。当前阶段不发送跟踪数据，也不输出摄像头原始画面。
+模型保存在 `models/openseeface/`，具体来源、版本和转换说明见 [`models/openseeface/README.md`](models/openseeface/README.md)。下述本地预览只绘制跟踪结果；浏览器推流链路见后续章节。
 
 安装 OpenSeeFace Python 运行代码并启动黑底三维点预览：
 
@@ -119,8 +119,12 @@ build/openseeface-venv/bin/python tools/openseeface_3d_preview.py --capture 0
 RK3588 上的 EMEET SmartCam C60E 4K 使用 `/dev/video0` 输出图像，支持 MJPEG `1280×720 @ 60fps`；`/dev/video1` 是 UVC 元数据节点。浏览器链路为：
 
 ```text
-/dev/video0 → OpenSeeFace → 黑底66点画布 → H.264 → MediaMTX → WebRTC浏览器
+/dev/video0 → OpenSeeFace/RKNN NPU → 黑底66点画布 → MPP H.264 → MediaMTX → WebRTC浏览器
 ```
+
+浏览器推流默认使用 `rknn` 后端：`mnv3_detection_fp16.rknn` 在 NPU Core0
+执行人脸检测，`lm_model3_fp16.rknn` 在 NPU Core1 执行 66 点推理。只有诊断
+CPU 版本时才设置 `VTB_FACE3D_BACKEND=onnx`。
 
 前台启动：
 
@@ -134,9 +138,22 @@ Mac 浏览器访问：
 http://rk3588-ubuntu.local:8889/face3d
 ```
 
-MediaMTX 使用 TCP `8889` 提供 WebRTC 页面和信令，使用 UDP `8189` 传输媒体。当前 FFmpeg 使用 `libx264` 的无 B 帧、`zerolatency` 配置；RK 上现有 FFmpeg 没有 `h264_rkmpp`，MPP 设备权限也尚未提供给普通用户，因此硬件编码留待单独验证。采集线程始终覆盖旧帧，推理只读取最新帧，避免处理速度下降时持续累积延迟。
+MediaMTX 使用 TCP `8889` 提供 WebRTC 页面和信令，局域网媒体使用 UDP
+`8189`。Mac 与 RK 无法直接互访时，通过现有 FRP SSH 建立 TCP 媒体回退：
+
+```bash
+ssh -fN \
+  -L 127.0.0.1:8889:127.0.0.1:8889 \
+  -L 127.0.0.1:18189:127.0.0.1:18189 \
+  rk3588-aliyun
+```
+
+随后访问 `http://127.0.0.1:8889/face3d/`。当前链路通过
+`vtb-mpp-output-publisher` 使用 RK3588 MPP 硬件编码 H.264。采集线程始终覆盖
+旧帧，推理只读取最新帧，避免处理速度下降时持续累积延迟。
 
 验证时分别记录摄像头取帧到推理完成、画布生成到 H.264 输出、WebRTC 接收播放的 P50/P95 延迟。首版的主要目标是保持延迟有界；帧率随实际模型吞吐量变化。
+
 ## RTSP 推流
 
 本项目使用 MediaMTX `v1.21.2` Linux ARM64 官方可执行文件作为 RTSP 服务。FFmpeg 从 `/dev/video0` 读取 `MJPG 1280x720 @ 30 fps`，解码后以低延迟 H.264 Baseline 编码发布到 `/camera`。MediaMTX 二进制保留在本机 `bin/mediamtx`，Git 仓库只保存安装脚本与配置。

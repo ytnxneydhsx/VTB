@@ -17,9 +17,21 @@
 ./scripts/install-openseeface-models.sh
 ```
 
-ONNX 文件属于本地生成物，不提交到 Git。安装脚本固定下载地址并校验 SHA-256。
+安装脚本固定下载地址并校验 SHA-256。
 
-当前阶段包含模型下载、加载、推理验证和黑底三维点预览。UDP 发送、视频编码及 VTube Studio 参数映射将在后续阶段分别接入。
+ONNX 与 RKNN 文件都属于本地生成物，不提交到 Git。RKNN 转换脚本读取
+`mnv3_detection.onnx` 和 `lm_model3.onnx`，在安装了 RKNN-Toolkit2 的 x86-64
+环境中运行：
+
+```bash
+python3 tools/convert_openseeface_rknn.py \
+  --input-dir /path/to/openseeface-models \
+  --output-dir models/openseeface
+```
+
+脚本生成 `mnv3_detection_fp16.rknn` 和 `lm_model3_fp16.rknn`。RK3588 端还需
+安装与 NPU 驱动匹配的 RKNNLite2 Python 运行时。浏览器推流默认把检测模型
+分配到 NPU Core0，把 66 点模型分配到 NPU Core1。
 
 ## 黑底三维点预览
 
