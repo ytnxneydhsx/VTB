@@ -28,7 +28,7 @@ cmake --build build
 
 ## 公共媒体输出层
 
-公共输出层接收上游已经编码或格式化的媒体包，并把它们分发到独立的 RTSP、UVC 和 UAC2 出口。它不执行视频或音频编解码，也不创建或修改 USB Gadget configfs 配置。设计理由、失败边界和验证指标见 [`docs/stream-output-abstraction.md`](docs/stream-output-abstraction.md)。
+公共输出层是一组进程内 C++ 库。调用方链接所需目标，创建 `OutputManager`，再把已经编码或格式化的媒体包交给 `publish()`；库负责分发到独立的 RTSP、UVC 和 UAC2 出口。它不启动独立服务，不要求 IPC，不执行视频或音频编解码，也不创建或修改 USB Gadget configfs 配置。设计理由、失败边界和验证指标见 [`docs/stream-output-abstraction.md`](docs/stream-output-abstraction.md)。
 
 主要入口：
 
@@ -39,13 +39,22 @@ cmake --build build
 - `UvcOutput`：使用 V4L2 Video Output 向已配置的 UVC Gadget 节点写帧；
 - `Uac2Output`：使用 ALSA PLAYBACK 向已确认映射的 UAC2 Gadget PCM 写入 PCM 数据。
 
-构建选项默认全部启用：
+三个后端默认启用，CLI 示例默认关闭：
 
 ```text
 VTB_ENABLE_RTSP_OUTPUT=ON
 VTB_ENABLE_UVC_OUTPUT=ON
 VTB_ENABLE_UAC2_OUTPUT=ON
+VTB_BUILD_OUTPUT_CLI=OFF
 ```
+
+同一 CMake 工程中的调用方可以直接链接聚合库：
+
+```cmake
+target_link_libraries(your_pipeline PRIVATE vtb::output)
+```
+
+只需要部分能力时，也可以分别链接 `vtb::output_core`、`vtb::output_rtsp`、`vtb::output_uvc` 或 `vtb::output_uac2`。
 
 目标 ARM64 sysroot 需要提供 FFmpeg 的 `libavformat`、`libavcodec`、`libavutil` 开发文件及 ALSA 开发文件。实际构建遵守 `AGENTS.md` 的远端交叉编译流程；缺少工具链或 sysroot 时不回退到 Mac 或 RK3588 本地构建。
 
@@ -58,7 +67,7 @@ cmake -S . -B build-core -G Ninja \
   -DVTB_ENABLE_UAC2_OUTPUT=OFF
 ```
 
-`vtb-output-cli` 提供首版交互控制面：
+需要人工诊断生命周期时，可显式增加 `-DVTB_BUILD_OUTPUT_CLI=ON` 构建可选的 `vtb-output-cli` 示例：
 
 ```text
 help
@@ -75,7 +84,7 @@ remove <output-id>
 quit
 ```
 
-这个独立 CLI 不生成媒体包，主要用于验证配置、生命周期和状态。处理链接入后由同一进程调用 `OutputManager::publish()` 发送数据。执行 `start` 会打开网络或设备资源；UVC/UAC2 的物理测试需要先确认 Gadget、设备路径和 ALSA 方向，并按测试授权单独进行。
+这个 CLI 不属于库的运行依赖，也不生成媒体包，只用于人工验证配置、生命周期和状态。业务处理链在自己的进程中直接调用 `OutputManager::publish()`。执行 CLI 的 `start` 会打开网络或设备资源；UVC/UAC2 的物理测试需要先确认 Gadget、设备路径和 ALSA 方向，并按测试授权单独进行。
 
 ## RTSP 推流
 

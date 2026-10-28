@@ -7,6 +7,7 @@ include(CTest)
 option(VTB_ENABLE_RTSP_OUTPUT "Build the libavformat RTSP output" ON)
 option(VTB_ENABLE_UVC_OUTPUT "Build the Linux V4L2 UVC Gadget output" ON)
 option(VTB_ENABLE_UAC2_OUTPUT "Build the ALSA UAC2 Gadget output" ON)
+option(VTB_BUILD_OUTPUT_CLI "Build the optional output control example" OFF)
 
 function(vtb_configure_target target)
     target_compile_features(${target} PRIVATE cxx_std_17)
@@ -19,11 +20,13 @@ add_library(vtb_output_core STATIC
     src/output/media.cpp
     src/output/output_manager.cpp
 )
+add_library(vtb::output_core ALIAS vtb_output_core)
 target_include_directories(vtb_output_core PUBLIC include)
 target_link_libraries(vtb_output_core PUBLIC Threads::Threads)
 vtb_configure_target(vtb_output_core)
 
 add_library(vtb_output INTERFACE)
+add_library(vtb::output ALIAS vtb_output)
 target_link_libraries(vtb_output INTERFACE vtb_output_core)
 
 if(VTB_ENABLE_RTSP_OUTPUT)
@@ -34,6 +37,7 @@ if(VTB_ENABLE_RTSP_OUTPUT)
         libavutil
     )
     add_library(vtb_output_rtsp STATIC src/output/rtsp_output.cpp)
+    add_library(vtb::output_rtsp ALIAS vtb_output_rtsp)
     target_include_directories(vtb_output_rtsp PUBLIC include)
     target_link_libraries(vtb_output_rtsp
         PUBLIC vtb_output_core
@@ -45,6 +49,7 @@ endif()
 
 if(VTB_ENABLE_UVC_OUTPUT)
     add_library(vtb_output_uvc STATIC src/output/uvc_output.cpp)
+    add_library(vtb::output_uvc ALIAS vtb_output_uvc)
     target_include_directories(vtb_output_uvc PUBLIC include)
     target_link_libraries(vtb_output_uvc PUBLIC vtb_output_core)
     vtb_configure_target(vtb_output_uvc)
@@ -54,6 +59,7 @@ endif()
 if(VTB_ENABLE_UAC2_OUTPUT)
     find_package(ALSA REQUIRED)
     add_library(vtb_output_uac2 STATIC src/output/uac2_output.cpp)
+    add_library(vtb::output_uac2 ALIAS vtb_output_uac2)
     target_include_directories(vtb_output_uac2
         PUBLIC
             include
@@ -67,7 +73,12 @@ if(VTB_ENABLE_UAC2_OUTPUT)
     target_link_libraries(vtb_output INTERFACE vtb_output_uac2)
 endif()
 
-if(VTB_ENABLE_RTSP_OUTPUT AND VTB_ENABLE_UVC_OUTPUT AND VTB_ENABLE_UAC2_OUTPUT)
+if(VTB_BUILD_OUTPUT_CLI)
+    if(NOT VTB_ENABLE_RTSP_OUTPUT OR NOT VTB_ENABLE_UVC_OUTPUT OR
+       NOT VTB_ENABLE_UAC2_OUTPUT)
+        message(FATAL_ERROR
+            "VTB_BUILD_OUTPUT_CLI requires the RTSP, UVC and UAC2 outputs")
+    endif()
     add_library(vtb_output_cli STATIC src/output/output_cli.cpp)
     target_include_directories(vtb_output_cli PUBLIC include)
     target_link_libraries(vtb_output_cli PUBLIC vtb_output)

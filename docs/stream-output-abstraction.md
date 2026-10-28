@@ -69,7 +69,7 @@
 
 ## 命令行边界
 
-首版提供交互式命令行，由命令注册流、创建出口并执行 `list`、`start`、`stop`、`bind`、`unbind`、`remove` 和 `quit`。HTTP、Unix Socket 控制、启动配置文件和配置自动保存留到出现实际调用方后再实现。
+公共输出层以进程内 C++ 库形式提供，调用方直接管理流、出口和 `publish()`。交互式命令行是默认关闭的诊断示例，可由命令注册流、创建出口并执行 `list`、`start`、`stop`、`bind`、`unbind`、`remove` 和 `quit`。HTTP、Unix Socket 控制、启动配置文件和配置自动保存留到出现实际调用方后再实现。
 
 ## 分阶段验证
 
