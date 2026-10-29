@@ -16,6 +16,14 @@ endfunction()
 
 find_package(Threads REQUIRED)
 
+add_library(vtb_instrumentation STATIC
+    src/instrumentation/timer.cpp
+)
+add_library(vtb::instrumentation ALIAS vtb_instrumentation)
+target_include_directories(vtb_instrumentation PUBLIC include)
+target_link_libraries(vtb_instrumentation PUBLIC Threads::Threads)
+vtb_configure_target(vtb_instrumentation)
+
 add_library(vtb_output_core STATIC
     src/output/media.cpp
     src/output/output_manager.cpp
@@ -96,6 +104,11 @@ add_executable(camera-info examples/camera-info/main.cpp)
 vtb_configure_target(camera-info)
 
 if(BUILD_TESTING)
+    add_executable(instrumentation-timer-test tests/instrumentation_timer_test.cpp)
+    target_link_libraries(instrumentation-timer-test PRIVATE vtb_instrumentation)
+    vtb_configure_target(instrumentation-timer-test)
+    add_test(NAME instrumentation-timer COMMAND instrumentation-timer-test)
+
     add_executable(output-manager-test tests/output_manager_test.cpp)
     target_link_libraries(output-manager-test PRIVATE vtb_output_core)
     vtb_configure_target(output-manager-test)
