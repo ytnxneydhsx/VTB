@@ -12,6 +12,9 @@
 #include "platform/linuxbsd/platform_egl.h"
 #include "platform/linuxbsd/platform_gl.h"
 #include "servers/rendering/rendering_server.h"
+#include "vtb/instrumentation/timer.hpp"
+#include "vtb/output/output_manager.hpp"
+#include "vtb/output/rtsp_output.hpp"
 
 #include <drm/drm_fourcc.h>
 #include <linux/dma-heap.h>
@@ -33,10 +36,16 @@
 
 #include <cerrno>
 #include <algorithm>
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
 #include <deque>
+#include <exception>
+#include <memory>
+#include <string>
+#include <thread>
+#include <utility>
 #include <vector>
 
 namespace {
@@ -55,6 +64,12 @@ using GlEglImageTargetTexture2DProc = void (*)(GLenum, void *);
 
 String errno_message(const String &p_prefix) {
 	return p_prefix + ": " + String::utf8(std::strerror(errno));
+}
+
+uint64_t monotonic_now_ns() {
+	const auto now = std::chrono::steady_clock::now().time_since_epoch();
+	return static_cast<uint64_t>(
+			std::chrono::duration_cast<std::chrono::nanoseconds>(now).count());
 }
 
 class UniqueFd {
@@ -300,6 +315,8 @@ private:
 
 class MppEncoder {
 public:
+	static constexpr RK_S32 FIXED_QP = 18;
+
 	MppEncoder() = default;
 	~MppEncoder() { shutdown(); }
 
@@ -308,15 +325,8 @@ public:
 	MppEncoder(MppEncoder &&) = delete;
 	MppEncoder &operator=(MppEncoder &&) = delete;
 
-	Error initialize(const DmaBuffer &p_input, const String &p_output_path, int p_width, int p_height,
+	Error initialize(const DmaBuffer &p_input, int p_width, int p_height,
 			int p_stride, int p_vertical_stride, int p_fps, String &r_error) {
-		CharString output_path_utf8 = p_output_path.utf8();
-		output_fd.reset(open(output_path_utf8.get_data(), O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0644));
-		if (output_fd.get() < 0) {
-			r_error = errno_message("open output file failed: " + p_output_path);
-			return ERR_CANT_OPEN;
-		}
-
 		MPP_RET result = mpp_create(&context, &api);
 		if (result != MPP_OK) {
 			r_error = "mpp_create failed: " + itos(result);
@@ -350,16 +360,16 @@ public:
 		const char *config_names[] = {
 			"prep:width", "prep:height", "prep:hor_stride", "prep:ver_stride", "prep:format",
 			"rc:mode", "rc:fps_in_flex", "rc:fps_in_num", "rc:fps_in_denorm", "rc:fps_out_flex",
-			"rc:fps_out_num", "rc:fps_out_denorm", "rc:gop", "rc:bps_target", "rc:bps_max",
-			"rc:bps_min", "codec:type", "h264:profile", "h264:level", "h264:cabac_en",
-			"h264:cabac_idc", "h264:trans8x8",
+			"rc:fps_out_num", "rc:fps_out_denorm", "rc:gop", "codec:type", "h264:profile",
+			"h264:level", "h264:cabac_en", "h264:cabac_idc", "h264:trans8x8", "h264:qp_init",
+			"h264:qp_min", "h264:qp_max", "h264:qp_min_i", "h264:qp_max_i",
 		};
 		RK_S32 config_values[] = {
 			p_width, p_height, p_stride, p_vertical_stride, MPP_FMT_YUV420SP,
-			MPP_ENC_RC_MODE_CBR, 0, p_fps, 1, 0,
-			p_fps, 1, p_fps * 2, 8'000'000, 8'500'000,
-			7'500'000, MPP_VIDEO_CodingAVC, 100, 40, 1,
-			0, 1,
+			MPP_ENC_RC_MODE_FIXQP, 0, p_fps, 1, 0,
+			p_fps, 1, p_fps * 2, MPP_VIDEO_CodingAVC, 100,
+			40, 1, 0, 1, FIXED_QP,
+			FIXED_QP, FIXED_QP, FIXED_QP, FIXED_QP,
 		};
 		for (uint32_t i = 0; i < sizeof(config_values) / sizeof(config_values[0]); i++) {
 			Error error = set_config(config_names[i], config_values[i], r_error);
@@ -373,6 +383,7 @@ public:
 			r_error = "MPP_ENC_SET_CFG failed: " + itos(result);
 			return FAILED;
 		}
+		print_line(vformat("OPENVT_MPP_CONFIG mode=fixqp qp=%d gop=%d", FIXED_QP, p_fps * 2));
 
 		MppEncHeaderMode header_mode = MPP_ENC_HEADER_MODE_EACH_IDR;
 		result = api->control(context, MPP_ENC_SET_HEADER_MODE, &header_mode);
@@ -403,12 +414,41 @@ public:
 		mpp_frame_set_ver_stride(frame, p_vertical_stride);
 		mpp_frame_set_fmt(frame, MPP_FMT_YUV420SP);
 		mpp_frame_set_buffer(frame, input_buffer);
-		fps = p_fps;
 		return OK;
 	}
 
-	Error encode_frame(int p_frame_index, bool p_end_of_stream, String &r_error) {
-		mpp_frame_set_pts(frame, static_cast<RK_S64>(p_frame_index) * 1'000'000 / fps);
+	Error codec_configuration(std::vector<uint8_t> &r_configuration, String &r_error) {
+		std::vector<uint8_t> storage(4096);
+		MppPacket packet = nullptr;
+		MPP_RET result = mpp_packet_init(&packet, storage.data(), storage.size());
+		if (result != MPP_OK || packet == nullptr) {
+			r_error = "mpp_packet_init for AVC header failed: " + itos(result);
+			return ERR_CANT_CREATE;
+		}
+		mpp_packet_set_length(packet, 0);
+		result = api->control(context, MPP_ENC_GET_HDR_SYNC, packet);
+		if (result != MPP_OK) {
+			mpp_packet_deinit(&packet);
+			r_error = "MPP_ENC_GET_HDR_SYNC failed: " + itos(result);
+			return FAILED;
+		}
+		void *position = mpp_packet_get_pos(packet);
+		size_t length = mpp_packet_get_length(packet);
+		if (position == nullptr || length == 0) {
+			mpp_packet_deinit(&packet);
+			r_error = "MPP returned an empty AVC header";
+			return ERR_INVALID_DATA;
+		}
+		const uint8_t *first = static_cast<const uint8_t *>(position);
+		r_configuration.assign(first, first + length);
+		mpp_packet_deinit(&packet);
+		return OK;
+	}
+
+	Error encode_frame(uint64_t p_pts_ns, bool p_end_of_stream,
+			std::shared_ptr<const std::vector<uint8_t>> &r_payload,
+			uint64_t &r_pts_ns, uint64_t &r_dts_ns, bool &r_keyframe, String &r_error) {
+		mpp_frame_set_pts(frame, static_cast<RK_S64>(p_pts_ns));
 		RK_U32 eos_value = 0;
 		if (p_end_of_stream) {
 			eos_value = 1;
@@ -436,21 +476,20 @@ public:
 			return ERR_INVALID_DATA;
 		}
 
-		const uint8_t *next_byte = static_cast<const uint8_t *>(position);
-		size_t remaining = length;
-		while (remaining > 0) {
-			ssize_t written = write(output_fd.get(), next_byte, remaining);
-			if (written < 0 && errno == EINTR) {
-				continue;
-			}
-			if (written <= 0) {
-				mpp_packet_deinit(&packet);
-				r_error = errno_message("write encoded packet failed");
-				return ERR_FILE_CANT_WRITE;
-			}
-			next_byte += written;
-			remaining -= static_cast<size_t>(written);
+		const uint8_t *first = static_cast<const uint8_t *>(position);
+		auto payload = std::make_shared<std::vector<uint8_t>>(first, first + length);
+		r_keyframe = contains_idr(*payload);
+		RK_S64 packet_pts = mpp_packet_get_pts(packet);
+		RK_S64 packet_dts = mpp_packet_get_dts(packet);
+		r_pts_ns = p_pts_ns;
+		if (packet_pts >= 0) {
+			r_pts_ns = static_cast<uint64_t>(packet_pts);
 		}
+		r_dts_ns = p_pts_ns;
+		if (packet_dts >= 0) {
+			r_dts_ns = static_cast<uint64_t>(packet_dts);
+		}
+		r_payload = std::move(payload);
 		mpp_packet_deinit(&packet);
 
 		encoded_bytes += length;
@@ -473,7 +512,6 @@ public:
 			mpp_destroy(context);
 			context = nullptr;
 		}
-		output_fd.reset();
 	}
 
 	size_t get_encoded_bytes() const { return encoded_bytes; }
@@ -488,14 +526,192 @@ private:
 		return OK;
 	}
 
+	static bool contains_idr(const std::vector<uint8_t> &p_bytes) {
+		for (size_t index = 0; index + 4 < p_bytes.size(); index++) {
+			size_t nal_index = 0;
+			if (p_bytes[index] == 0 && p_bytes[index + 1] == 0 && p_bytes[index + 2] == 1) {
+				nal_index = index + 3;
+			} else if (index + 5 < p_bytes.size() && p_bytes[index] == 0 &&
+					p_bytes[index + 1] == 0 && p_bytes[index + 2] == 0 && p_bytes[index + 3] == 1) {
+				nal_index = index + 4;
+			}
+			if (nal_index != 0 && (p_bytes[nal_index] & 0x1fU) == 5U) {
+				return true;
+			}
+		}
+		return false;
+	}
+
 	MppCtx context = nullptr;
 	MppApi *api = nullptr;
 	MppEncCfg config = nullptr;
 	MppBuffer input_buffer = nullptr;
 	MppFrame frame = nullptr;
-	UniqueFd output_fd;
-	int fps = 0;
 	size_t encoded_bytes = 0;
+};
+
+class TimedOutput final : public vtb::Output {
+public:
+	TimedOutput(std::unique_ptr<vtb::Output> p_output,
+			vtb::instrumentation::TimerHandle p_write_timer) :
+			output(std::move(p_output)), write_timer(std::move(p_write_timer)) {}
+	~TimedOutput() override = default;
+
+	TimedOutput(const TimedOutput &) = delete;
+	TimedOutput &operator=(const TimedOutput &) = delete;
+	TimedOutput(TimedOutput &&) = delete;
+	TimedOutput &operator=(TimedOutput &&) = delete;
+
+	bool supports(const vtb::StreamDescriptor &p_descriptor) const override {
+		return output->supports(p_descriptor);
+	}
+
+	void start(const std::vector<vtb::StreamDescriptor> &p_descriptors) override {
+		output->start(p_descriptors);
+	}
+
+	void write(const vtb::MediaPacket &p_packet) override {
+		auto timer = write_timer.scope();
+		output->write(p_packet);
+	}
+
+	void request_stop() noexcept override { output->request_stop(); }
+	void stop() noexcept override { output->stop(); }
+	std::string name() const override { return output->name(); }
+
+private:
+	std::unique_ptr<vtb::Output> output;
+	vtb::instrumentation::TimerHandle write_timer;
+};
+
+class RtspPublisher {
+public:
+	RtspPublisher() = default;
+	~RtspPublisher() { shutdown(); }
+
+	RtspPublisher(const RtspPublisher &) = delete;
+	RtspPublisher &operator=(const RtspPublisher &) = delete;
+	RtspPublisher(RtspPublisher &&) = delete;
+	RtspPublisher &operator=(RtspPublisher &&) = delete;
+
+	Error initialize(const String &p_rtsp_url, int p_width, int p_height, int p_fps,
+			const std::vector<uint8_t> &p_codec_configuration,
+			vtb::instrumentation::TimerHandle p_write_timer, String &r_error) {
+		try {
+			CharString url_utf8 = p_rtsp_url.utf8();
+			vtb::StreamDescriptor descriptor = vtb::StreamDescriptor::video(
+					STREAM_ID, 1, "h264", static_cast<uint32_t>(p_width), static_cast<uint32_t>(p_height),
+					static_cast<uint32_t>(p_fps), 1, true, p_codec_configuration);
+			manager.register_stream(descriptor);
+			vtb::OutputOptions options;
+			options.queue_capacity = OUTPUT_QUEUE_CAPACITY;
+			auto rtsp_output = std::make_unique<vtb::RtspOutput>(url_utf8.get_data());
+			manager.add(OUTPUT_ID,
+					std::make_unique<TimedOutput>(std::move(rtsp_output), std::move(p_write_timer)),
+					options);
+			manager.bind(OUTPUT_ID, STREAM_ID);
+			manager.start(OUTPUT_ID);
+			started = true;
+			const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+			while (std::chrono::steady_clock::now() < deadline) {
+				const std::vector<vtb::OutputStatus> statuses = manager.status();
+				if (!statuses.empty() && statuses.front().state == vtb::OutputState::running) {
+					return OK;
+				}
+				std::this_thread::sleep_for(std::chrono::milliseconds(20));
+			}
+			const std::vector<vtb::OutputStatus> statuses = manager.status();
+			if (!statuses.empty()) {
+				r_error = "RTSP output did not start: " + String::utf8(statuses.front().last_error.c_str());
+			} else {
+				r_error = "RTSP output did not expose startup status";
+			}
+			shutdown();
+			return ERR_CANT_CONNECT;
+		} catch (const std::exception &error) {
+			r_error = "initialize RTSP output failed: " + String::utf8(error.what());
+			return ERR_CANT_CREATE;
+		} catch (...) {
+			r_error = "initialize RTSP output failed with an unknown exception";
+			return ERR_CANT_CREATE;
+		}
+	}
+
+	Error publish(const std::shared_ptr<const std::vector<uint8_t>> &p_payload,
+			uint64_t p_pts_ns, uint64_t p_dts_ns, uint64_t p_duration_ns,
+			uint64_t p_sequence, bool p_keyframe, String &r_error) {
+		try {
+			const vtb::MediaPacket packet(STREAM_ID, p_payload, p_pts_ns, p_dts_ns,
+					p_duration_ns, p_sequence, p_keyframe, false);
+			manager.publish(packet);
+			return OK;
+		} catch (const std::exception &error) {
+			r_error = "publish RTSP packet failed: " + String::utf8(error.what());
+			return FAILED;
+		} catch (...) {
+			r_error = "publish RTSP packet failed with an unknown exception";
+			return FAILED;
+		}
+	}
+
+	Error finish(String &r_error) {
+		if (!started) {
+			return OK;
+		}
+		const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+		while (std::chrono::steady_clock::now() < deadline) {
+			const std::vector<vtb::OutputStatus> statuses = manager.status();
+			if (!statuses.empty()) {
+				const vtb::OutputStatus &status = statuses.front();
+				if (status.queue_depth == 0 && status.written + status.dropped >= status.published) {
+					break;
+				}
+			}
+			std::this_thread::sleep_for(std::chrono::milliseconds(10));
+		}
+
+		try {
+			manager.stop(OUTPUT_ID);
+			started = false;
+			const std::vector<vtb::OutputStatus> statuses = manager.status();
+			if (!statuses.empty()) {
+				last_status = statuses.front();
+			}
+		} catch (const std::exception &error) {
+			r_error = "stop RTSP output failed: " + String::utf8(error.what());
+			return FAILED;
+		} catch (...) {
+			r_error = "stop RTSP output failed with an unknown exception";
+			return FAILED;
+		}
+		if (last_status.written == 0) {
+			r_error = "RTSP output did not write any encoded packets: " + String::utf8(last_status.last_error.c_str());
+			return ERR_CANT_CONNECT;
+		}
+		return OK;
+	}
+
+	void shutdown() {
+		if (!started) {
+			return;
+		}
+		try {
+			manager.stop(OUTPUT_ID);
+		} catch (...) {
+		}
+		started = false;
+	}
+
+	const vtb::OutputStatus &get_last_status() const { return last_status; }
+
+private:
+	static constexpr const char *OUTPUT_ID = "rtsp";
+	static constexpr const char *STREAM_ID = "live2d-video";
+	static constexpr size_t OUTPUT_QUEUE_CAPACITY = 16;
+
+	vtb::OutputManager manager;
+	vtb::OutputStatus last_status;
+	bool started = false;
 };
 
 class FrameSlot {
@@ -544,6 +760,7 @@ public:
 	int frame_index = -1;
 	bool end_of_stream = false;
 	uint64_t ready_usec = 0;
+	uint64_t ready_ns = 0;
 
 private:
 	int index = -1;
@@ -556,7 +773,15 @@ private:
 
 class OpenVTDmaBufPipeline {
 public:
-	OpenVTDmaBufPipeline() = default;
+	OpenVTDmaBufPipeline() :
+			producer_wait_timer(timers.register_timer("live2d.producer_wait")),
+			gpu_copy_timer(timers.register_timer("live2d.gpu_copy")),
+			queue_wait_timer(timers.register_timer("live2d.media_queue_wait")),
+			rga_timer(timers.register_timer("live2d.rga")),
+			mpp_timer(timers.register_timer("live2d.mpp")),
+			publish_timer(timers.register_timer("live2d.output_publish_call")),
+			rtsp_write_timer(timers.register_timer("live2d.rtsp_write")),
+			media_timer(timers.register_timer("live2d.media_total")) {}
 	~OpenVTDmaBufPipeline() { shutdown(); }
 
 	OpenVTDmaBufPipeline(const OpenVTDmaBufPipeline &) = delete;
@@ -564,7 +789,7 @@ public:
 	OpenVTDmaBufPipeline(OpenVTDmaBufPipeline &&) = delete;
 	OpenVTDmaBufPipeline &operator=(OpenVTDmaBufPipeline &&) = delete;
 
-	Error initialize(const String &p_output_path, int p_width, int p_height, int p_fps, int p_total_frames,
+	Error initialize(const String &p_rtsp_url, int p_width, int p_height, int p_fps, int p_total_frames,
 			String &r_error) {
 		width = p_width;
 		height = p_height;
@@ -599,8 +824,18 @@ public:
 			return ERR_CANT_CREATE;
 		}
 
-		error = mpp_encoder.initialize(nv12_buffer, p_output_path, width, height, nv12_stride,
+		error = mpp_encoder.initialize(nv12_buffer, width, height, nv12_stride,
 				nv12_vertical_stride, fps, r_error);
+		if (error != OK) {
+			return error;
+		}
+		std::vector<uint8_t> codec_configuration;
+		error = mpp_encoder.codec_configuration(codec_configuration, r_error);
+		if (error != OK) {
+			return error;
+		}
+		error = rtsp_publisher.initialize(p_rtsp_url, width, height, fps, codec_configuration,
+				rtsp_write_timer, r_error);
 		if (error != OK) {
 			return error;
 		}
@@ -627,6 +862,7 @@ public:
 		}
 		print_line("OPENVT_DMABUF_LAYOUT source=Godot_SubViewport_GL_Texture gpu_copy=glBlitFramebuffer rgba_drm_format=AB24 rgba_rga_format=RK_FORMAT_RGBA_8888 nv12_rga_format=RK_FORMAT_YCbCr_420_SP modifier=not-specified vertical_flip=disabled");
 		print_line("OPENVT_DMABUF_PIPELINE mode=two_stage rgba_slots=3 nv12_buffers=1 media_workers=1 gl_finish=enabled backpressure=blocking");
+		print_line(vformat("OPENVT_RTSP_CONFIG stream=live2d-video queue_capacity=%d transport=tcp codec=h264", 16));
 		return OK;
 	}
 
@@ -655,7 +891,9 @@ public:
 			free_slots_available.wait();
 		}
 		uint64_t wait_end = OS::get_singleton()->get_ticks_usec();
-		producer_wait_samples.push_back(wait_end - wait_start);
+		const uint64_t wait_duration = wait_end - wait_start;
+		append_sample(producer_wait_samples, wait_duration);
+		producer_wait_timer.observe(std::chrono::microseconds(wait_duration));
 		if (waited) {
 			backpressure_count++;
 		}
@@ -740,6 +978,7 @@ public:
 			slot->frame_index = p_frame_index;
 			slot->end_of_stream = p_end_of_stream;
 			slot->ready_usec = copy_end;
+			slot->ready_ns = monotonic_now_ns();
 			slot->state = FrameSlot::State::READY;
 			ready_slot_indices.push_back(p_slot_index);
 			ready_depth = static_cast<int>(ready_slot_indices.size());
@@ -751,7 +990,9 @@ public:
 				accepting_frames = false;
 			}
 		}
-		gpu_copy_samples.push_back(copy_end - copy_start);
+		const uint64_t copy_duration = copy_end - copy_start;
+		append_sample(gpu_copy_samples, copy_duration);
+		gpu_copy_timer.observe(std::chrono::microseconds(copy_duration));
 		ready_slots_available.post();
 		if (submitted_frames == 1 || submitted_frames % fps == 0) {
 			print_line(vformat("OPENVT_DMABUF_SUBMIT frame=%d slot=%d source_texture=%d gpu_copy_ms=%.3f ready_depth=%d",
@@ -779,23 +1020,29 @@ public:
 			media_thread.wait_to_finish();
 		}
 		finished = true;
+		String rtsp_error_message;
+		Error rtsp_error = rtsp_publisher.finish(rtsp_error_message);
 
 		MutexLock lock(queue_mutex);
 		if (worker_error != OK) {
 			r_error = worker_error_message;
 			return worker_error;
 		}
+		if (rtsp_error != OK) {
+			r_error = rtsp_error_message;
+			return rtsp_error;
+		}
 		if (encoded_frames != submitted_frames) {
 			r_error = vformat("encoded frame count mismatch: submitted=%d encoded=%d", submitted_frames,
 					encoded_frames);
 			return FAILED;
 		}
-		if (submitted_frames != total_frames) {
+		if (total_frames > 0 && submitted_frames != total_frames) {
 			r_error = vformat("submitted frame count mismatch: expected=%d actual=%d", total_frames,
 					submitted_frames);
 			return FAILED;
 		}
-		if (!end_of_stream_encoded) {
+		if (total_frames > 0 && !end_of_stream_encoded) {
 			r_error = "MPP end-of-stream frame was not encoded";
 			return FAILED;
 		}
@@ -813,6 +1060,7 @@ public:
 			media_thread.wait_to_finish();
 		}
 		print_results();
+		rtsp_publisher.shutdown();
 		mpp_encoder.shutdown();
 		if (source_framebuffer != 0) {
 			glDeleteFramebuffers(1, &source_framebuffer);
@@ -858,16 +1106,37 @@ private:
 			String error_message;
 			Error error = slot->get_rga_converter().convert(error_message);
 			uint64_t rga_end = OS::get_singleton()->get_ticks_usec();
+			std::shared_ptr<const std::vector<uint8_t>> payload;
+			uint64_t packet_pts_ns = 0;
+			uint64_t packet_dts_ns = 0;
+			bool keyframe = false;
 			if (error == OK) {
-				error = mpp_encoder.encode_frame(slot->frame_index, slot->end_of_stream, error_message);
+				error = mpp_encoder.encode_frame(slot->ready_ns, slot->end_of_stream, payload,
+						packet_pts_ns, packet_dts_ns, keyframe, error_message);
 			}
 			uint64_t mpp_end = OS::get_singleton()->get_ticks_usec();
-
-			queue_wait_samples.push_back(queue_wait);
-			rga_samples.push_back(rga_end - media_start);
 			if (error == OK) {
-				mpp_samples.push_back(mpp_end - rga_end);
-				media_samples.push_back(mpp_end - media_start);
+				const uint64_t duration_ns = 1'000'000'000ULL / static_cast<uint64_t>(fps);
+				error = rtsp_publisher.publish(payload, packet_pts_ns, packet_dts_ns, duration_ns,
+						static_cast<uint64_t>(slot->frame_index + 1), keyframe, error_message);
+			}
+			uint64_t publish_end = OS::get_singleton()->get_ticks_usec();
+
+			append_sample(queue_wait_samples, queue_wait);
+			queue_wait_timer.observe(std::chrono::microseconds(queue_wait));
+			const uint64_t rga_duration = rga_end - media_start;
+			append_sample(rga_samples, rga_duration);
+			rga_timer.observe(std::chrono::microseconds(rga_duration));
+			if (error == OK) {
+				const uint64_t mpp_duration = mpp_end - rga_end;
+				const uint64_t publish_duration = publish_end - mpp_end;
+				const uint64_t media_duration = publish_end - media_start;
+				append_sample(mpp_samples, mpp_duration);
+				append_sample(publish_samples, publish_duration);
+				append_sample(media_samples, media_duration);
+				mpp_timer.observe(std::chrono::microseconds(mpp_duration));
+				publish_timer.observe(std::chrono::microseconds(publish_duration));
+				media_timer.observe(std::chrono::microseconds(media_duration));
 				encoded_frames++;
 				if (slot->end_of_stream) {
 					end_of_stream_encoded = true;
@@ -932,6 +1201,7 @@ private:
 		slot->frame_index = -1;
 		slot->end_of_stream = false;
 		slot->ready_usec = 0;
+		slot->ready_ns = 0;
 		free_slot_indices.push_back(p_slot_index);
 	}
 
@@ -941,22 +1211,18 @@ private:
 		glBindTexture(GL_TEXTURE_2D, static_cast<GLuint>(p_texture));
 	}
 
-	static double average_ms(const std::vector<uint64_t> &p_samples) {
-		if (p_samples.empty()) {
-			return 0.0;
+	static void append_sample(std::deque<uint64_t> &p_samples, uint64_t p_sample) {
+		if (p_samples.size() >= METRIC_WINDOW_CAPACITY) {
+			p_samples.pop_front();
 		}
-		uint64_t total = 0;
-		for (uint64_t sample : p_samples) {
-			total += sample;
-		}
-		return static_cast<double>(total) / static_cast<double>(p_samples.size()) / 1000.0;
+		p_samples.push_back(p_sample);
 	}
 
-	static double percentile_ms(const std::vector<uint64_t> &p_samples, size_t p_percentile) {
+	static double percentile_ms(const std::deque<uint64_t> &p_samples, size_t p_percentile) {
 		if (p_samples.empty()) {
 			return 0.0;
 		}
-		std::vector<uint64_t> sorted = p_samples;
+		std::vector<uint64_t> sorted(p_samples.begin(), p_samples.end());
 		std::sort(sorted.begin(), sorted.end());
 		size_t index = (sorted.size() * p_percentile + 99) / 100;
 		if (index > 0) {
@@ -968,18 +1234,28 @@ private:
 		return static_cast<double>(sorted[index]) / 1000.0;
 	}
 
-	static double maximum_ms(const std::vector<uint64_t> &p_samples) {
-		if (p_samples.empty()) {
-			return 0.0;
-		}
-		return static_cast<double>(*std::max_element(p_samples.begin(), p_samples.end())) / 1000.0;
+	static double duration_ms(std::chrono::nanoseconds p_duration) {
+		return std::chrono::duration<double, std::milli>(p_duration).count();
 	}
 
-	void print_stage_metrics(const String &p_stage, const std::vector<uint64_t> &p_samples) const {
-		print_line(vformat("OPENVT_DMABUF_STAGE stage=%s samples=%d avg_ms=%.3f p50_ms=%.3f p95_ms=%.3f p99_ms=%.3f max_ms=%.3f",
-				p_stage, static_cast<uint64_t>(p_samples.size()), average_ms(p_samples),
+	void print_stage_metrics(const String &p_stage, const vtb::instrumentation::TimerHandle &p_timer,
+			const std::deque<uint64_t> &p_samples) const {
+		const vtb::instrumentation::TimerSnapshot snapshot = p_timer.snapshot();
+		print_line(vformat("OPENVT_DMABUF_STAGE stage=%s samples=%d window_samples=%d latest_ms=%.3f min_ms=%.3f avg_ms=%.3f p50_ms=%.3f p95_ms=%.3f p99_ms=%.3f max_ms=%.3f",
+				p_stage, snapshot.sample_count(), static_cast<uint64_t>(p_samples.size()),
+				duration_ms(snapshot.latest()),
+				duration_ms(snapshot.minimum()), duration_ms(snapshot.average()),
 				percentile_ms(p_samples, 50), percentile_ms(p_samples, 95), percentile_ms(p_samples, 99),
-				maximum_ms(p_samples)));
+				duration_ms(snapshot.maximum())));
+	}
+
+	void print_timer_metrics(const String &p_stage,
+			const vtb::instrumentation::TimerHandle &p_timer) const {
+		const vtb::instrumentation::TimerSnapshot snapshot = p_timer.snapshot();
+		print_line(vformat("OPENVT_DMABUF_TIMER stage=%s samples=%d latest_ms=%.3f min_ms=%.3f avg_ms=%.3f max_ms=%.3f",
+				p_stage, snapshot.sample_count(), duration_ms(snapshot.latest()),
+				duration_ms(snapshot.minimum()), duration_ms(snapshot.average()),
+				duration_ms(snapshot.maximum())));
 	}
 
 	void print_results() {
@@ -996,12 +1272,18 @@ private:
 		print_line(vformat("OPENVT_DMABUF_RESULT submitted=%d encoded=%d total_ms=%.3f throughput_fps=%.3f backpressure_count=%d max_ready_depth=%d encoded_bytes=%d",
 				submitted_frames, encoded_frames, elapsed_ms, throughput_fps, backpressure_count,
 				max_ready_queue_depth, static_cast<uint64_t>(mpp_encoder.get_encoded_bytes())));
-		print_stage_metrics("producer_wait", producer_wait_samples);
-		print_stage_metrics("gpu_copy", gpu_copy_samples);
-		print_stage_metrics("queue_wait", queue_wait_samples);
-		print_stage_metrics("rga", rga_samples);
-		print_stage_metrics("mpp", mpp_samples);
-		print_stage_metrics("media", media_samples);
+		print_stage_metrics("producer_wait", producer_wait_timer, producer_wait_samples);
+		print_stage_metrics("gpu_copy", gpu_copy_timer, gpu_copy_samples);
+		print_stage_metrics("queue_wait", queue_wait_timer, queue_wait_samples);
+		print_stage_metrics("rga", rga_timer, rga_samples);
+		print_stage_metrics("mpp", mpp_timer, mpp_samples);
+		print_stage_metrics("output_publish_call", publish_timer, publish_samples);
+		print_stage_metrics("media", media_timer, media_samples);
+		print_timer_metrics("rtsp_write", rtsp_write_timer);
+		const vtb::OutputStatus &status = rtsp_publisher.get_last_status();
+		print_line(vformat("OPENVT_RTSP_RESULT published=%d written=%d dropped=%d errors=%d reconnects=%d queue_depth=%d queue_capacity=%d",
+				status.published, status.written, status.dropped, status.errors, status.reconnects,
+				static_cast<uint64_t>(status.queue_depth), static_cast<uint64_t>(status.queue_capacity)));
 	}
 
 	int width = 0;
@@ -1017,10 +1299,21 @@ private:
 	bool stop_requested = false;
 	bool end_of_stream_encoded = false;
 	bool results_printed = false;
+	static constexpr size_t METRIC_WINDOW_CAPACITY = 4096;
 	GLuint source_framebuffer = 0;
+	vtb::instrumentation::TimerRegistry timers;
+	vtb::instrumentation::TimerHandle producer_wait_timer;
+	vtb::instrumentation::TimerHandle gpu_copy_timer;
+	vtb::instrumentation::TimerHandle queue_wait_timer;
+	vtb::instrumentation::TimerHandle rga_timer;
+	vtb::instrumentation::TimerHandle mpp_timer;
+	vtb::instrumentation::TimerHandle publish_timer;
+	vtb::instrumentation::TimerHandle rtsp_write_timer;
+	vtb::instrumentation::TimerHandle media_timer;
 	DmaBuffer nv12_buffer;
 	FrameSlot *slots[FRAME_SLOT_COUNT] = {};
 	MppEncoder mpp_encoder;
+	RtspPublisher rtsp_publisher;
 	Thread media_thread;
 	BinaryMutex queue_mutex;
 	Semaphore free_slots_available;
@@ -1034,12 +1327,13 @@ private:
 	int encoded_frames = 0;
 	int backpressure_count = 0;
 	int max_ready_queue_depth = 0;
-	std::vector<uint64_t> producer_wait_samples;
-	std::vector<uint64_t> gpu_copy_samples;
-	std::vector<uint64_t> queue_wait_samples;
-	std::vector<uint64_t> rga_samples;
-	std::vector<uint64_t> mpp_samples;
-	std::vector<uint64_t> media_samples;
+	std::deque<uint64_t> producer_wait_samples;
+	std::deque<uint64_t> gpu_copy_samples;
+	std::deque<uint64_t> queue_wait_samples;
+	std::deque<uint64_t> rga_samples;
+	std::deque<uint64_t> mpp_samples;
+	std::deque<uint64_t> publish_samples;
+	std::deque<uint64_t> media_samples;
 };
 
 OpenVTDmaBufCapture::~OpenVTDmaBufCapture() {
@@ -1049,7 +1343,7 @@ OpenVTDmaBufCapture::~OpenVTDmaBufCapture() {
 }
 
 void OpenVTDmaBufCapture::_bind_methods() {
-	ClassDB::bind_method(D_METHOD("configure", "output_path", "width", "height", "fps", "total_frames"),
+	ClassDB::bind_method(D_METHOD("configure", "rtsp_url", "width", "height", "fps", "total_frames"),
 			&OpenVTDmaBufCapture::configure);
 	ClassDB::bind_method(D_METHOD("capture_frame", "viewport", "frame_index", "end_of_stream"),
 			&OpenVTDmaBufCapture::capture_frame);
@@ -1057,13 +1351,13 @@ void OpenVTDmaBufCapture::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("get_last_error"), &OpenVTDmaBufCapture::get_last_error);
 }
 
-Error OpenVTDmaBufCapture::configure(const String &p_output_path, int p_width, int p_height, int p_fps,
+Error OpenVTDmaBufCapture::configure(const String &p_rtsp_url, int p_width, int p_height, int p_fps,
 		int p_total_frames) {
 	if (configured || pipeline != nullptr) {
 		operation_error_message = "capture is already configured";
 		return ERR_ALREADY_IN_USE;
 	}
-	if (p_output_path.is_empty() || p_width <= 0 || p_height <= 0 || p_fps <= 0 || p_total_frames <= 0) {
+	if (p_rtsp_url.is_empty() || p_width <= 0 || p_height <= 0 || p_fps <= 0 || p_total_frames < 0) {
 		operation_error_message = "invalid DMA-BUF capture configuration";
 		return ERR_INVALID_PARAMETER;
 	}
@@ -1072,7 +1366,7 @@ Error OpenVTDmaBufCapture::configure(const String &p_output_path, int p_width, i
 		return ERR_INVALID_PARAMETER;
 	}
 
-	output_path = p_output_path;
+	rtsp_url = p_rtsp_url;
 	width = p_width;
 	height = p_height;
 	fps = p_fps;
@@ -1150,7 +1444,7 @@ void OpenVTDmaBufCapture::_initialize_pipeline_render_thread() {
 		return;
 	}
 	pipeline = memnew(OpenVTDmaBufPipeline);
-	Error init_error = pipeline->initialize(output_path, width, height, fps, total_frames, error_message);
+	Error init_error = pipeline->initialize(rtsp_url, width, height, fps, total_frames, error_message);
 	if (init_error != OK) {
 		memdelete(pipeline);
 		pipeline = nullptr;

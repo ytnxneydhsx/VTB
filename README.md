@@ -132,6 +132,37 @@ CPU 版本时才设置 `VTB_FACE3D_BACKEND=onnx`。
 ./scripts/run-face3d-browser-stream.sh
 ```
 
+需要由同一个 OpenSeeFace 进程同时输出人脸检测画布和 Live2D
+参数时，指定 Godot 的本机 UDP 端口：
+
+```bash
+VTB_FACE3D_LIVE2D_UDP=127.0.0.1:11574 \
+./scripts/run-face3d-browser-stream.sh
+```
+
+该模式只打开一次摄像头，同时发布 `/face3d` 检测流并向
+Live2D 渲染端发送参数；Live2D 画面使用独立的 `/live2d` 流。
+在 Mac 上启动左侧人脸检测、右侧 Live2D 的双流监看页：
+
+```bash
+./scripts/run-dual-stream-monitor.sh
+```
+
+默认地址为 `http://192.168.77.1:8900/dual-stream-monitor.html`。Mac 直连
+网卡地址或端口变化时，分别设置 `VTB_MONITOR_BIND_ADDRESS` 和
+`VTB_MONITOR_PORT`。
+
+监看页的“以当前正脸校准”按钮会请求 RK 上的 OpenSeeFace 进程清空
+原中立姿态，再用接下来 30 个有效正脸帧计算新零点。校准期间页面
+显示进度，Live2D 头部参数先回到中立值。控制口默认只绑定
+`192.168.77.2:11575`，浏览器请求来源限制为
+`http://192.168.77.1:8900`。
+
+右侧 Live2D 区域支持滚轮缩放、拖动平移和双击恢复全身，也可以选择全身、
+半身或面部预设。操作通过控制口更新 Godot 渲染前的模型变换，输出仍由
+1920×1080 SubViewport 从 Live2D 原始纹理重新渲染，不对浏览器视频做放大
+后处理。
+
 Mac 浏览器访问：
 
 ```text
@@ -153,6 +184,15 @@ ssh -fN \
 旧帧，推理只读取最新帧，避免处理速度下降时持续累积延迟。
 
 验证时分别记录摄像头取帧到推理完成、画布生成到 H.264 输出、WebRTC 接收播放的 P50/P95 延迟。首版的主要目标是保持延迟有界；帧率随实际模型吞吐量变化。
+
+## OpenSeeFace 驱动 Live2D
+
+主分支提供 OpenSeeFace/RKNN 到 Godot/Ayagami 的参数桥接：发送端进行中立头姿
+校准、标准参数映射和按时间平滑，Godot 端只监听本机 UDP，读空积压数据报并
+应用最新快照。未启用参数端口时，原有 Live2D 固定动画基线保持不变。
+
+协议、映射表、启动方式、失效恢复和当前尚未连接的实时推流边界见
+[`docs/live2d-face-tracking-bridge.md`](docs/live2d-face-tracking-bridge.md)。
 
 ## RTSP 推流
 

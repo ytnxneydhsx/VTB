@@ -20,12 +20,14 @@ class RknnInferenceSession:
         core_mask: int,
         label: str,
         enable_timing: bool,
+        enable_frame_trace: bool,
     ):
         self._runtime = RKNNLite(verbose=False)
         self._lock = threading.Lock()
         self._released = False
         self._label = label
         self._enable_timing = enable_timing
+        self._enable_frame_trace = enable_frame_trace
         self._durations_ms = []
         self._frame_started_ns = 0
         self._frame_finished_ns = 0
@@ -57,13 +59,19 @@ class RknnInferenceSession:
         image = np.rint(tensor * RKNN_STD + RKNN_MEAN)
         image = np.clip(image, 0.0, 255.0).astype(np.uint8)
 
-        started_at_ns = time.monotonic_ns()
+        timing_enabled = self._enable_timing or self._enable_frame_trace
+        started_at_ns = 0
+        if timing_enabled:
+            started_at_ns = time.monotonic_ns()
         with self._lock:
             outputs = self._runtime.inference(inputs=[image])
-        finished_at_ns = time.monotonic_ns()
+        finished_at_ns = 0
+        if timing_enabled:
+            finished_at_ns = time.monotonic_ns()
         if self._enable_timing:
             duration_ms = (finished_at_ns - started_at_ns) / 1_000_000.0
             self._durations_ms.append(duration_ms)
+        if self._enable_frame_trace:
             if self._frame_started_ns == 0:
                 self._frame_started_ns = started_at_ns
             self._frame_finished_ns = finished_at_ns
@@ -95,6 +103,7 @@ def attach_rknn_backend(
     tracker,
     model_dir: Path,
     enable_timing: bool = False,
+    enable_frame_trace: bool = False,
 ) -> None:
     detector_path = model_dir / "mnv3_detection_fp16.rknn"
     landmark_path = model_dir / "lm_model3_fp16.rknn"
@@ -107,6 +116,7 @@ def attach_rknn_backend(
         RKNNLite.NPU_CORE_0,
         "detector",
         enable_timing,
+        enable_frame_trace,
     )
     try:
         landmark = RknnInferenceSession(
@@ -114,6 +124,7 @@ def attach_rknn_backend(
             RKNNLite.NPU_CORE_1,
             "landmark",
             enable_timing,
+            enable_frame_trace,
         )
     except Exception:
         detector.release()

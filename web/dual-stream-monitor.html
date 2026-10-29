@@ -1,0 +1,517 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>VTB 双流监看</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      background: #0b0d10;
+      color: #f3f5f7;
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    html,
+    body {
+      width: 100%;
+      height: 100%;
+      margin: 0;
+      overflow: hidden;
+      background: #0b0d10;
+    }
+
+    body {
+      display: grid;
+      grid-template-rows: 48px minmax(0, 1fr);
+    }
+
+    header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 16px;
+      padding: 0 18px;
+      border-bottom: 1px solid #2a2f36;
+      background: #11151a;
+    }
+
+    h1 {
+      margin: 0;
+      font-size: 16px;
+      font-weight: 650;
+      letter-spacing: 0.02em;
+    }
+
+    .header-actions {
+      display: flex;
+      align-items: center;
+      gap: 18px;
+    }
+
+    .calibration-controls {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+
+    #calibration-status {
+      min-width: 120px;
+      color: #aeb6c0;
+      font-size: 12px;
+      text-align: right;
+    }
+
+    #calibration-button {
+      height: 30px;
+      padding: 0 12px;
+      border: 1px solid #4f8ddf;
+      border-radius: 7px;
+      background: #1f5fae;
+      color: #fff;
+      font: inherit;
+      font-size: 12px;
+      font-weight: 600;
+      cursor: pointer;
+    }
+
+    #calibration-button:hover:not(:disabled) {
+      background: #2870c8;
+    }
+
+    #calibration-button:focus-visible {
+      outline: 2px solid #9ecbff;
+      outline-offset: 2px;
+    }
+
+    #calibration-button:disabled {
+      border-color: #39414b;
+      background: #252a31;
+      color: #78818c;
+      cursor: wait;
+    }
+
+    .legend {
+      display: flex;
+      gap: 18px;
+      color: #aeb6c0;
+      font-size: 12px;
+    }
+
+    .legend span {
+      display: inline-flex;
+      align-items: center;
+      gap: 7px;
+    }
+
+    .dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: #3ddc84;
+      box-shadow: 0 0 10px rgb(61 220 132 / 70%);
+    }
+
+    main {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      min-height: 0;
+    }
+
+    section {
+      position: relative;
+      min-width: 0;
+      min-height: 0;
+      background: #050607;
+    }
+
+    section + section {
+      border-left: 1px solid #2a2f36;
+    }
+
+    .panel-title {
+      position: absolute;
+      z-index: 4;
+      top: 12px;
+      left: 12px;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 7px 10px;
+      border: 1px solid rgb(255 255 255 / 14%);
+      border-radius: 8px;
+      background: rgb(10 13 16 / 82%);
+      backdrop-filter: blur(8px);
+      font-size: 13px;
+      font-weight: 600;
+    }
+
+    .panel-title a {
+      color: #9ecbff;
+      font-size: 11px;
+      font-weight: 500;
+      text-decoration: none;
+    }
+
+    .panel-title a:hover {
+      text-decoration: underline;
+    }
+
+    .view-presets {
+      display: inline-flex;
+      gap: 5px;
+    }
+
+    .view-preset {
+      height: 24px;
+      padding: 0 8px;
+      border: 1px solid rgb(255 255 255 / 18%);
+      border-radius: 6px;
+      background: rgb(255 255 255 / 8%);
+      color: #dbe4ee;
+      font: inherit;
+      font-size: 11px;
+      cursor: pointer;
+    }
+
+    .view-preset:hover {
+      background: rgb(255 255 255 / 16%);
+    }
+
+    #view-status {
+      min-width: 42px;
+      color: #90e0b5;
+      font-size: 11px;
+      font-variant-numeric: tabular-nums;
+      text-align: right;
+    }
+
+    .view-control-layer {
+      position: absolute;
+      z-index: 2;
+      inset: 0;
+      cursor: grab;
+      touch-action: none;
+      user-select: none;
+    }
+
+    .view-control-layer.dragging {
+      cursor: grabbing;
+    }
+
+    .view-control-layer:focus-visible {
+      outline: 2px solid #9ecbff;
+      outline-offset: -3px;
+    }
+
+    .view-hint {
+      position: absolute;
+      z-index: 3;
+      right: 12px;
+      bottom: 12px;
+      padding: 6px 9px;
+      border: 1px solid rgb(255 255 255 / 12%);
+      border-radius: 7px;
+      background: rgb(10 13 16 / 76%);
+      color: #aeb6c0;
+      font-size: 11px;
+      pointer-events: none;
+    }
+
+    iframe {
+      display: block;
+      width: 100%;
+      height: 100%;
+      border: 0;
+      background: #050607;
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>VTB 双流实时监看</h1>
+    <div class="header-actions">
+      <div class="calibration-controls">
+        <span id="calibration-status" role="status" aria-live="polite">正在连接校准控制</span>
+        <button id="calibration-button" type="button" disabled>
+          以当前正脸校准
+        </button>
+      </div>
+      <div class="legend" aria-label="监看状态">
+        <span><i class="dot" aria-hidden="true"></i>人脸检测</span>
+        <span><i class="dot" aria-hidden="true"></i>Live2D 渲染</span>
+      </div>
+    </div>
+  </header>
+  <main>
+    <section aria-label="人脸检测实时流">
+      <div class="panel-title">
+        <span>左·人脸检测</span>
+        <a href="http://192.168.77.2:8889/face3d/" target="_blank" rel="noreferrer">单独打开</a>
+      </div>
+      <iframe
+        src="http://192.168.77.2:8889/face3d/"
+        title="人脸检测实时流"
+        allow="autoplay; fullscreen; picture-in-picture">
+      </iframe>
+    </section>
+    <section id="live2d-panel" aria-label="Live2D 渲染实时流">
+      <div class="panel-title">
+        <span>右·Live2D 渲染</span>
+        <span class="view-presets" aria-label="Live2D 取景预设">
+          <button class="view-preset" type="button" data-view-preset="full">全身</button>
+          <button class="view-preset" type="button" data-view-preset="upper">半身</button>
+          <button class="view-preset" type="button" data-view-preset="face">面部</button>
+        </span>
+        <span id="view-status" role="status" aria-live="polite">100%</span>
+        <a href="http://192.168.77.2:8889/live2d/" target="_blank" rel="noreferrer">单独打开</a>
+      </div>
+      <div
+        id="live2d-view-control"
+        class="view-control-layer"
+        role="application"
+        tabindex="0"
+        aria-label="Live2D 取景控制：滚轮缩放，拖动平移，双击恢复全身">
+      </div>
+      <div class="view-hint">滚轮缩放 · 拖动平移 · 双击复位</div>
+      <iframe
+        src="http://192.168.77.2:8889/live2d/"
+        title="Live2D 渲染实时流"
+        allow="autoplay; fullscreen; picture-in-picture">
+      </iframe>
+    </section>
+  </main>
+  <script>
+    const controlUrl = "http://192.168.77.2:11575";
+    const calibrationButton = document.querySelector("#calibration-button");
+    const calibrationStatus = document.querySelector("#calibration-status");
+    const viewControl = document.querySelector("#live2d-view-control");
+    const viewStatus = document.querySelector("#view-status");
+    const viewPresets = {
+      full: {zoom: 1.0, offset_x: 0.0, offset_y: 0.0},
+      upper: {zoom: 1.9, offset_x: 0.0, offset_y: 0.28},
+      face: {zoom: 3.4, offset_x: 0.0, offset_y: 0.52},
+    };
+    const viewLimits = {
+      zoomMin: 0.5,
+      zoomMax: 6.0,
+      offsetMin: -2.0,
+      offsetMax: 2.0,
+    };
+    let viewState = {...viewPresets.full};
+    let viewInitialized = false;
+    let viewRequestTimer = null;
+    let viewRequestInFlight = false;
+    let viewDirty = false;
+    let dragPointerId = null;
+    let dragLastX = 0;
+    let dragLastY = 0;
+
+    function clamp(value, lower, upper) {
+      return Math.max(lower, Math.min(upper, value));
+    }
+
+    function normalizeViewState(value) {
+      return {
+        zoom: clamp(Number(value.zoom), viewLimits.zoomMin, viewLimits.zoomMax),
+        offset_x: clamp(Number(value.offset_x), viewLimits.offsetMin, viewLimits.offsetMax),
+        offset_y: clamp(Number(value.offset_y), viewLimits.offsetMin, viewLimits.offsetMax),
+      };
+    }
+
+    function renderViewStatus(message = "") {
+      viewStatus.textContent = message || `${Math.round(viewState.zoom * 100)}%`;
+    }
+
+    function setViewState(nextView, send = true) {
+      viewState = normalizeViewState(nextView);
+      renderViewStatus();
+      if (send) {
+        scheduleViewUpdate();
+      }
+    }
+
+    function scheduleViewUpdate() {
+      viewDirty = true;
+      if (viewRequestInFlight || viewRequestTimer !== null) {
+        return;
+      }
+      viewRequestTimer = window.setTimeout(flushViewUpdate, 33);
+    }
+
+    async function flushViewUpdate() {
+      viewRequestTimer = null;
+      if (viewRequestInFlight || !viewDirty) {
+        return;
+      }
+      viewDirty = false;
+      viewRequestInFlight = true;
+      const requestedView = {...viewState};
+      try {
+        const response = await fetch(`${controlUrl}/view`, {
+          method: "POST",
+          headers: {"Content-Type": "application/json"},
+          body: JSON.stringify(requestedView),
+        });
+        if (!response.ok) {
+          throw new Error(`HTTP ${response.status}`);
+        }
+        const status = await response.json();
+        if (!viewDirty && status.view) {
+          setViewState(status.view, false);
+        }
+      } catch (error) {
+        renderViewStatus("控制失败");
+      } finally {
+        viewRequestInFlight = false;
+        if (viewDirty) {
+          scheduleViewUpdate();
+        }
+      }
+    }
+
+    function renderCalibrationStatus(status) {
+      if (!viewInitialized && status.view) {
+        setViewState(status.view, false);
+        viewInitialized = true;
+      }
+      if (status.calibrated) {
+        calibrationStatus.textContent = "已校准";
+        calibrationButton.disabled = false;
+        return;
+      }
+
+      calibrationButton.disabled = true;
+      if (!status.tracking_valid) {
+        calibrationStatus.textContent = `校准中 ${status.progress}/${status.required}，请正视摄像头`;
+        return;
+      }
+      calibrationStatus.textContent = `校准中 ${status.progress}/${status.required}`;
+    }
+
+    async function fetchCalibrationStatus() {
+      try {
+        const response = await fetch(`${controlUrl}/health`, {cache: "no-store"});
+        if (!response.ok) {
+          throw new Error(`HTTP ${response.status}`);
+        }
+        renderCalibrationStatus(await response.json());
+      } catch (error) {
+        calibrationStatus.textContent = "校准控制未连接";
+        calibrationButton.disabled = true;
+      }
+    }
+
+    calibrationButton.addEventListener("click", async () => {
+      calibrationButton.disabled = true;
+      calibrationStatus.textContent = "校准请求已发送，请保持正视";
+      try {
+        const response = await fetch(`${controlUrl}/recalibrate`, {method: "POST"});
+        if (!response.ok) {
+          throw new Error(`HTTP ${response.status}`);
+        }
+        renderCalibrationStatus(await response.json());
+      } catch (error) {
+        calibrationStatus.textContent = "校准请求失败";
+        calibrationButton.disabled = false;
+      }
+    });
+
+    viewControl.addEventListener("wheel", (event) => {
+      event.preventDefault();
+      const bounds = viewControl.getBoundingClientRect();
+      const cursorX = (event.clientX - bounds.left) / bounds.width - 0.5;
+      const cursorY = (event.clientY - bounds.top) / bounds.height - 0.5;
+      const oldZoom = viewState.zoom;
+      const nextZoom = clamp(
+        oldZoom * Math.exp(-event.deltaY * 0.0015),
+        viewLimits.zoomMin,
+        viewLimits.zoomMax,
+      );
+      const ratio = nextZoom / oldZoom;
+      setViewState({
+        zoom: nextZoom,
+        offset_x: cursorX + (viewState.offset_x - cursorX) * ratio,
+        offset_y: cursorY + (viewState.offset_y - cursorY) * ratio,
+      });
+    }, {passive: false});
+
+    viewControl.addEventListener("pointerdown", (event) => {
+      dragPointerId = event.pointerId;
+      dragLastX = event.clientX;
+      dragLastY = event.clientY;
+      viewControl.setPointerCapture(event.pointerId);
+      viewControl.classList.add("dragging");
+    });
+
+    viewControl.addEventListener("pointermove", (event) => {
+      if (event.pointerId !== dragPointerId) {
+        return;
+      }
+      const bounds = viewControl.getBoundingClientRect();
+      const deltaX = event.clientX - dragLastX;
+      const deltaY = event.clientY - dragLastY;
+      dragLastX = event.clientX;
+      dragLastY = event.clientY;
+      setViewState({
+        zoom: viewState.zoom,
+        offset_x: viewState.offset_x + deltaX / bounds.width,
+        offset_y: viewState.offset_y + deltaY / bounds.height,
+      });
+    });
+
+    function finishDrag(event) {
+      if (event.pointerId !== dragPointerId) {
+        return;
+      }
+      dragPointerId = null;
+      viewControl.classList.remove("dragging");
+    }
+
+    viewControl.addEventListener("pointerup", finishDrag);
+    viewControl.addEventListener("pointercancel", finishDrag);
+    viewControl.addEventListener("dblclick", () => {
+      setViewState(viewPresets.full);
+    });
+
+    viewControl.addEventListener("keydown", (event) => {
+      const panStep = event.shiftKey ? 0.1 : 0.03;
+      if (event.key === "+" || event.key === "=") {
+        event.preventDefault();
+        setViewState({...viewState, zoom: viewState.zoom * 1.15});
+      } else if (event.key === "-") {
+        event.preventDefault();
+        setViewState({...viewState, zoom: viewState.zoom / 1.15});
+      } else if (event.key === "ArrowLeft") {
+        event.preventDefault();
+        setViewState({...viewState, offset_x: viewState.offset_x - panStep});
+      } else if (event.key === "ArrowRight") {
+        event.preventDefault();
+        setViewState({...viewState, offset_x: viewState.offset_x + panStep});
+      } else if (event.key === "ArrowUp") {
+        event.preventDefault();
+        setViewState({...viewState, offset_y: viewState.offset_y - panStep});
+      } else if (event.key === "ArrowDown") {
+        event.preventDefault();
+        setViewState({...viewState, offset_y: viewState.offset_y + panStep});
+      } else if (event.key === "0") {
+        event.preventDefault();
+        setViewState(viewPresets.full);
+      }
+    });
+
+    for (const button of document.querySelectorAll("[data-view-preset]")) {
+      button.addEventListener("click", () => {
+        setViewState(viewPresets[button.dataset.viewPreset]);
+      });
+    }
+
+    fetchCalibrationStatus();
+    window.setInterval(fetchCalibrationStatus, 500);
+  </script>
+</body>
+</html>

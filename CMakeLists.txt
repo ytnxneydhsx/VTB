@@ -100,6 +100,7 @@ if(VTB_ENABLE_RTSP_OUTPUT)
         )
         target_link_libraries(vtb-mpp-output-publisher
             PRIVATE
+                vtb_instrumentation
                 vtb_output_core
                 vtb_output_rtsp
                 PkgConfig::VTB_FFMPEG

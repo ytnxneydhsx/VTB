@@ -18,6 +18,21 @@ stream_bitrate="${VTB_FACE3D_STREAM_BITRATE:-1200000}"
 dma_heap="${VTB_FACE3D_DMA_HEAP:-/dev/dma_heap/system-uncached}"
 diagnostics_port="${VTB_FACE3D_DIAGNOSTICS_PORT:-8890}"
 diagnostics_page="${VTB_FACE3D_DIAGNOSTICS_PAGE:-$project_dir/web/face3d-latency.html}"
+live2d_udp="${VTB_FACE3D_LIVE2D_UDP:-}"
+live2d_angle_x_sign="${VTB_FACE3D_LIVE2D_ANGLE_X_SIGN:--1}"
+live2d_angle_y_sign="${VTB_FACE3D_LIVE2D_ANGLE_Y_SIGN:--1}"
+live2d_angle_z_sign="${VTB_FACE3D_LIVE2D_ANGLE_Z_SIGN:--1}"
+live2d_control_address="${VTB_FACE3D_LIVE2D_CONTROL_ADDRESS:-192.168.77.2}"
+live2d_control_port="${VTB_FACE3D_LIVE2D_CONTROL_PORT:-11575}"
+live2d_control_origin="${VTB_FACE3D_LIVE2D_CONTROL_ORIGIN:-http://192.168.77.1:8900}"
+performance_stats="${VTB_FACE3D_PERFORMANCE_STATS:-0}"
+performance_report_frames="${VTB_FACE3D_PERFORMANCE_REPORT_FRAMES:-300}"
+
+if [[ "$performance_stats" == "1" &&
+      ! "$performance_report_frames" =~ ^[1-9][0-9]*$ ]]; then
+  echo "VTB_FACE3D_PERFORMANCE_REPORT_FRAMES must be a positive integer." >&2
+  exit 1
+fi
 
 if [[ ! -x "$python_bin" ]]; then
   echo "Python environment is missing: $python_bin" >&2
@@ -50,17 +65,41 @@ if [[ ! -r /dev/mpp_service || ! -w /dev/mpp_service ||
   publisher_command=(sudo -n "$publisher_bin")
 fi
 
-"$python_bin" "$project_dir/tools/openseeface_3d_preview.py" \
-  --capture "$capture_device" \
-  --width "$capture_width" \
-  --height "$capture_height" \
-  --fps "$capture_fps" \
-  --canvas-width "$canvas_width" \
-  --canvas-height "$canvas_height" \
-  --timed-raw-output \
-  --backend "$inference_backend" \
-  --rknn-model-dir "$rknn_model_dir" \
-  --no-window | \
+tracker_command=(
+  "$python_bin"
+  "$project_dir/tools/openseeface_3d_preview.py"
+  --capture "$capture_device"
+  --width "$capture_width"
+  --height "$capture_height"
+  --fps "$capture_fps"
+  --canvas-width "$canvas_width"
+  --canvas-height "$canvas_height"
+  --timed-raw-output
+  --backend "$inference_backend"
+  --rknn-model-dir "$rknn_model_dir"
+  --no-window
+)
+
+if [[ -n "$live2d_udp" ]]; then
+  tracker_command+=(
+    --live2d-udp "$live2d_udp"
+    --live2d-angle-x-sign "$live2d_angle_x_sign"
+    --live2d-angle-y-sign "$live2d_angle_y_sign"
+    --live2d-angle-z-sign "$live2d_angle_z_sign"
+    --live2d-control-address "$live2d_control_address"
+    --live2d-control-port "$live2d_control_port"
+    --live2d-control-origin "$live2d_control_origin"
+  )
+fi
+
+if [[ "$performance_stats" == "1" ]]; then
+  tracker_command+=(
+    --performance-stats
+    --performance-report-interval-frames "$performance_report_frames"
+  )
+fi
+
+"${tracker_command[@]}" | \
 exec "${publisher_command[@]}" \
   --rtsp-url "$stream_url" \
   --stream-id face3d-video \

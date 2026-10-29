@@ -6,6 +6,8 @@ Import("env")
 Import("env_modules")
 
 board_sysroot = os.environ["OPENVT_BOARD_SYSROOT"]
+ffmpeg_sysroot = os.environ["OPENVT_FFMPEG_SYSROOT"]
+vtb_source_root = os.environ["OPENVT_VTB_SOURCE_ROOT"]
 
 env_openvt = env_modules.Clone()
 env_openvt.Append(
@@ -13,16 +15,29 @@ env_openvt.Append(
         board_sysroot + "/usr/include",
         board_sysroot + "/usr/include/rockchip",
         board_sysroot + "/usr/include/rga",
+        ffmpeg_sysroot + "/usr/include",
+        ffmpeg_sysroot + "/usr/include/aarch64-linux-gnu",
+        vtb_source_root + "/include",
     ]
 )
+env_openvt.Append(CXXFLAGS=["-fexceptions"])
 
-module_obj = []
-env_openvt.add_source_files(module_obj, "*.cpp")
-env.modules_sources += module_obj
+env_openvt.add_source_files(env.modules_sources, "*.cpp")
+env_openvt.add_source_files(env.modules_sources, vtb_source_root + "/src/instrumentation/timer.cpp")
+env_openvt.add_source_files(env.modules_sources, vtb_source_root + "/src/output/media.cpp")
+env_openvt.add_source_files(env.modules_sources, vtb_source_root + "/src/output/output_manager.cpp")
+env_openvt.add_source_files(env.modules_sources, vtb_source_root + "/src/output/rtsp_output.cpp")
 
 env.Append(
-    LIBPATH=[board_sysroot + "/usr/lib/aarch64-linux-gnu"],
-    LIBS=["rga", "rockchip_mpp"],
-    LINKFLAGS=["-Wl,--allow-shlib-undefined"],
+    LIBPATH=[
+        board_sysroot + "/usr/lib/aarch64-linux-gnu",
+        ffmpeg_sysroot + "/usr/lib/aarch64-linux-gnu",
+    ],
+    LIBS=["rga", "rockchip_mpp", "avformat", "avcodec", "avutil"],
+    LINKFLAGS=[
+        "-Wl,-rpath-link," + ffmpeg_sysroot + "/usr/lib/aarch64-linux-gnu",
+        "-Wl,-rpath-link," + board_sysroot + "/usr/lib/aarch64-linux-gnu",
+        "-Wl,--allow-shlib-undefined",
+    ],
 )
 

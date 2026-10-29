@@ -53,6 +53,7 @@
 
 #include "vtb/output/output_manager.hpp"
 #include "vtb/output/rtsp_output.hpp"
+#include "vtb/instrumentation/timer.hpp"
 
 namespace {
 
@@ -86,10 +87,6 @@ std::uint64_t steady_now_ns() {
                 std::string(std::strerror(errno)));
     return static_cast<std::uint64_t>(value.tv_sec) * 1000000000ULL +
            static_cast<std::uint64_t>(value.tv_nsec);
-}
-
-double milliseconds(std::chrono::steady_clock::duration duration) {
-    return std::chrono::duration<double, std::milli>(duration).count();
 }
 
 class PublisherOptions {
@@ -1198,8 +1195,11 @@ void drain_output(vtb::OutputManager& manager) {
 }
 
 void print_status(const vtb::OutputStatus& status,
-                  std::uint64_t frames, double input_wait_ms,
-                  double rga_ms, double mpp_ms, double publish_ms,
+                  std::uint64_t frames,
+                  const vtb::instrumentation::TimerHandle& input_wait,
+                  const vtb::instrumentation::TimerHandle& rga,
+                  const vtb::instrumentation::TimerHandle& mpp,
+                  const vtb::instrumentation::TimerHandle& publish,
                   std::chrono::steady_clock::duration wall_time) {
     const double wall_seconds =
         std::chrono::duration<double>(wall_time).count();
@@ -1207,18 +1207,41 @@ void print_status(const vtb::OutputStatus& status,
     if (wall_seconds > 0.0) {
         wall_fps = static_cast<double>(frames) / wall_seconds;
     }
+    const auto input_wait_snapshot = input_wait.snapshot();
+    const auto rga_snapshot = rga.snapshot();
+    const auto mpp_snapshot = mpp.snapshot();
+    const auto publish_snapshot = publish.snapshot();
+    const auto average_ms = [](const vtb::instrumentation::TimerSnapshot& value) {
+        return std::chrono::duration<double, std::milli>(value.average()).count();
+    };
+    const auto print_timer = [&average_ms](
+                                 const vtb::instrumentation::TimerSnapshot& value) {
+        const auto milliseconds = [](std::chrono::nanoseconds duration) {
+            return std::chrono::duration<double, std::milli>(duration).count();
+        };
+        std::cerr << "VTB_TIMER stage=" << value.name()
+                  << " samples=" << value.sample_count()
+                  << " latest_ms=" << milliseconds(value.latest())
+                  << " min_ms=" << milliseconds(value.minimum())
+                  << " avg_ms=" << average_ms(value)
+                  << " max_ms=" << milliseconds(value.maximum()) << '\n';
+    };
     std::cerr << "MPP publisher status: frames=" << frames
               << " wall_fps=" << wall_fps
-              << " input_wait_avg_ms=" << input_wait_ms / frames
-              << " rga_avg_ms=" << rga_ms / frames
-              << " mpp_avg_ms=" << mpp_ms / frames
-              << " publish_avg_ms=" << publish_ms / frames
+              << " input_wait_avg_ms=" << average_ms(input_wait_snapshot)
+              << " rga_avg_ms=" << average_ms(rga_snapshot)
+              << " mpp_avg_ms=" << average_ms(mpp_snapshot)
+              << " publish_avg_ms=" << average_ms(publish_snapshot)
               << " published=" << status.published
               << " written=" << status.written
               << " dropped=" << status.dropped
               << " errors=" << status.errors
               << " queue=" << status.queue_depth << '/'
               << status.queue_capacity << '\n';
+    print_timer(input_wait_snapshot);
+    print_timer(rga_snapshot);
+    print_timer(mpp_snapshot);
+    print_timer(publish_snapshot);
 }
 
 int publish(const PublisherOptions& options) {
@@ -1273,11 +1296,12 @@ int publish(const PublisherOptions& options) {
 
     const std::uint64_t duration_ns = 1000000000ULL / options.frame_rate;
     const auto wall_start = std::chrono::steady_clock::now();
+    vtb::instrumentation::TimerRegistry timers;
+    const auto input_wait_timer = timers.register_timer("face3d.input_wait");
+    const auto rga_timer = timers.register_timer("face3d.rga");
+    const auto mpp_timer = timers.register_timer("face3d.mpp");
+    const auto publish_timer = timers.register_timer("face3d.output_publish_call");
     std::uint64_t sequence = 0;
-    double input_wait_total_ms = 0.0;
-    double rga_total_ms = 0.0;
-    double mpp_total_ms = 0.0;
-    double publish_total_ms = 0.0;
     while (stop_requested == 0) {
         const auto input_start = std::chrono::steady_clock::now();
         FrameTiming timing;
@@ -1311,13 +1335,17 @@ int publish(const PublisherOptions& options) {
         trace_store.mark_output_published(timing.frame_id, steady_now_ns());
 
         ++sequence;
-        input_wait_total_ms += milliseconds(input_end - input_start);
-        rga_total_ms += milliseconds(rga_end - input_end);
-        mpp_total_ms += milliseconds(mpp_end - rga_end);
-        publish_total_ms += milliseconds(publish_end - mpp_end);
+        input_wait_timer.observe(std::chrono::duration_cast<std::chrono::nanoseconds>(
+            input_end - input_start));
+        rga_timer.observe(std::chrono::duration_cast<std::chrono::nanoseconds>(
+            rga_end - input_end));
+        mpp_timer.observe(std::chrono::duration_cast<std::chrono::nanoseconds>(
+            mpp_end - rga_end));
+        publish_timer.observe(std::chrono::duration_cast<std::chrono::nanoseconds>(
+            publish_end - mpp_end));
         if (sequence % 300 == 0) {
-            print_status(output_status(manager), sequence, input_wait_total_ms,
-                         rga_total_ms, mpp_total_ms, publish_total_ms,
+            print_status(output_status(manager), sequence, input_wait_timer,
+                         rga_timer, mpp_timer, publish_timer,
                          publish_end - wall_start);
         }
     }
@@ -1325,8 +1353,8 @@ int publish(const PublisherOptions& options) {
     drain_output(manager);
     const vtb::OutputStatus final_status = output_status(manager);
     if (sequence > 0) {
-        print_status(final_status, sequence, input_wait_total_ms,
-                     rga_total_ms, mpp_total_ms, publish_total_ms,
+        print_status(final_status, sequence, input_wait_timer, rga_timer,
+                     mpp_timer, publish_timer,
                      std::chrono::steady_clock::now() - wall_start);
     }
     manager.stop("rtsp");

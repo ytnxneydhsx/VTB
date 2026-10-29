@@ -12,7 +12,9 @@ RGBA DMA-BUF
     ↓ RGA
 NV12 DMA-BUF
     ↓ MPP
-H.264 → MP4
+H.264 packet
+    ↓ OutputManager → RtspOutput
+RTSP/TCP → MediaMTX
 ```
 
 ## 为什么先使用 GPU 内部复制
@@ -30,13 +32,69 @@ Godot 直接渲染到外部颜色附件。
 - 1920×1080、30 FPS、300 帧；
 - 3 个 RGBA DMA-BUF FrameSlot，媒体线程独占 1 个 NV12 DMA-BUF；
 - Godot render thread 完成 `glBlitFramebuffer` 和 `glFinish` 后把 FrameSlot 放入有界 FIFO；
-- 一个常驻媒体线程按帧序执行 RGA、MPP 和 H.264 文件写入；
+- 一个常驻媒体线程按帧序执行 RGA、MPP 和 `OutputManager::publish()`；
+- MPP 的 SPS/PPS 在输出启动前注册到 H.264 流描述，编码包携带单调时钟 PTS/DTS、帧序号和 IDR 标记；
+- `RtspOutput` 在独立输出线程中通过 RTSP/TCP 发布，有界队列容量为 16；
 - 队列满时生产端阻塞形成背压；Godot 与外部 EGLImage 的纹理方向一致，GPU copy 不执行 Y 翻转；
 - 使用 `/dev/dma_heap/system-uncached`；
 - 仍保留 X11，只验证人物到硬件编码的共享缓冲链路；
 - 不修改 Xorg、驱动、内核、设备树、权限或开机服务。
 
+实时推流由 `Engine.max_fps = OUTPUT_FPS` 把 Godot 提交节奏限制为 30 FPS。启动命令不使用
+`--fixed-fps`，因为该选项会关闭实时同步并让离线帧以设备可达到的速度生成；在实时 RTSP
+链路中会造成实际提交帧率、MPP 的 30 FPS 码控配置和浏览器解码能力不一致。验证以实际
+提交帧率、RTSP 时间戳和浏览器丢帧数为准，不以固定 `delta` 代表实时帧率。
+
+Live2D H.264 使用 MPP FIXQP、QP 18，以固定量化质量替代 CBR 的目标/最小/最大码率。
+该模式不设置应用层码率边界：静态画面码率较低，大幅运动和面部特写会产生更高码率。
+它用于优先验证源画质与运动画质，不解决人脸输入帧率不足，也不保证 100 Mbps 链路和
+浏览器在最坏画面下不会拥塞。验证需要同时记录实际码率、浏览器丢帧和网络发送错误。
+
 当前版本仍保留 `glFinish` 作为 GPU/RGA 的正确性边界。连续产品版本还需显式 fence、实时场景的最新帧丢弃策略、异常注入和长时间稳定性验证。
+
+## 为什么直接接入 OutputManager
+
+原先的最短替代方案是把 Annex-B 文件路径换成 FIFO，再启动独立 publisher 进程。
+当前实现直接复用项目内的 `OutputManager + RtspOutput`，让 MPP 包的时间戳、关键帧、
+重连和有界队列策略留在同一进程内，减少额外进程和 FFmpeg 再探测。该改造没有消除
+编码包到 `MediaPacket`、再到 FFmpeg `AVPacket` 的内存复制，也不保证网络断连时零丢帧。
+是否继续优化复制次数，以端到端 P95/P99、CPU、队列深度和丢帧数为依据。
+
+内置模块构建还需要提供 VTB 源码和 FFmpeg sysroot：
+
+```bash
+export OPENVT_VTB_SOURCE_ROOT=/path/to/VTB
+export OPENVT_BOARD_SYSROOT=/path/to/board-sysroot
+export OPENVT_FFMPEG_SYSROOT=/path/to/ffmpeg-sysroot
+```
+
+## OpenSeeFace 实时参数输入
+
+场景可以选择监听本机 UDP 参数流。未设置端口时继续运行原有 300 帧固定动画，
+所以历史性能与正确性基线不受影响。启用方式：
+
+```bash
+OPENVT_LIVE2D_TRACKING_PORT=11574 \
+OPENVT_LIVE2D_TOTAL_FRAMES=0 \
+OPENVT_RTSP_URL=rtsp://127.0.0.1:8554/live2d \
+OPENVT_DMABUF_OUTPUT_DIR=/home/huangnv/openvt-live2d-tracking-run-01 \
+./experiments/godot/openvt-dmabuf-capture/run_render_on_rk.sh
+```
+
+运行脚本默认使用
+`/home/huangnv/tools/godot-ayagami-live2d-rtsp-4.7.1/godot-ayagami-live2d-rtsp-4.7.1-linux.arm64`。
+部署到其他目录时通过 `OPENVT_GODOT_BIN` 显式指定，避免误用仍采用文件输出接口的旧 Godot 产物。
+`OPENVT_LIVE2D_TOTAL_FRAMES=0` 表示持续推流；省略时保留 300 帧验证模式。
+
+Godot 默认只绑定 `127.0.0.1`，每次渲染前读空 UDP 队列并使用最新的有效快照。
+参数年龄超过 150 ms 时，角色在 250 ms 时间常数下回到模型默认值。Python
+发送端和映射参数见 [`docs/live2d-face-tracking-bridge.md`](../../../docs/live2d-face-tracking-bridge.md)。
+
+需要采集全链路性能统计时增加 `OPENVT_PROFILE=1`。运行脚本会同时启用
+GDScript 跟踪统计和 Ayagami profiler，并让原生 DMA-BUF 模块输出通过
+`vtb::instrumentation` 聚合的阶段统计。持续模式默认每 300 个渲染帧输出一次
+跟踪窗口，可用 `OPENVT_PROFILE_REPORT_FRAMES` 修改。原生模块的 P50/P95/P99
+窗口固定为最近 4096 个样本，详细阶段和边界见上述桥接文档。
 
 ## RK3588 实机结果
 
@@ -52,7 +110,7 @@ Godot 直接渲染到外部颜色附件。
 
 这里提升的是稳态处理吞吐：渲染下一帧时，媒体线程可以处理上一帧。单帧从参数更新到 H.264 可用的端到端延迟仍包含渲染、GPU copy、排队以及 RGA/MPP；不能把 `5.327 ms` 当作完整单帧延迟。对 30 FPS 输出而言，当前结果已经提供明显的处理余量。
 
-三次输出均为 1920×1080、30 FPS、300 帧、9.9999 秒、H.264/yuv420p。`ffprobe` 统计 300 帧，FFmpeg 完整解码无错误。同步版和两轮流水版的 H.264、MP4 以及 6 个抽帧均逐字节相同；视觉检查确认方向、颜色、透明边缘和人物动作正确。
+以下结果来自改为 RTSP 之前的文件输出基线。三次输出均为 1920×1080、30 FPS、300 帧、9.9999 秒、H.264/yuv420p。`ffprobe` 统计 300 帧，FFmpeg 完整解码无错误。同步版和两轮流水版的 H.264、MP4 以及 6 个抽帧均逐字节相同；视觉检查确认方向、颜色、透明边缘和人物动作正确。新的 RTSP 路径仍需在 RK3588 上单独验证。
 
 本机结果：
 

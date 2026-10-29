@@ -19,7 +19,7 @@ public:
 	OpenVTDmaBufCapture(OpenVTDmaBufCapture &&) = delete;
 	OpenVTDmaBufCapture &operator=(OpenVTDmaBufCapture &&) = delete;
 
-	Error configure(const String &p_output_path, int p_width, int p_height, int p_fps, int p_total_frames);
+	Error configure(const String &p_rtsp_url, int p_width, int p_height, int p_fps, int p_total_frames);
 	Error capture_frame(RID p_viewport, int p_frame_index, bool p_end_of_stream);
 	Error finish();
 	String get_last_error() const;
@@ -33,7 +33,7 @@ private:
 	void _finish_render_thread();
 	void _complete_operation(Error p_error, const String &p_message);
 
-	String output_path;
+	String rtsp_url;
 	int width = 0;
 	int height = 0;
 	int fps = 0;

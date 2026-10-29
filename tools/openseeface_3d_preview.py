@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 
 import argparse
+import json
 import math
 import os
 import secrets
@@ -8,6 +9,7 @@ import struct
 import sys
 import threading
 import time
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Optional
 
@@ -32,6 +34,121 @@ LINE_TARGETS = [
     43, 44, 45, 46, 47, 42,
     49, 50, 51, 52, 62, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63, 64, 65, 58,
 ]
+
+
+class PerformanceStats:
+    def __init__(
+        self,
+        session_id: int,
+        enabled: bool,
+        report_interval_frames: int,
+        *,
+        clock_ns=None,
+        output=None,
+    ):
+        self._session_id = session_id
+        self._enabled = enabled
+        self._report_interval_frames = report_interval_frames
+        self._clock_ns = time.monotonic_ns if clock_ns is None else clock_ns
+        self._output = sys.stderr if output is None else output
+        self._lock = threading.RLock()
+        self._window_started_ns = self._clock_ns() if enabled else 0
+        self._timers = {}
+        self._counters = {}
+        self._frames = 0
+        self._last_frame_id = 0
+        self._last_capture_sequence = 0
+        self._previous_capture_sequence = 0
+
+    @property
+    def enabled(self) -> bool:
+        return self._enabled
+
+    def observe(self, name: str, duration_ns: int) -> None:
+        if not self._enabled or duration_ns < 0:
+            return
+        with self._lock:
+            timer = self._timers.get(name)
+            if timer is None:
+                self._timers[name] = {
+                    "sample_count": 1,
+                    "latest_ns": duration_ns,
+                    "total_ns": duration_ns,
+                    "minimum_ns": duration_ns,
+                    "maximum_ns": duration_ns,
+                }
+                return
+            timer["sample_count"] += 1
+            timer["latest_ns"] = duration_ns
+            timer["total_ns"] += duration_ns
+            timer["minimum_ns"] = min(timer["minimum_ns"], duration_ns)
+            timer["maximum_ns"] = max(timer["maximum_ns"], duration_ns)
+
+    def increment(self, name: str, amount: int = 1) -> None:
+        if not self._enabled:
+            return
+        with self._lock:
+            self._counters[name] = self._counters.get(name, 0) + amount
+
+    def finish_frame(self, frame_id: int, capture_sequence: int) -> None:
+        if not self._enabled:
+            return
+        with self._lock:
+            self._frames += 1
+            self._last_frame_id = frame_id
+            self._last_capture_sequence = capture_sequence
+            if (
+                capture_sequence > 0
+                and self._previous_capture_sequence > 0
+                and capture_sequence > self._previous_capture_sequence + 1
+            ):
+                self.increment(
+                    "overwritten_camera_frames",
+                    capture_sequence - self._previous_capture_sequence - 1,
+                )
+            if capture_sequence > 0:
+                self._previous_capture_sequence = capture_sequence
+            self.increment("processed_frames")
+            if self._frames >= self._report_interval_frames:
+                self.report()
+
+    def report(self) -> None:
+        if not self._enabled:
+            return
+        with self._lock:
+            if self._frames == 0:
+                return
+            window_ended_ns = self._clock_ns()
+            timers = []
+            for name in sorted(self._timers):
+                timer = dict(self._timers[name])
+                timer["name"] = name
+                timer["average_ns"] = timer["total_ns"] // timer["sample_count"]
+                timers.append(timer)
+            value = {
+                "schema": "vtb.performance.summary",
+                "version": 1,
+                "session_id": self._session_id,
+                "window_start_ns": self._window_started_ns,
+                "window_end_ns": window_ended_ns,
+                "frames": self._frames,
+                "last_frame_id": self._last_frame_id,
+                "last_capture_sequence": self._last_capture_sequence,
+                "timers": timers,
+                "counters": dict(sorted(self._counters.items())),
+            }
+            print(
+                "VTB_PERF_SUMMARY "
+                + json.dumps(
+                    value, allow_nan=False, separators=(",", ":"), sort_keys=True
+                ),
+                file=self._output,
+                flush=True,
+            )
+            self._window_started_ns = window_ended_ns
+            self._timers.clear()
+            self._counters.clear()
+            self._frames = 0
 
 
 def parse_arguments() -> argparse.Namespace:
@@ -86,12 +203,102 @@ def parse_arguments() -> argparse.Namespace:
         default=30,
         help="Frames excluded from latency statistics",
     )
+    parser.add_argument(
+        "--performance-stats",
+        action="store_true",
+        help="Periodically write bounded in-process performance summaries to stderr",
+    )
+    parser.add_argument(
+        "--performance-report-interval-frames",
+        type=int,
+        default=300,
+        help="Processed frames per performance summary window",
+    )
+    parser.add_argument(
+        "--live2d-udp",
+        metavar="HOST:PORT",
+        help="Send mapped Live2D parameter snapshots over UDP",
+    )
+    parser.add_argument(
+        "--live2d-control-address",
+        default="127.0.0.1",
+        help="Address for the optional Live2D recalibration HTTP control",
+    )
+    parser.add_argument(
+        "--live2d-control-port",
+        type=int,
+        default=0,
+        help="Port for Live2D recalibration HTTP control; zero disables it",
+    )
+    parser.add_argument(
+        "--live2d-control-origin",
+        default="",
+        help="Browser origin allowed to request Live2D recalibration",
+    )
+    parser.add_argument(
+        "--live2d-calibration-frames",
+        type=int,
+        default=30,
+        help="Neutral head-pose samples collected before Live2D motion starts",
+    )
+    parser.add_argument(
+        "--live2d-smoothing-ms",
+        type=float,
+        default=50.0,
+        help="Time constant for mapped Live2D parameter smoothing",
+    )
+    parser.add_argument(
+        "--live2d-min-confidence",
+        type=float,
+        default=0.4,
+        help="Minimum OpenSeeFace confidence accepted by the Live2D mapper",
+    )
+    parser.add_argument(
+        "--live2d-max-pnp-error",
+        type=float,
+        default=100.0,
+        help="Maximum OpenSeeFace 3D fit error accepted by the Live2D mapper",
+    )
+    parser.add_argument(
+        "--live2d-angle-x-sign",
+        type=float,
+        choices=(-1.0, 1.0),
+        default=1.0,
+        help="Direction multiplier for ParamAngleX after yaw calibration",
+    )
+    parser.add_argument(
+        "--live2d-angle-y-sign",
+        type=float,
+        choices=(-1.0, 1.0),
+        default=1.0,
+        help="Direction multiplier for ParamAngleY after pitch calibration",
+    )
+    parser.add_argument(
+        "--live2d-angle-z-sign",
+        type=float,
+        choices=(-1.0, 1.0),
+        default=1.0,
+        help="Direction multiplier for ParamAngleZ after roll calibration",
+    )
+    parser.add_argument(
+        "--live2d-mouth-closed",
+        type=float,
+        default=0.0,
+        help="OpenSeeFace mouth_open value mapped to ParamMouthOpenY=0",
+    )
+    parser.add_argument(
+        "--live2d-mouth-open",
+        type=float,
+        default=1.0,
+        help="OpenSeeFace mouth_open value mapped to ParamMouthOpenY=1",
+    )
     return parser.parse_args()
 
 
 class LatestFrameCapture:
-    def __init__(self, capture):
+    def __init__(self, capture, performance_stats=None):
         self._capture = capture
+        self._performance_stats = performance_stats
         self._condition = threading.Condition()
         self._frame = None
         self._frame_ready_at = None
@@ -107,8 +314,19 @@ class LatestFrameCapture:
                 if self._stop_requested:
                     break
 
+            read_started_at = 0
+            if self._performance_stats is not None and self._performance_stats.enabled:
+                read_started_at = time.monotonic_ns()
             frame_available, frame = self._capture.read()
             frame_ready_at = time.monotonic_ns()
+            if self._performance_stats is not None and self._performance_stats.enabled:
+                self._performance_stats.observe(
+                    "camera.read_wait_decode",
+                    frame_ready_at - read_started_at,
+                )
+                self._performance_stats.increment("camera_read_calls")
+                if frame_available:
+                    self._performance_stats.increment("camera_frames")
             if not frame_available:
                 with self._condition:
                     self._closed = True
@@ -365,6 +583,7 @@ def create_tracker(
     backend: str,
     rknn_model_dir: Path,
     measure_latency: bool,
+    enable_frame_trace: bool,
 ):
     frame_height, frame_width = frame.shape[:2]
     tracker = Tracker(
@@ -387,6 +606,7 @@ def create_tracker(
             tracker,
             rknn_model_dir,
             enable_timing=measure_latency,
+            enable_frame_trace=enable_frame_trace,
         )
     return tracker
 
@@ -520,10 +740,199 @@ def write_timed_frame(canvas, timing) -> bool:
     return True
 
 
+class Live2DCalibrationControl:
+    VIEW_ZOOM_MIN = 0.5
+    VIEW_ZOOM_MAX = 6.0
+    VIEW_OFFSET_MIN = -2.0
+    VIEW_OFFSET_MAX = 2.0
+
+    def __init__(self, required_samples: int):
+        self._required_samples = required_samples
+        self._lock = threading.Lock()
+        self._request_pending = False
+        self._status = {
+            "state": "calibrating",
+            "calibrated": False,
+            "tracking_valid": False,
+            "confidence": 0.0,
+            "progress": 0,
+            "required": required_samples,
+            "view": {
+                "zoom": 1.0,
+                "offset_x": 0.0,
+                "offset_y": 0.0,
+            },
+        }
+
+    def request_recalibration(self) -> None:
+        with self._lock:
+            self._request_pending = True
+            self._status.update(
+                {
+                    "state": "requested",
+                    "calibrated": False,
+                    "progress": 0,
+                }
+            )
+
+    def consume_recalibration_request(self) -> bool:
+        with self._lock:
+            if not self._request_pending:
+                return False
+            self._request_pending = False
+            return True
+
+    def update(self, result, progress: int) -> None:
+        with self._lock:
+            state = "calibrating"
+            if result.calibrated:
+                state = "calibrated"
+            self._status.update(
+                {
+                    "state": state,
+                    "calibrated": result.calibrated,
+                    "tracking_valid": result.tracking_valid,
+                    "confidence": result.confidence,
+                    "progress": progress,
+                }
+            )
+
+    def set_view(self, view) -> None:
+        if not isinstance(view, dict):
+            raise ValueError("view must be a JSON object")
+        values = {}
+        for field in ("zoom", "offset_x", "offset_y"):
+            value = view.get(field)
+            if isinstance(value, bool) or not isinstance(value, (int, float)):
+                raise ValueError(f"view.{field} must be a finite number")
+            value = float(value)
+            if not math.isfinite(value):
+                raise ValueError(f"view.{field} must be a finite number")
+            values[field] = value
+        if not self.VIEW_ZOOM_MIN <= values["zoom"] <= self.VIEW_ZOOM_MAX:
+            raise ValueError(
+                f"view.zoom must be between {self.VIEW_ZOOM_MIN} and "
+                f"{self.VIEW_ZOOM_MAX}"
+            )
+        for field in ("offset_x", "offset_y"):
+            if not self.VIEW_OFFSET_MIN <= values[field] <= self.VIEW_OFFSET_MAX:
+                raise ValueError(
+                    f"view.{field} must be between {self.VIEW_OFFSET_MIN} and "
+                    f"{self.VIEW_OFFSET_MAX}"
+                )
+        with self._lock:
+            self._status["view"] = values
+
+    def view_snapshot(self):
+        with self._lock:
+            return dict(self._status["view"])
+
+    def snapshot(self):
+        with self._lock:
+            snapshot = dict(self._status)
+            snapshot["view"] = dict(self._status["view"])
+            return snapshot
+
+
+def make_live2d_control_handler(control, allowed_origin: str):
+    class Live2DControlRequestHandler(BaseHTTPRequestHandler):
+        def do_GET(self):
+            if self.path != "/health":
+                self._send_json(404, {"error": "not found"})
+                return
+            self._send_json(200, control.snapshot())
+
+        def do_POST(self):
+            if self.path not in ("/recalibrate", "/view"):
+                self._send_json(404, {"error": "not found"})
+                return
+            if not self._origin_is_allowed():
+                self._send_json(403, {"error": "origin is not allowed"})
+                return
+            if self.path == "/recalibrate":
+                control.request_recalibration()
+                self._send_json(202, control.snapshot())
+                return
+            try:
+                control.set_view(self._read_json_object())
+            except (ValueError, json.JSONDecodeError) as error:
+                self._send_json(400, {"error": str(error)})
+                return
+            self._send_json(200, control.snapshot())
+
+        def do_OPTIONS(self):
+            if (
+                self.path not in ("/recalibrate", "/view")
+                or not self._origin_is_allowed()
+            ):
+                self._send_json(403, {"error": "origin is not allowed"})
+                return
+            self.send_response(204)
+            self._send_cors_headers()
+            self.send_header("Access-Control-Allow-Methods", "POST, OPTIONS")
+            self.send_header("Access-Control-Allow-Headers", "Content-Type")
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+
+        def _read_json_object(self):
+            length_text = self.headers.get("Content-Length")
+            if length_text is None:
+                raise ValueError("Content-Length is required")
+            try:
+                length = int(length_text)
+            except ValueError as error:
+                raise ValueError("Content-Length must be an integer") from error
+            if length < 2 or length > 1024:
+                raise ValueError("JSON request body must be between 2 and 1024 bytes")
+            payload = json.loads(self.rfile.read(length).decode("utf-8"))
+            if not isinstance(payload, dict):
+                raise ValueError("JSON request body must be an object")
+            return payload
+
+        def _origin_is_allowed(self) -> bool:
+            origin = self.headers.get("Origin")
+            if not allowed_origin or origin is None:
+                return True
+            return origin == allowed_origin
+
+        def _send_cors_headers(self) -> None:
+            origin = self.headers.get("Origin")
+            if allowed_origin and origin == allowed_origin:
+                self.send_header("Access-Control-Allow-Origin", allowed_origin)
+                self.send_header("Vary", "Origin")
+
+        def _send_json(self, status: int, payload) -> None:
+            body = json.dumps(payload, separators=(",", ":")).encode("utf-8")
+            self.send_response(status)
+            self._send_cors_headers()
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("Content-Type", "application/json; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, format, *args):
+            return
+
+    return Live2DControlRequestHandler
+
+
 def main() -> int:
     args = parse_arguments()
     if args.raw_output and args.timed_raw_output:
         print("Choose either --raw-output or --timed-raw-output.", file=sys.stderr)
+        return 2
+    if args.live2d_control_port < 0 or args.live2d_control_port > 65535:
+        print("Live2D control port must be between 0 and 65535.", file=sys.stderr)
+        return 2
+    if args.live2d_control_port > 0 and args.live2d_udp is None:
+        print("Live2D control requires --live2d-udp.", file=sys.stderr)
+        return 2
+    if args.performance_report_interval_frames < 1:
+        print(
+            "Performance report interval must be a positive number of frames.",
+            file=sys.stderr,
+        )
         return 2
 
     try:
@@ -562,15 +971,79 @@ def main() -> int:
             print(str(error), file=sys.stderr)
             return 1
 
-    if capture_is_live:
-        latest_capture = LatestFrameCapture(capture)
-
     tracker = None
-    frame_count = 0
-    capture_sequence = 0
     trace_session_id = secrets.randbits(53)
     if trace_session_id == 0:
         trace_session_id = 1
+    performance_stats = PerformanceStats(
+        trace_session_id,
+        args.performance_stats,
+        args.performance_report_interval_frames,
+    )
+    live2d_mapper = None
+    live2d_sender = None
+    live2d_control = None
+    live2d_control_server = None
+    live2d_control_thread = None
+    if args.live2d_udp is not None:
+        try:
+            from live2d_face_tracking import (
+                Live2DFaceMapper,
+                Live2DMappingConfig,
+                Live2DTrackingSender,
+            )
+
+            live2d_mapper = Live2DFaceMapper(
+                Live2DMappingConfig(
+                    calibration_frames=args.live2d_calibration_frames,
+                    smoothing_tau_ms=args.live2d_smoothing_ms,
+                    minimum_confidence=args.live2d_min_confidence,
+                    maximum_pnp_error=args.live2d_max_pnp_error,
+                    angle_x_sign=args.live2d_angle_x_sign,
+                    angle_y_sign=args.live2d_angle_y_sign,
+                    angle_z_sign=args.live2d_angle_z_sign,
+                    mouth_closed_value=args.live2d_mouth_closed,
+                    mouth_open_value=args.live2d_mouth_open,
+                )
+            )
+            live2d_sender = Live2DTrackingSender(
+                args.live2d_udp,
+                session_id=trace_session_id,
+                enable_timing=args.performance_stats,
+            )
+            if args.live2d_control_port > 0:
+                live2d_control = Live2DCalibrationControl(
+                    args.live2d_calibration_frames
+                )
+                control_handler = make_live2d_control_handler(
+                    live2d_control,
+                    args.live2d_control_origin,
+                )
+                live2d_control_server = ThreadingHTTPServer(
+                    (args.live2d_control_address, args.live2d_control_port),
+                    control_handler,
+                )
+                live2d_control_thread = threading.Thread(
+                    target=live2d_control_server.serve_forever,
+                    daemon=True,
+                )
+                live2d_control_thread.start()
+                print(
+                    "LIVE2D_CONTROL_LISTEN "
+                    f"address={args.live2d_control_address} "
+                    f"port={args.live2d_control_port} "
+                    f"origin={args.live2d_control_origin}",
+                    file=sys.stderr,
+                )
+        except (OSError, ValueError) as error:
+            print(f"Unable to configure Live2D output: {error}", file=sys.stderr)
+            if capture is not None:
+                capture.release()
+            return 2
+    if capture_is_live:
+        latest_capture = LatestFrameCapture(capture, performance_stats)
+    frame_count = 0
+    capture_sequence = 0
     last_canvas = render_no_face(cv2, np, args.canvas_width, args.canvas_height)
     capture_to_points_ms = []
     frame_handoff_ms = []
@@ -606,14 +1079,18 @@ def main() -> int:
                     args.threads,
                     args.backend,
                     args.rknn_model_dir.resolve(),
-                    args.latency_stats or args.timed_raw_output,
+                    args.latency_stats,
+                    args.timed_raw_output or args.performance_stats,
                 )
                 if args.assume_face_crop:
                     frame_height, frame_width = frame.shape[:2]
                     tracker.detected = 1
                     tracker.faces = [(0, 0, frame_width, frame_height)]
 
-            if args.backend == "rknn" and args.timed_raw_output:
+            rknn_frame_trace_enabled = args.backend == "rknn" and (
+                args.timed_raw_output or args.performance_stats
+            )
+            if rknn_frame_trace_enabled:
                 from openseeface_rknn_backend import begin_rknn_frame_trace
 
                 begin_rknn_frame_trace(tracker)
@@ -621,11 +1098,24 @@ def main() -> int:
             processing_started_at = time.monotonic_ns()
             faces = tracker.predict(frame)
             points_ready_at = time.monotonic_ns()
+            performance_stats.observe(
+                "camera.latest_frame_handoff",
+                processing_started_at - frame_ready_at,
+            )
+            performance_stats.observe(
+                "openseeface.predict",
+                points_ready_at - processing_started_at,
+            )
+            performance_stats.observe(
+                "openseeface.capture_ready_to_points",
+                points_ready_at - frame_ready_at,
+            )
+            frame_id = frame_count + 1
             detector_start_ns = 0
             detector_end_ns = 0
             landmark_start_ns = 0
             landmark_end_ns = 0
-            if args.backend == "rknn" and args.timed_raw_output:
+            if rknn_frame_trace_enabled:
                 from openseeface_rknn_backend import rknn_frame_trace
 
                 rknn_trace = rknn_frame_trace(tracker)
@@ -635,6 +1125,16 @@ def main() -> int:
                 landmark_start_ns, landmark_end_ns = rknn_trace.get(
                     "landmark", (0, 0)
                 )
+                if detector_start_ns != 0 and detector_end_ns >= detector_start_ns:
+                    performance_stats.observe(
+                        "rknn.detector",
+                        detector_end_ns - detector_start_ns,
+                    )
+                if landmark_start_ns != 0 and landmark_end_ns >= landmark_start_ns:
+                    performance_stats.observe(
+                        "rknn.landmark",
+                        landmark_end_ns - landmark_start_ns,
+                    )
             if (
                 args.latency_stats
                 and frame_ready_at is not None
@@ -652,6 +1152,80 @@ def main() -> int:
                 capture_to_points_ms.append(
                     (points_ready_at - frame_ready_at) / 1_000_000.0
                 )
+            if live2d_mapper is not None and live2d_sender is not None:
+                if (
+                    live2d_control is not None
+                    and live2d_control.consume_recalibration_request()
+                ):
+                    live2d_mapper.reset_calibration()
+                    print(
+                        f"LIVE2D_RECALIBRATION_STARTED frame_id={frame_id}",
+                        file=sys.stderr,
+                    )
+                tracked_face = None
+                if len(faces) > 0:
+                    tracked_face = faces[0]
+                mapping_started_at = 0
+                if args.performance_stats:
+                    mapping_started_at = time.monotonic_ns()
+                mapping_result = live2d_mapper.update(
+                    tracked_face,
+                    points_ready_at,
+                )
+                if args.performance_stats:
+                    mapping_finished_at = time.monotonic_ns()
+                    performance_stats.observe(
+                        "live2d.mapping",
+                        mapping_finished_at - mapping_started_at,
+                    )
+                if mapping_result.tracking_valid:
+                    performance_stats.increment("tracking_valid_frames")
+                else:
+                    performance_stats.increment("tracking_invalid_frames")
+                send_timing = live2d_sender.send(
+                    result=mapping_result,
+                    frame_id=frame_id,
+                    capture_sequence=capture_sequence,
+                    capture_ready_ns=frame_ready_at,
+                    points_ready_ns=points_ready_at,
+                    view=(
+                        live2d_control.view_snapshot()
+                        if live2d_control is not None
+                        else None
+                    ),
+                )
+                performance_stats.observe(
+                    "live2d.packet_build",
+                    send_timing.packet_built_ns - send_timing.packet_build_started_ns,
+                )
+                performance_stats.observe(
+                    "live2d.json_encode",
+                    send_timing.packet_encoded_ns - send_timing.packet_built_ns,
+                )
+                performance_stats.observe(
+                    "live2d.udp_send",
+                    send_timing.udp_send_completed_ns - send_timing.udp_send_started_ns,
+                )
+                performance_stats.observe(
+                    "live2d.send_total",
+                    send_timing.udp_send_completed_ns
+                    - send_timing.packet_build_started_ns,
+                )
+                performance_stats.observe(
+                    "live2d.points_to_send_complete",
+                    send_timing.udp_send_completed_ns - points_ready_at,
+                )
+                performance_stats.observe(
+                    "live2d.capture_ready_to_send_complete",
+                    send_timing.udp_send_completed_ns - frame_ready_at,
+                )
+                performance_stats.increment("udp_datagrams_sent")
+                performance_stats.increment("udp_bytes_sent", send_timing.payload_bytes)
+                if live2d_control is not None:
+                    live2d_control.update(
+                        mapping_result,
+                        live2d_mapper.calibration_progress,
+                    )
             if len(faces) > 0:
                 last_canvas = render_face(
                     cv2,
@@ -667,11 +1241,11 @@ def main() -> int:
                     cv2, np, args.canvas_width, args.canvas_height
                 )
 
-            frame_id = frame_count + 1
             if args.timed_raw_output:
                 render_trace_marker(cv2, last_canvas, frame_id)
             canvas_ready_at = time.monotonic_ns()
             frame_count = frame_id
+            performance_stats.finish_frame(frame_id, capture_sequence)
             if args.timed_raw_output:
                 timing = {
                     "session_id": trace_session_id,
@@ -705,6 +1279,7 @@ def main() -> int:
             latest_capture.close()
         elif capture is not None:
             capture.release()
+        performance_stats.report()
         if not args.no_window:
             cv2.destroyAllWindows()
         if tracker is not None and args.backend == "rknn":
@@ -716,6 +1291,13 @@ def main() -> int:
             from openseeface_rknn_backend import release_rknn_backend
 
             release_rknn_backend(tracker)
+        if live2d_sender is not None:
+            live2d_sender.close()
+        if live2d_control_server is not None:
+            live2d_control_server.shutdown()
+            live2d_control_server.server_close()
+        if live2d_control_thread is not None:
+            live2d_control_thread.join(timeout=1.0)
 
     if args.latency_stats:
         print_latency_summary(np, "frame_handoff", frame_handoff_ms)
