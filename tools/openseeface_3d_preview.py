@@ -47,6 +47,12 @@ def parse_arguments() -> argparse.Namespace:
     parser.add_argument("--width", type=int, default=1280, help="Requested camera width")
     parser.add_argument("--height", type=int, default=720, help="Requested camera height")
     parser.add_argument("--fps", type=int, default=30, help="Requested camera frame rate")
+    parser.add_argument(
+        "--capture-buffers",
+        type=int,
+        default=4,
+        help="Number of V4L2 capture buffers; values below two can reduce frame rate",
+    )
     parser.add_argument("--canvas-width", type=int, default=1280)
     parser.add_argument("--canvas-height", type=int, default=720)
     parser.add_argument("--threads", type=int, default=4)
@@ -336,7 +342,12 @@ def render_no_face(cv2, np, canvas_width: int, canvas_height: int):
     return canvas
 
 
-def open_capture(cv2, capture_value: str, width: int, height: int, fps: int):
+def open_capture(
+    cv2, capture_value: str, width: int, height: int, fps: int, capture_buffers: int
+):
+    if capture_buffers < 2:
+        raise ValueError("--capture-buffers must be at least two")
+
     capture_source = capture_value
     if capture_value.isdigit():
         capture_source = int(capture_value)
@@ -349,7 +360,7 @@ def open_capture(cv2, capture_value: str, width: int, height: int, fps: int):
         "/dev/video"
     )
     if is_live_camera:
-        capture.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+        capture.set(cv2.CAP_PROP_BUFFERSIZE, capture_buffers)
         capture.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*"MJPG"))
         capture.set(cv2.CAP_PROP_FRAME_WIDTH, width)
         capture.set(cv2.CAP_PROP_FRAME_HEIGHT, height)
@@ -556,9 +567,14 @@ def main() -> int:
     else:
         try:
             capture, capture_is_live = open_capture(
-                cv2, args.capture, args.width, args.height, args.fps
+                cv2,
+                args.capture,
+                args.width,
+                args.height,
+                args.fps,
+                args.capture_buffers,
             )
-        except RuntimeError as error:
+        except (RuntimeError, ValueError) as error:
             print(str(error), file=sys.stderr)
             return 1
 
