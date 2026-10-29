@@ -79,10 +79,26 @@ struct MaskRenderCache {
 struct FrameProfile {
     frames: u64,
     mesh_candidates: u64,
+    updated_meshes: u64,
+    updated_vertices: u64,
+    uploaded_vertex_bytes: u64,
     drive_ns: u128,
     mesh_submit_ns: u128,
+    vertex_convert_ns: u128,
+    to_byte_array_ns: u128,
+    vertex_upload_call_ns: u128,
     masks_ns: u128,
     reorder_ns: u128,
+}
+
+#[derive(Default)]
+struct MeshSubmitProfile {
+    updated_meshes: u64,
+    updated_vertices: u64,
+    uploaded_vertex_bytes: u64,
+    vertex_convert_ns: u128,
+    to_byte_array_ns: u128,
+    vertex_upload_call_ns: u128,
 }
 
 #[derive(GodotClass)]
@@ -233,6 +249,7 @@ impl AyagamiModel {
         &mut self,
         drive_ns: u128,
         mesh_submit_ns: u128,
+        mesh_profile: MeshSubmitProfile,
         masks_ns: u128,
         reorder_ns: u128,
     ) {
@@ -240,12 +257,27 @@ impl AyagamiModel {
 
         self.frame_profile.frames += 1;
         self.frame_profile.mesh_candidates += self.last_mesh_candidates;
+        self.frame_profile.updated_meshes += mesh_profile.updated_meshes;
+        self.frame_profile.updated_vertices += mesh_profile.updated_vertices;
+        self.frame_profile.uploaded_vertex_bytes += mesh_profile.uploaded_vertex_bytes;
         self.frame_profile.drive_ns += drive_ns;
         self.frame_profile.mesh_submit_ns += mesh_submit_ns;
+        self.frame_profile.vertex_convert_ns += mesh_profile.vertex_convert_ns;
+        self.frame_profile.to_byte_array_ns += mesh_profile.to_byte_array_ns;
+        self.frame_profile.vertex_upload_call_ns += mesh_profile.vertex_upload_call_ns;
         self.frame_profile.masks_ns += masks_ns;
         self.frame_profile.reorder_ns += reorder_ns;
 
         if self.frame_profile.frames < REPORT_INTERVAL {
+            return;
+        }
+
+        self.print_frame_profile();
+        self.frame_profile = FrameProfile::default();
+    }
+
+    fn print_frame_profile(&self) {
+        if self.frame_profile.frames == 0 {
             return;
         }
 
@@ -256,19 +288,43 @@ impl AyagamiModel {
             + self.frame_profile.masks_ns
             + self.frame_profile.reorder_ns;
         godot_print!(
-            "AYAGAMI_PROFILE frames={} mesh_candidates_avg={:.3} drive_ms={:.6} mesh_submit_ms={:.6} masks_ms={:.6} reorder_ms={:.6} pipeline_ms={:.6}",
+            "AYAGAMI_PROFILE_WORK frames={} mesh_candidates_avg={:.3} updated_meshes_avg={:.3} updated_vertices_avg={:.3} vertex_bytes_avg={:.3}",
             self.frame_profile.frames,
             self.frame_profile.mesh_candidates as f64 / frames,
-            ns_to_ms(self.frame_profile.drive_ns),
+            self.frame_profile.updated_meshes as f64 / frames,
+            self.frame_profile.updated_vertices as f64 / frames,
+            self.frame_profile.uploaded_vertex_bytes as f64 / frames,
+        );
+        godot_print!(
+            "AYAGAMI_PROFILE_VERTEX frames={} convert_ms={:.6} to_byte_array_ms={:.6} upload_call_ms={:.6} mesh_submit_ms={:.6}",
+            self.frame_profile.frames,
+            ns_to_ms(self.frame_profile.vertex_convert_ns),
+            ns_to_ms(self.frame_profile.to_byte_array_ns),
+            ns_to_ms(self.frame_profile.vertex_upload_call_ns),
             ns_to_ms(self.frame_profile.mesh_submit_ns),
+        );
+        godot_print!(
+            "AYAGAMI_PROFILE_PIPELINE frames={} drive_ms={:.6} masks_ms={:.6} reorder_ms={:.6} pipeline_ms={:.6}",
+            self.frame_profile.frames,
+            ns_to_ms(self.frame_profile.drive_ns),
             ns_to_ms(self.frame_profile.masks_ns),
             ns_to_ms(self.frame_profile.reorder_ns),
             ns_to_ms(pipeline_ns),
         );
+    }
+
+    #[func]
+    fn profile_reset(&mut self) {
         self.frame_profile = FrameProfile::default();
     }
 
-    fn update_meshes(&mut self, force: bool) {
+    #[func]
+    fn profile_report(&self) {
+        self.print_frame_profile();
+    }
+
+    fn update_meshes(&mut self, force: bool) -> MeshSubmitProfile {
+        let mut profile = MeshSubmitProfile::default();
         let state_cache_enabled = self.state_cache_enabled;
         let mut mask_layout_changed = force;
         let use_updated_mesh_list = self.updated_mesh_list_enabled && !force;
@@ -364,16 +420,21 @@ impl AyagamiModel {
                 }
             }
 
-            let mut ary = if state_cache_enabled {
+            let mut vertices = if state_cache_enabled {
                 std::mem::replace(&mut cache.vertices, PackedVector2Array::new())
             } else {
                 PackedVector2Array::new()
             };
-            ary.resize(count);
+            vertices.resize(count);
+
+            profile.updated_meshes += 1;
+            profile.updated_vertices += count as u64;
+            profile.uploaded_vertex_bytes += (count * std::mem::size_of::<Vector2>()) as u64;
 
             let mut vtx_min = Vector3::new(f32::MAX, f32::MAX, 0.0); // top-left
             let mut vtx_max = Vector3::new(f32::MIN, f32::MIN, 0.0); // bottom-right
 
+            let vertex_convert_start = self.profile_enabled.then(Instant::now);
             for (i, vtx) in verts.iter().enumerate() {
                 let x = vtx.x * px_size;
                 let y = vtx.y * px_size;
@@ -382,12 +443,25 @@ impl AyagamiModel {
                 vtx_max.x = f32::max(vtx_max.x, x); // right
                 vtx_max.y = f32::max(vtx_max.y, y); // bottom
 
-                ary[i] = Vector2::new(x, y);
+                vertices[i] = Vector2::new(x, y);
             }
+            profile.vertex_convert_ns += vertex_convert_start
+                .map(|start| start.elapsed().as_nanos())
+                .unwrap_or(0);
 
-            mesh.surface_update_vertex_region(0, 0, &ary.to_byte_array());
+            let to_byte_array_start = self.profile_enabled.then(Instant::now);
+            let vertex_bytes = vertices.to_byte_array();
+            profile.to_byte_array_ns += to_byte_array_start
+                .map(|start| start.elapsed().as_nanos())
+                .unwrap_or(0);
+
+            let vertex_upload_call_start = self.profile_enabled.then(Instant::now);
+            mesh.surface_update_vertex_region(0, 0, &vertex_bytes);
+            profile.vertex_upload_call_ns += vertex_upload_call_start
+                .map(|start| start.elapsed().as_nanos())
+                .unwrap_or(0);
             if state_cache_enabled {
-                cache.vertices = ary;
+                cache.vertices = vertices;
             }
 
             // aabb does not get automatically updated when directly updating the vertex region
@@ -405,6 +479,7 @@ impl AyagamiModel {
         if mask_layout_changed {
             self.mask_layout_dirty = true;
         }
+        profile
     }
 
     fn update_masks(&mut self) {
@@ -644,7 +719,7 @@ impl INode2D for AyagamiModel {
             let drive_ns = drive_start.map(|start| start.elapsed().as_nanos()).unwrap_or(0);
 
             let mesh_submit_start = self.profile_enabled.then(Instant::now);
-            self.update_meshes(false);
+            let mesh_profile = self.update_meshes(false);
             let mesh_submit_ns = mesh_submit_start
                 .map(|start| start.elapsed().as_nanos())
                 .unwrap_or(0);
@@ -665,6 +740,7 @@ impl INode2D for AyagamiModel {
                 self.record_frame_profile(
                     drive_ns,
                     mesh_submit_ns,
+                    mesh_profile,
                     masks_ns,
                     reorder_ns,
                 );
