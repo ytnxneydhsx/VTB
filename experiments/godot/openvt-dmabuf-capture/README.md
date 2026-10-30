@@ -60,21 +60,28 @@ Live2D H.264 使用 MPP FIXQP、QP 18，以固定量化质量替代 CBR 的目�
 编码包到 `MediaPacket`、再到 FFmpeg `AVPacket` 的内存复制，也不保证网络断连时零丢帧。
 是否继续优化复制次数，以端到端 P95/P99、CPU、队列深度和丢帧数为依据。
 
-内置模块构建还需要提供 VTB 源码和 FFmpeg sysroot：
+内置模块构建还需要提供 VTB 源码、FFmpeg、OpenCV 和 RKNN sysroot：
 
 ```bash
 export OPENVT_VTB_SOURCE_ROOT=/path/to/VTB
 export OPENVT_BOARD_SYSROOT=/path/to/board-sysroot
 export OPENVT_FFMPEG_SYSROOT=/path/to/ffmpeg-sysroot
+export OPENVT_OPENCV_ROOT=/path/to/arm64-opencv-sysroot
+export OPENVT_RKNN_ROOT=/path/to/arm64-rknn-sysroot
 ```
 
-## OpenSeeFace 实时参数输入
+Godot 最终链接使用 OpenCV shared sysroot，避免与 Godot 内建 JPEG/PNG 静态实现
+发生重复符号。部署后用 `OPENVT_OPENCV_LIB_DIR` 指向 OpenCV `.so` 所在目录。
 
-场景可以选择监听本机 UDP 参数流。未设置端口时继续运行原有 300 帧固定动画，
-所以历史性能与正确性基线不受影响。启用方式：
+## C++ OpenSeeFace 实时参数输入
+
+场景可以在同一个 Godot 进程中启动 C++ 人脸运行时。未设置
+`OPENVT_FACE_SOURCE` 时继续运行原有固定动画。启用方式：
 
 ```bash
-OPENVT_LIVE2D_TRACKING_PORT=11574 \
+OPENVT_FACE_SOURCE=/dev/video0 \
+OPENVT_FACE_DETECTOR_MODEL=/home/huangnv/VTB/models/openseeface/mnv3_detection_fp16.rknn \
+OPENVT_FACE_LANDMARK_MODEL=/home/huangnv/VTB/models/openseeface/lm_model3_fp16.rknn \
 OPENVT_LIVE2D_TOTAL_FRAMES=0 \
 OPENVT_RTSP_URL=rtsp://127.0.0.1:8554/live2d \
 OPENVT_DMABUF_OUTPUT_DIR=/home/huangnv/openvt-live2d-tracking-run-01 \
@@ -86,9 +93,9 @@ OPENVT_DMABUF_OUTPUT_DIR=/home/huangnv/openvt-live2d-tracking-run-01 \
 部署到其他目录时通过 `OPENVT_GODOT_BIN` 显式指定，避免误用仍采用文件输出接口的旧 Godot 产物。
 `OPENVT_LIVE2D_TOTAL_FRAMES=0` 表示持续推流；省略时保留 300 帧验证模式。
 
-Godot 默认只绑定 `127.0.0.1`，每次渲染前读空 UDP 队列并使用最新的有效快照。
-参数年龄超过 150 ms 时，角色在 250 ms 时间常数下回到模型默认值。Python
-发送端和映射参数见 [`docs/live2d-face-tracking-bridge.md`](../../../docs/live2d-face-tracking-bridge.md)。
+采集线程和推理线程之间只保留最新帧，C++ mapper 和 Godot 主线程之间只保留
+最新参数快照。参数年龄超过 150 ms 时，角色在 250 ms 时间常数下回到模型默认值。
+完整边界见 [`docs/live2d-face-tracking-bridge.md`](../../../docs/live2d-face-tracking-bridge.md)。
 
 需要采集全链路性能统计时增加 `OPENVT_PROFILE=1`。运行脚本会同时启用
 GDScript 跟踪统计和 Ayagami profiler，并让原生 DMA-BUF 模块输出通过

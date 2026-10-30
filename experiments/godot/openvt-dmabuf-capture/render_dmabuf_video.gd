@@ -1,6 +1,5 @@
 extends Node2D
 
-const Live2DTrackingReceiver := preload("res://experiments/openvt-dmabuf-capture/live2d_tracking_receiver.gd")
 const MODEL_PATH := "/home/huangnv/open-vt-model/阿芙洛狄忒模型文件/fense_vts/fense.model3.json"
 const OUTPUT_SIZE := Vector2i(1920, 1080)
 const OUTPUT_FPS := 30
@@ -41,11 +40,12 @@ var profile_draw_wait_usec := 0
 var profile_capture_usec := 0
 var profile_draw_wait_started_usec := 0
 var available_parameters := {}
-var tracking_receiver
+var face_tracking
 var tracking_enabled := false
 var tracking_last_packet_usec := 0
 var tracking_last_calibrated := false
 var tracking_active_source_key := ""
+var tracking_last_generation := 0
 var tracking_last_source_frame := 0
 var tracking_last_associated_render_frame := 0
 var tracking_profile_total := {}
@@ -56,6 +56,26 @@ var total_frames := DEFAULT_TOTAL_FRAMES
 var base_model_scale := 1.0
 var view_zoom := 1.0
 var view_offset := Vector2.ZERO
+
+
+func _environment_positive_int(name: String, default_value: int) -> int:
+	var value := OS.get_environment(name)
+	if value.is_empty():
+		return default_value
+	if not value.is_valid_int():
+		push_error("%s must be an integer" % name)
+		return -1
+	return value.to_int()
+
+
+func _environment_float(name: String, default_value: float) -> float:
+	var value := OS.get_environment(name)
+	if value.is_empty():
+		return default_value
+	if not value.is_valid_float():
+		push_error("%s must be a floating-point value" % name)
+		return 0.0
+	return value.to_float()
 
 
 func _ready() -> void:
@@ -137,36 +157,75 @@ func _ready() -> void:
 	if motion_controller.has_animation_library(""):
 		motion_controller.remove_animation_library("")
 	motion_controller.add_animation_library("", motion_library)
-	var tracking_port_text := OS.get_environment("OPENVT_LIVE2D_TRACKING_PORT")
-	if tracking_port_text.is_empty() and not motion_controller.has_animation(SHAKE_MOTION):
+	var face_source := OS.get_environment("OPENVT_FACE_SOURCE")
+	if face_source.is_empty() and not motion_controller.has_animation(SHAKE_MOTION):
 		_fail(7, "missing motion: %s available=%s" % [
 			SHAKE_MOTION,
 			motion_library.get_animation_list(),
 		])
 		return
 
-	if not tracking_port_text.is_empty():
-		if not tracking_port_text.is_valid_int():
-			_fail(10, "OPENVT_LIVE2D_TRACKING_PORT is not an integer")
+	if not face_source.is_empty():
+		if not ClassDB.class_exists("OpenVTFaceTrackingRuntime"):
+			_fail(10, "OpenVTFaceTrackingRuntime module is unavailable")
 			return
-		var tracking_port := tracking_port_text.to_int()
-		var tracking_address := OS.get_environment("OPENVT_LIVE2D_TRACKING_ADDRESS")
-		if tracking_address.is_empty():
-			tracking_address = "127.0.0.1"
-		tracking_receiver = Live2DTrackingReceiver.new()
-		tracking_receiver.set_profile_enabled(profile_enabled)
-		var tracking_error: Error = tracking_receiver.open(tracking_address, tracking_port)
+		var detector_model := OS.get_environment("OPENVT_FACE_DETECTOR_MODEL")
+		var landmark_model := OS.get_environment("OPENVT_FACE_LANDMARK_MODEL")
+		if detector_model.is_empty() or landmark_model.is_empty():
+			_fail(10, "OPENVT_FACE_DETECTOR_MODEL and OPENVT_FACE_LANDMARK_MODEL are required")
+			return
+		var face_width := _environment_positive_int("OPENVT_FACE_WIDTH", 1280)
+		var face_height := _environment_positive_int("OPENVT_FACE_HEIGHT", 720)
+		var face_fps := _environment_positive_int("OPENVT_FACE_FPS", 60)
+		var face_buffers := _environment_positive_int("OPENVT_FACE_BUFFERS", 4)
+		var calibration_frames := _environment_positive_int("OPENVT_FACE_CALIBRATION_FRAMES", 30)
+		var smoothing_tau_ms := _environment_float("OPENVT_FACE_SMOOTHING_MS", 50.0)
+		var angle_x_sign := _environment_float("OPENVT_FACE_ANGLE_X_SIGN", -1.0)
+		var angle_y_sign := _environment_float("OPENVT_FACE_ANGLE_Y_SIGN", -1.0)
+		var angle_z_sign := _environment_float("OPENVT_FACE_ANGLE_Z_SIGN", -1.0)
+		var control_bind_address := OS.get_environment("OPENVT_LIVE2D_CONTROL_ADDRESS")
+		if control_bind_address.is_empty():
+			control_bind_address = "192.168.77.2"
+		var control_port := _environment_positive_int("OPENVT_LIVE2D_CONTROL_PORT", 11575)
+		var control_allowed_origin := OS.get_environment("OPENVT_LIVE2D_CONTROL_ORIGIN")
+		if control_allowed_origin.is_empty():
+			control_allowed_origin = "http://192.168.77.1:8900"
+		if face_width <= 0 or face_height <= 0 or face_fps <= 0 or face_buffers < 2 or calibration_frames <= 0:
+			_fail(10, "Face tracking numeric environment is invalid")
+			return
+		face_tracking = ClassDB.instantiate("OpenVTFaceTrackingRuntime")
+		var tracking_error: Error = face_tracking.configure(
+			face_source,
+			face_width,
+			face_height,
+			face_fps,
+			face_buffers,
+			detector_model,
+			landmark_model,
+			calibration_frames,
+			smoothing_tau_ms,
+			angle_x_sign,
+			angle_y_sign,
+			angle_z_sign,
+			control_bind_address,
+			control_port,
+			control_allowed_origin
+		)
+		if tracking_error == OK:
+			tracking_error = face_tracking.start()
 		if tracking_error != OK:
-			_fail(10, "Live2D tracking UDP bind failed: address=%s port=%d error=%d" % [
-				tracking_address,
-				tracking_port,
+			_fail(10, "C++ face tracking start failed: error=%d detail=%s" % [
 				tracking_error,
+				face_tracking.get_last_error(),
 			])
 			return
 		tracking_enabled = true
-		print("LIVE2D_TRACKING_LISTEN address=%s port=%d max_age_ms=%.1f" % [
-			tracking_address,
-			tracking_port,
+		print("LIVE2D_CPP_TRACKING source=%s size=%dx%d fps=%d buffers=%d max_age_ms=%.1f" % [
+			face_source,
+			face_width,
+			face_height,
+			face_fps,
+			face_buffers,
 			float(TRACKING_MAX_AGE_USEC) / 1000.0,
 		])
 
@@ -239,12 +298,10 @@ func _apply_frame_animation(frame: int) -> void:
 
 
 func _apply_live_tracking(delta: float, render_frame: int) -> void:
-	var packet: Dictionary = tracking_receiver.receive_latest()
+	var packet: Dictionary = face_tracking.take_latest()
 	var applied_new_source := false
 	if not packet.is_empty():
-		var points_ready_usec := int(int(packet["points_ready_ns"]) / 1000)
-		var points_ready_local_usec := points_ready_usec + int(packet["source_clock_offset_usec"])
-		var packet_age_usec := Time.get_ticks_usec() - points_ready_local_usec
+		var packet_age_usec := int(packet["age_usec"])
 		if profile_enabled:
 			if packet_age_usec >= 0:
 				_record_tracking_sample("packet_age", packet_age_usec)
@@ -253,22 +310,18 @@ func _apply_live_tracking(delta: float, render_frame: int) -> void:
 		if packet_age_usec >= 0 and packet_age_usec <= TRACKING_MAX_AGE_USEC:
 			var apply_started_usec := Time.get_ticks_usec()
 			tracking_last_packet_usec = apply_started_usec
+			_apply_tracking_parameters(packet["parameters"] as Dictionary)
 			if packet.has("view"):
 				_apply_view_state(packet["view"] as Dictionary)
-			_apply_tracking_parameters(packet["parameters"] as Dictionary)
 			var apply_finished_usec := Time.get_ticks_usec()
 			if profile_enabled:
 				_record_tracking_sample("parameter_apply", apply_finished_usec - apply_started_usec)
-				_record_tracking_sample(
-					"receive_to_apply",
-					apply_started_usec - int(packet["received_at_usec"])
-				)
-			var source_key := "%d:%d" % [
-				int(packet.get("session_id", 0)),
-				int(packet.get("frame_id", 0)),
-			]
+				_record_tracking_sample("receive_to_apply", packet_age_usec)
+			var generation := int(packet.get("generation", 0))
+			var source_key := str(generation)
 			if source_key != tracking_active_source_key:
 				tracking_active_source_key = source_key
+				tracking_last_generation = generation
 				applied_new_source = true
 				if profile_enabled:
 					_record_tracking_count("source_frames", 1)
@@ -296,7 +349,7 @@ func _apply_live_tracking(delta: float, render_frame: int) -> void:
 			tracking_last_associated_render_frame = render_frame
 			if not applied_new_source:
 				_record_tracking_count("reused_source_frames", 1)
-		else:
+		if not active_source_available:
 			_record_tracking_count("no_source_frames", 1)
 	if active_source_available:
 		return
@@ -379,49 +432,33 @@ func _average_milliseconds(total_usec: int, samples: int) -> float:
 
 
 func _print_tracking_profile(final_report: bool) -> void:
-	if not profile_enabled or not tracking_enabled or tracking_receiver == null:
+	if not profile_enabled or not tracking_enabled or face_tracking == null:
 		return
 	if final_report and tracking_profile_final_printed:
 		return
 
 	var label := "WINDOW"
 	var local_stats: Dictionary = tracking_profile_window
-	var receiver_stats: Dictionary = tracking_receiver.take_profile_window()
 	if final_report:
 		label = "FINAL"
 		local_stats = tracking_profile_total
-		receiver_stats = tracking_receiver.profile_totals()
 		tracking_profile_final_printed = true
 
-	print("LIVE2D_TRACKING_PROFILE_%s render_frames=%d source_frames=%d associated_frames=%d reused_source_frames=%d no_source_frames=%d received=%d valid=%d accepted=%d invalid=%d out_of_order=%d overwritten=%d stale=%d future=%d last_source_frame=%d last_render_frame=%d" % [
+	print("LIVE2D_TRACKING_PROFILE_%s render_frames=%d source_frames=%d associated_frames=%d reused_source_frames=%d no_source_frames=%d stale=%d future=%d last_generation=%d last_source_frame=%d last_render_frame=%d" % [
 		label,
 		int(local_stats["render_frames"]),
 		int(local_stats["source_frames"]),
 		int(local_stats["associated_frames"]),
 		int(local_stats["reused_source_frames"]),
 		int(local_stats["no_source_frames"]),
-		int(receiver_stats["received"]),
-		int(receiver_stats["valid"]),
-		int(receiver_stats["accepted"]),
-		int(receiver_stats["invalid"]),
-		int(receiver_stats["out_of_order"]),
-		int(receiver_stats["overwritten"]),
 		int(local_stats["stale_packets"]),
 		int(local_stats["future_packets"]),
+		tracking_last_generation,
 		tracking_last_source_frame,
 		tracking_last_associated_render_frame,
 	])
-	print("LIVE2D_TRACKING_LATENCY_%s receive_samples=%d receive_avg_ms=%.6f parse_avg_ms=%.6f packet_age_samples=%d packet_age_avg_ms=%.6f packet_age_max_ms=%.6f receive_to_apply_samples=%d receive_to_apply_avg_ms=%.6f receive_to_apply_max_ms=%.6f parameter_apply_samples=%d parameter_apply_avg_ms=%.6f parameter_apply_max_ms=%.6f" % [
+	print("LIVE2D_TRACKING_LATENCY_%s packet_age_samples=%d packet_age_avg_ms=%.6f packet_age_max_ms=%.6f result_to_apply_samples=%d result_to_apply_avg_ms=%.6f result_to_apply_max_ms=%.6f parameter_apply_samples=%d parameter_apply_avg_ms=%.6f parameter_apply_max_ms=%.6f" % [
 		label,
-		int(receiver_stats["received"]),
-		_average_milliseconds(
-			int(receiver_stats["receive_usec"]),
-			int(receiver_stats["received"])
-		),
-		_average_milliseconds(
-			int(receiver_stats["parse_usec"]),
-			int(receiver_stats["received"])
-		),
 		int(local_stats["packet_age_samples"]),
 		_average_milliseconds(
 			int(local_stats["packet_age_usec"]),
@@ -548,16 +585,14 @@ func _capture_frame_after_draw(captured_frame: int) -> void:
 			float(profile_capture_usec) / 1000.0 / float(total_frames),
 		])
 		_print_tracking_profile(true)
-	if tracking_receiver != null:
-		tracking_receiver.close()
+	_stop_face_tracking()
 	get_tree().quit()
 
 
 func _fail(exit_code: int, message: String) -> void:
 	push_error("VIDEO_ERROR %s" % message)
 	_print_tracking_profile(true)
-	if tracking_receiver != null:
-		tracking_receiver.close()
+	_stop_face_tracking()
 	if dma_capture != null:
 		dma_capture.finish()
 	get_tree().quit(exit_code)
@@ -565,4 +600,14 @@ func _fail(exit_code: int, message: String) -> void:
 
 func _exit_tree() -> void:
 	_print_tracking_profile(true)
+	_stop_face_tracking()
+
+
+func _stop_face_tracking() -> void:
+	if face_tracking == null:
+		return
+	var stop_error: Error = face_tracking.stop()
+	if stop_error != OK:
+		push_error("C++ face tracking stop failed: %s" % face_tracking.get_last_error())
+	face_tracking = null
 
