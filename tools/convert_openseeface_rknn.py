@@ -7,8 +7,8 @@ from rknn.api import RKNN
 
 
 MODEL_FILES = (
-    ("mnv3_detection.onnx", "mnv3_detection_fp16.rknn"),
-    ("lm_model3.onnx", "lm_model3_fp16.rknn"),
+    ("mnv3_detection_opt.onnx", "mnv3_detection_fp16.rknn"),
+    ("lm_model3_opt.onnx", "lm_model3_fp16.rknn"),
 )
 
 MEAN_VALUES = [[123.675, 116.280, 103.530]]

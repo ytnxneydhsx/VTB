@@ -10,8 +10,12 @@ option(VTB_ENABLE_UAC2_OUTPUT "Build the ALSA UAC2 Gadget output" ON)
 option(VTB_BUILD_OUTPUT_CLI "Build the optional output control example" OFF)
 option(VTB_ENABLE_ROCKCHIP_MPP_PUBLISHER
     "Build the RK3588 RGA/MPP RTSP publisher" OFF)
+option(VTB_ENABLE_RKNN_FACE
+    "Build the RK3588 RKNN OpenSeeFace detector and landmark models" OFF)
 set(VTB_ROCKCHIP_SYSROOT "" CACHE PATH
     "Target-board sysroot containing Rockchip MPP and RGA development files")
+set(VTB_RKNN_SYSROOT "" CACHE PATH
+    "Target-board sysroot containing rknn_api.h and librknnrt.so")
 
 function(vtb_configure_target target)
     target_compile_features(${target} PRIVATE cxx_std_17)
@@ -152,11 +156,77 @@ if(VTB_BUILD_OUTPUT_CLI)
     target_link_libraries(vtb-output-cli PRIVATE vtb_output_cli)
     vtb_configure_target(vtb-output-cli)
 endif()
+add_library(vtb_video_core STATIC
+    src/video/frame.cpp
+    src/video/latest_frame_slot.cpp
+)
+add_library(vtb::video_core ALIAS vtb_video_core)
+target_include_directories(vtb_video_core PUBLIC include)
+target_link_libraries(vtb_video_core PUBLIC Threads::Threads)
+vtb_configure_target(vtb_video_core)
+
 add_library(vtb_capture STATIC
     src/v4l2_camera.cpp
+    src/video/camera_source.cpp
 )
+add_library(vtb::capture ALIAS vtb_capture)
 target_include_directories(vtb_capture PUBLIC include)
+target_link_libraries(vtb_capture PUBLIC vtb_video_core)
 vtb_configure_target(vtb_capture)
+
+add_library(vtb_face_core STATIC
+    src/face/model_input.cpp
+    src/face/cpu_image_transformer.cpp
+    src/face/face_pipeline.cpp
+)
+add_library(vtb::face_core ALIAS vtb_face_core)
+target_include_directories(vtb_face_core PUBLIC include)
+target_link_libraries(vtb_face_core PUBLIC vtb_video_core)
+vtb_configure_target(vtb_face_core)
+
+if(VTB_ENABLE_RKNN_FACE)
+    if(VTB_RKNN_SYSROOT STREQUAL "")
+        message(FATAL_ERROR "VTB_RKNN_SYSROOT is required for RKNN face models")
+    endif()
+    find_path(VTB_RKNN_INCLUDE_DIR rknn_api.h
+        PATHS
+            "${VTB_RKNN_SYSROOT}/usr/include/rknn"
+            "${VTB_RKNN_SYSROOT}/usr/include"
+        NO_DEFAULT_PATH
+        REQUIRED)
+    find_library(VTB_RKNN_LIBRARY rknnrt
+        PATHS
+            "${VTB_RKNN_SYSROOT}/usr/lib/aarch64-linux-gnu"
+            "${VTB_RKNN_SYSROOT}/usr/lib"
+        NO_DEFAULT_PATH
+        REQUIRED)
+
+    add_library(vtb_face_rknn STATIC
+        src/face/rknn_face_models.cpp
+    )
+    add_library(vtb::face_rknn ALIAS vtb_face_rknn)
+    target_include_directories(vtb_face_rknn PUBLIC include)
+    target_include_directories(vtb_face_rknn
+        SYSTEM PRIVATE "${VTB_RKNN_INCLUDE_DIR}")
+    target_link_libraries(vtb_face_rknn
+        PUBLIC vtb_face_core
+        PRIVATE "${VTB_RKNN_LIBRARY}"
+    )
+    vtb_configure_target(vtb_face_rknn)
+endif()
+
+add_library(vtb_pipeline_runtime STATIC
+    src/pipeline/pipeline_runtime.cpp
+)
+add_library(vtb::pipeline_runtime ALIAS vtb_pipeline_runtime)
+target_include_directories(vtb_pipeline_runtime PUBLIC include)
+target_link_libraries(vtb_pipeline_runtime
+    PUBLIC
+        vtb_video_core
+        vtb_face_core
+        Threads::Threads
+)
+vtb_configure_target(vtb_pipeline_runtime)
 
 add_executable(vtb src/main.cpp)
 target_link_libraries(vtb PRIVATE vtb_capture)
