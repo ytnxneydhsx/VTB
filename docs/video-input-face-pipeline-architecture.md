@@ -462,9 +462,10 @@ MPP 摄像头 MJPEG 解码、RGA 模型预处理和 DMA-BUF 跨组件零拷贝�
 
 - MJPEG 摄像头和 H.264/H.265 文件的 MPP 解码。
 - RGA `ImageTransformer` 及其目标缓冲池。
-- RK3588 设备上的缓冲区生命周期、精度和端到端延迟验证。
+- RK3588 设备上的 DMA-BUF 缓冲区生命周期、真人精度和浏览器端到端延迟验证。
 
 当前基础层、RKNN 模型层、OpenCV PnP/输入层和 Live2D mapper 使用
-Buildroot/Godot ARM64 GCC 13.2.0 构建。该结果只证明接口、资源管理和 ARM64
-链接边界；尚未打开摄像头，也未执行 RK3588 模型推理、Python 精度对照或
-端到端运行验证。
+Buildroot/Godot ARM64 GCC 13.2.0 构建。2026-10-30 已在 RK3588 打开摄像头并
+完成 300 帧 C++ 人脸运行时、Godot/Ayagami、RGA、MPP 和 RTSP 写出验证；另用
+已知正脸图片序列确认 C++ RKNN、PnP、30 帧校准和参数映射进入有效状态。当前
+仍未完成 C++/Python 数值精度对照、摄像头真人正脸验收和浏览器显示延迟测量。

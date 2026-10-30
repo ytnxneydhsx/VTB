@@ -102,9 +102,15 @@ export OPENVT_RKNN_ROOT=/path/to/arm64-rknn-sysroot
 `SCsub` 从 ARM64 OpenCV `opencv5.pc` 读取共享库链接参数，并链接板端匹配的
 `librknnrt.so`。Godot 与 OpenCV 都内建 JPEG/PNG 实现，因此最终 Godot 使用
 OpenCV shared 构建隔离两组图像编解码符号；运行脚本通过
-`OPENVT_OPENCV_LIB_DIR` 指定部署后的 OpenCV `.so` 目录。构建成功只证明 ARM64
-编译和链接边界；摄像头、NPU、渲染、MPP、RTSP 和浏览器端到端仍需在 RK3588
-上分别验收。
+`OPENVT_OPENCV_LIB_DIR` 指定部署后的 OpenCV `.so` 目录。
+
+2026-10-30 已在 RK3588 完成两段实机验证。摄像头路径连续处理 300 个渲染帧，
+MPP 编码和 RTSP 写出均为 300，丢弃和错误均为 0，渲染吞吐为 29.788 FPS。
+已知正脸图片序列路径完成 C++ RKNN 检测、关键点、PnP、30 帧校准和 Live2D
+参数更新，最终健康状态为 `tracking_valid=true`、`calibrated=true`、置信度
+0.922563；对应媒体路径再次写出 300 帧且无错误。RTSP 消费端读取结果为 H.264、
+1920×1080、30 FPS。浏览器 WebRTC 实际显示、摄像头真人正脸精度和长时间稳定性
+仍需分别验收。
 
 ## Python 文件的定位
 
