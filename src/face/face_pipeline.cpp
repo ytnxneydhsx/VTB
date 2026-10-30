@@ -100,18 +100,65 @@ float FacePose::pitch() const noexcept { return pitch_; }
 float FacePose::roll() const noexcept { return roll_; }
 float FacePose::pnp_error() const noexcept { return pnp_error_; }
 
+FaceExpression::FaceExpression(
+    float left_eye_open,
+    float right_eye_open,
+    float mouth_open,
+    float mouth_wide)
+    : left_eye_open_(left_eye_open),
+      right_eye_open_(right_eye_open),
+      mouth_open_(mouth_open),
+      mouth_wide_(mouth_wide) {
+    require_unit_interval(
+        left_eye_open_, "Left eye openness must be within [0, 1]");
+    require_unit_interval(
+        right_eye_open_, "Right eye openness must be within [0, 1]");
+    require_finite(mouth_open_, "Mouth openness must be finite");
+    require_finite(mouth_wide_, "Mouth width must be finite");
+}
+
+float FaceExpression::left_eye_open() const noexcept {
+    return left_eye_open_;
+}
+
+float FaceExpression::right_eye_open() const noexcept {
+    return right_eye_open_;
+}
+
+float FaceExpression::mouth_open() const noexcept { return mouth_open_; }
+float FaceExpression::mouth_wide() const noexcept { return mouth_wide_; }
+
+FaceGeometryResult::FaceGeometryResult(
+    bool success,
+    FacePose pose,
+    FaceExpression expression)
+    : success_(success),
+      pose_(std::move(pose)),
+      expression_(std::move(expression)) {}
+
+bool FaceGeometryResult::success() const noexcept { return success_; }
+const FacePose& FaceGeometryResult::pose() const noexcept { return pose_; }
+
+const FaceExpression& FaceGeometryResult::expression() const noexcept {
+    return expression_;
+}
+
 FaceTrackingResult::FaceTrackingResult(
     std::uint64_t frame_id,
     std::uint64_t capture_timestamp_ns,
     FaceBox box,
     std::vector<FaceLandmark> landmarks,
     FacePose pose,
+    FaceExpression expression,
+    bool geometry_success,
     float confidence)
     : frame_id_(frame_id),
       capture_timestamp_ns_(capture_timestamp_ns),
       box_(std::move(box)),
       landmarks_(std::move(landmarks)),
       pose_(std::move(pose)),
+      expression_(std::move(expression)),
+      geometry_success_(geometry_success),
       confidence_(confidence) {
     if (landmarks_.size() != 66) {
         throw std::invalid_argument("Face tracking result must contain 66 points");
@@ -133,6 +180,15 @@ const std::vector<FaceLandmark>& FaceTrackingResult::landmarks() const noexcept 
 }
 
 const FacePose& FaceTrackingResult::pose() const noexcept { return pose_; }
+
+const FaceExpression& FaceTrackingResult::expression() const noexcept {
+    return expression_;
+}
+
+bool FaceTrackingResult::geometry_success() const noexcept {
+    return geometry_success_;
+}
+
 float FaceTrackingResult::confidence() const noexcept { return confidence_; }
 
 FacePipeline::FacePipeline(
@@ -205,14 +261,16 @@ std::optional<FaceTrackingResult> FacePipeline::process(const FrameView& frame) 
     tracked_box_ = landmarks.updated_box();
     tracking_confidence_ = landmarks.confidence();
     ++frames_since_detection_;
-    FacePose pose = geometry_estimator_->estimate(
+    FaceGeometryResult geometry = geometry_estimator_->estimate(
         frame, *tracked_box_, landmarks.landmarks());
     return FaceTrackingResult(
         frame.frame_id(),
         frame.timestamp_ns(),
         *tracked_box_,
         landmarks.landmarks(),
-        std::move(pose),
+        geometry.pose(),
+        geometry.expression(),
+        geometry.success(),
         tracking_confidence_);
 }
 
@@ -256,6 +314,7 @@ void FacePipeline::reset_tracking() noexcept {
     tracked_box_.reset();
     tracking_confidence_ = 0.0F;
     frames_since_detection_ = 0;
+    geometry_estimator_->reset();
 }
 
 }  // namespace vtb

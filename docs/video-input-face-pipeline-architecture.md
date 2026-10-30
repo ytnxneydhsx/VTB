@@ -438,23 +438,33 @@ FaceTrackingResult
 - `RknnFaceDetector` 与 `RknnLandmarkEstimator`，分别封装 RKNN context、
   NPU core 选择、输入输出张量检查、推理资源释放以及 OpenSeeFace 检测框和
   66 点关键点后处理。
+- `OpenCvVideoSource` 作为当前 Live2D 摄像头和文件 CPU 后备入口。
+- `OpenSeeFaceGeometryEstimator` 的 14 点 PnP、Euler 角、66 点三维反投影和
+  眼睛/嘴部自适应特征。
+- `Live2DFaceMapper` 的中立姿态校准、十个 Ayagami 参数映射和按单调时钟平滑。
+- `OpenVTFaceTrackingRuntime` 将采集、RKNN、几何、映射和控制口编入同一个
+  Godot 进程，并通过容量一的 C++ 参数快照交给 Godot 主线程。
+
+MPP 摄像头 MJPEG 解码、RGA 模型预处理和 DMA-BUF 跨组件零拷贝仍属于后续按
+测量引入的硬件优化。当前 C++ Live2D 主路径使用 OpenCV V4L2 解码和 CPU
+`CpuImageTransformer`，因此不能标记为零 CPU 拷贝。
+
 - RKNN 能力通过 `VTB_ENABLE_RKNN_FACE` 单独启用，应用仍负责把输入、预处理、
   模型和后续姿态计算组合进同一进程。
 
 当前 `CameraSource` 只接受驱动实际协商为 YUYV、NV12 或 NV21 的完整原始帧。
 驱动协商为 MJPEG、H.264 或其他压缩格式时会明确报错，避免把压缩数据标记成
-`DecodedFrameLease`。这些格式将在 MPP 解码器接入以后开放。
+`DecodedFrameLease`。Live2D 应用当前改用 `OpenCvVideoSource`，由 OpenCV V4L2
+后端处理摄像头 MJPEG 并输出 BGR 完整帧；两条输入实现共享同一个
+`VideoSource` 接口。
 
 以下设备实现仍待后续阶段完成：
 
 - MJPEG 摄像头和 H.264/H.265 文件的 MPP 解码。
-- 本地视频文件输入和 CPU/OpenCV 对照路径。
 - RGA `ImageTransformer` 及其目标缓冲池。
-- OpenSeeFace PnP 姿态、三维点调整和 Live2D 表情特征计算；这部分需要匹配
-  ARM64 OpenCV `core`、`imgproc` 与 `calib3d` 开发库。
 - RK3588 设备上的缓冲区生命周期、精度和端到端延迟验证。
 
-当前基础层和启用 `VTB_ENABLE_RKNN_FACE` 的模型层均通过 Buildroot/Godot ARM64
-GCC 13.2.0 交叉编译，链接探针确认产物为 AArch64 且依赖 `librknnrt.so`。该结果
-只证明接口、资源管理和 RKNN C API 链接成立；尚未打开摄像头，也未执行 RK3588
-模型推理、Python 精度对照或端到端运行验证。
+当前基础层、RKNN 模型层、OpenCV PnP/输入层和 Live2D mapper 使用
+Buildroot/Godot ARM64 GCC 13.2.0 构建。该结果只证明接口、资源管理和 ARM64
+链接边界；尚未打开摄像头，也未执行 RK3588 模型推理、Python 精度对照或
+端到端运行验证。

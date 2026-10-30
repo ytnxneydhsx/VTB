@@ -4,6 +4,7 @@
 #include <functional>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <thread>
 
 #include "vtb/face/face_pipeline.hpp"
@@ -15,7 +16,8 @@ class PipelineRuntimeState;
 
 class PipelineRuntime {
 public:
-    using ResultHandler = std::function<void(const FaceTrackingResult&)>;
+    using ResultHandler =
+        std::function<void(const std::optional<FaceTrackingResult>&)>;
 
     PipelineRuntime(
         std::unique_ptr<VideoSource> video_source,

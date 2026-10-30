@@ -9,6 +9,7 @@ run_log="$task_output_dir/godot-render.log"
 runtime_log="$task_output_dir/runtime-metrics.txt"
 xauthority_path=/home/huangnv/.Xauthority
 mali_root=/opt/rockchip/libmali-g13p0-x11-gbm-1.9-1/usr/lib/aarch64-linux-gnu
+opencv_lib_dir=${OPENVT_OPENCV_LIB_DIR:-/home/huangnv/tools/opencv-5.0.0-vtb/lib}
 profile_enabled=${OPENVT_PROFILE:-0}
 profile_report_frames=${OPENVT_PROFILE_REPORT_FRAMES:-300}
 ayagami_profile_enabled=0
@@ -17,8 +18,21 @@ if [ "$profile_enabled" = "1" ]; then
 fi
 gpu_profile_enabled=${OPENVT_GODOT_GPU_PROFILE:-0}
 vsync_disabled=${OPENVT_DISABLE_VSYNC:-0}
-live2d_tracking_address=${OPENVT_LIVE2D_TRACKING_ADDRESS:-127.0.0.1}
-live2d_tracking_port=${OPENVT_LIVE2D_TRACKING_PORT:-}
+face_source=${OPENVT_FACE_SOURCE:-/dev/video0}
+face_width=${OPENVT_FACE_WIDTH:-1280}
+face_height=${OPENVT_FACE_HEIGHT:-720}
+face_fps=${OPENVT_FACE_FPS:-60}
+face_buffers=${OPENVT_FACE_BUFFERS:-4}
+face_detector_model=${OPENVT_FACE_DETECTOR_MODEL:-/home/huangnv/VTB/models/openseeface/mnv3_detection_fp16.rknn}
+face_landmark_model=${OPENVT_FACE_LANDMARK_MODEL:-/home/huangnv/VTB/models/openseeface/lm_model3_fp16.rknn}
+face_calibration_frames=${OPENVT_FACE_CALIBRATION_FRAMES:-30}
+face_smoothing_ms=${OPENVT_FACE_SMOOTHING_MS:-50}
+face_angle_x_sign=${OPENVT_FACE_ANGLE_X_SIGN:--1}
+face_angle_y_sign=${OPENVT_FACE_ANGLE_Y_SIGN:--1}
+face_angle_z_sign=${OPENVT_FACE_ANGLE_Z_SIGN:--1}
+live2d_control_address=${OPENVT_LIVE2D_CONTROL_ADDRESS:-192.168.77.2}
+live2d_control_port=${OPENVT_LIVE2D_CONTROL_PORT:-11575}
+live2d_control_origin=${OPENVT_LIVE2D_CONTROL_ORIGIN:-http://192.168.77.1:8900}
 live2d_total_frames=${OPENVT_LIVE2D_TOTAL_FRAMES:-300}
 rtsp_url=${OPENVT_RTSP_URL:-rtsp://127.0.0.1:8554/live2d}
 profile_args=()
@@ -46,10 +60,13 @@ for required_path in \
 	"$godot_bin" \
 	"$project_dir/project.godot" \
 	"$project_dir/experiments/openvt-dmabuf-capture/render_dmabuf_video.gd" \
-	"$project_dir/experiments/openvt-dmabuf-capture/live2d_tracking_receiver.gd" \
 	"$project_dir/experiments/openvt-dmabuf-capture/render_dmabuf_video.tscn" \
+	"$face_source" \
+	"$face_detector_model" \
+	"$face_landmark_model" \
 	"$xauthority_path" \
 	"$mali_root/mali/libEGL.so.1" \
+	"$opencv_lib_dir" \
 	/dev/dma_heap/system-uncached \
 	/dev/rga \
 	/dev/mpp_service; do
@@ -71,13 +88,27 @@ mkdir -p "$task_output_dir"
 	echo "scene_path=$scene_path"
 	echo "display=:0"
 	echo "mali_default_winsys=x11"
+	echo "opencv_lib_dir=$opencv_lib_dir"
 	echo "profile_enabled=$profile_enabled"
 	echo "profile_report_frames=$profile_report_frames"
 	echo "ayagami_profile_enabled=$ayagami_profile_enabled"
 	echo "godot_gpu_profile_enabled=$gpu_profile_enabled"
 	echo "vsync_disabled=$vsync_disabled"
-	echo "live2d_tracking_address=$live2d_tracking_address"
-	echo "live2d_tracking_port=$live2d_tracking_port"
+	echo "face_source=$face_source"
+	echo "face_width=$face_width"
+	echo "face_height=$face_height"
+	echo "face_fps=$face_fps"
+	echo "face_buffers=$face_buffers"
+	echo "face_detector_model=$face_detector_model"
+	echo "face_landmark_model=$face_landmark_model"
+	echo "face_calibration_frames=$face_calibration_frames"
+	echo "face_smoothing_ms=$face_smoothing_ms"
+	echo "face_angle_x_sign=$face_angle_x_sign"
+	echo "face_angle_y_sign=$face_angle_y_sign"
+	echo "face_angle_z_sign=$face_angle_z_sign"
+	echo "live2d_control_address=$live2d_control_address"
+	echo "live2d_control_port=$live2d_control_port"
+	echo "live2d_control_origin=$live2d_control_origin"
 	echo "live2d_total_frames=$live2d_total_frames"
 	echo "rtsp_output_configured=true"
 } > "$task_output_dir/run-manifest.txt"
@@ -85,8 +116,9 @@ mkdir -p "$task_output_dir"
 sha256sum \
 	"$godot_bin" \
 	"$project_dir/experiments/openvt-dmabuf-capture/render_dmabuf_video.gd" \
-	"$project_dir/experiments/openvt-dmabuf-capture/live2d_tracking_receiver.gd" \
 	"$project_dir/experiments/openvt-dmabuf-capture/render_dmabuf_video.tscn" \
+	"$face_detector_model" \
+	"$face_landmark_model" \
 	> "$task_output_dir/input-sha256.txt"
 
 wall_start_ns=$(date +%s%N)
@@ -95,13 +127,26 @@ sudo -n env \
 	OPENVT_PROFILE="$profile_enabled" \
 	OPENVT_PROFILE_REPORT_FRAMES="$profile_report_frames" \
 	OPENVT_AYAGAMI_PROFILE="$ayagami_profile_enabled" \
-	OPENVT_LIVE2D_TRACKING_ADDRESS="$live2d_tracking_address" \
-	OPENVT_LIVE2D_TRACKING_PORT="$live2d_tracking_port" \
+	OPENVT_FACE_SOURCE="$face_source" \
+	OPENVT_FACE_WIDTH="$face_width" \
+	OPENVT_FACE_HEIGHT="$face_height" \
+	OPENVT_FACE_FPS="$face_fps" \
+	OPENVT_FACE_BUFFERS="$face_buffers" \
+	OPENVT_FACE_DETECTOR_MODEL="$face_detector_model" \
+	OPENVT_FACE_LANDMARK_MODEL="$face_landmark_model" \
+	OPENVT_FACE_CALIBRATION_FRAMES="$face_calibration_frames" \
+	OPENVT_FACE_SMOOTHING_MS="$face_smoothing_ms" \
+	OPENVT_FACE_ANGLE_X_SIGN="$face_angle_x_sign" \
+	OPENVT_FACE_ANGLE_Y_SIGN="$face_angle_y_sign" \
+	OPENVT_FACE_ANGLE_Z_SIGN="$face_angle_z_sign" \
+	OPENVT_LIVE2D_CONTROL_ADDRESS="$live2d_control_address" \
+	OPENVT_LIVE2D_CONTROL_PORT="$live2d_control_port" \
+	OPENVT_LIVE2D_CONTROL_ORIGIN="$live2d_control_origin" \
 	OPENVT_LIVE2D_TOTAL_FRAMES="$live2d_total_frames" \
 	DISPLAY=:0 \
 	XAUTHORITY="$xauthority_path" \
 	MALI_DEFAULT_WINSYS=x11 \
-	LD_LIBRARY_PATH="$mali_root/mali:$mali_root:/usr/lib/aarch64-linux-gnu" \
+	LD_LIBRARY_PATH="$opencv_lib_dir:$mali_root/mali:$mali_root:/usr/lib/aarch64-linux-gnu" \
 	"$godot_bin" \
 		--path "$project_dir" \
 		--display-driver x11 \

@@ -89,9 +89,7 @@ public:
                 std::optional<FaceTrackingResult> result =
                     face_pipeline_->process(frame->view());
                 processed_frame_count_.fetch_add(1, std::memory_order_relaxed);
-                if (result) {
-                    result_handler_(*result);
-                }
+                result_handler_(result);
             }
         } catch (...) {
             record_failure(std::current_exception());

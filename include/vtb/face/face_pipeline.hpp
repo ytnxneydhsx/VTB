@@ -115,6 +115,55 @@ private:
     float pnp_error_ = 0.0F;
 };
 
+class FaceExpression {
+public:
+    FaceExpression(
+        float left_eye_open,
+        float right_eye_open,
+        float mouth_open,
+        float mouth_wide);
+    ~FaceExpression() = default;
+
+    FaceExpression(const FaceExpression&) = default;
+    FaceExpression& operator=(const FaceExpression&) = default;
+    FaceExpression(FaceExpression&&) noexcept = default;
+    FaceExpression& operator=(FaceExpression&&) noexcept = default;
+
+    float left_eye_open() const noexcept;
+    float right_eye_open() const noexcept;
+    float mouth_open() const noexcept;
+    float mouth_wide() const noexcept;
+
+private:
+    float left_eye_open_ = 1.0F;
+    float right_eye_open_ = 1.0F;
+    float mouth_open_ = 0.0F;
+    float mouth_wide_ = 0.0F;
+};
+
+class FaceGeometryResult {
+public:
+    FaceGeometryResult(
+        bool success,
+        FacePose pose,
+        FaceExpression expression);
+    ~FaceGeometryResult() = default;
+
+    FaceGeometryResult(const FaceGeometryResult&) = default;
+    FaceGeometryResult& operator=(const FaceGeometryResult&) = default;
+    FaceGeometryResult(FaceGeometryResult&&) noexcept = default;
+    FaceGeometryResult& operator=(FaceGeometryResult&&) noexcept = default;
+
+    bool success() const noexcept;
+    const FacePose& pose() const noexcept;
+    const FaceExpression& expression() const noexcept;
+
+private:
+    bool success_ = false;
+    FacePose pose_;
+    FaceExpression expression_;
+};
+
 class FaceTrackingResult {
 public:
     FaceTrackingResult(
@@ -123,6 +172,8 @@ public:
         FaceBox box,
         std::vector<FaceLandmark> landmarks,
         FacePose pose,
+        FaceExpression expression,
+        bool geometry_success,
         float confidence);
     ~FaceTrackingResult() = default;
 
@@ -136,6 +187,8 @@ public:
     const FaceBox& box() const noexcept;
     const std::vector<FaceLandmark>& landmarks() const noexcept;
     const FacePose& pose() const noexcept;
+    const FaceExpression& expression() const noexcept;
+    bool geometry_success() const noexcept;
     float confidence() const noexcept;
 
 private:
@@ -144,6 +197,8 @@ private:
     FaceBox box_;
     std::vector<FaceLandmark> landmarks_;
     FacePose pose_;
+    FaceExpression expression_;
+    bool geometry_success_ = false;
     float confidence_ = 0.0F;
 };
 
@@ -189,10 +244,11 @@ public:
     FaceGeometryEstimator(FaceGeometryEstimator&&) = delete;
     FaceGeometryEstimator& operator=(FaceGeometryEstimator&&) = delete;
 
-    virtual FacePose estimate(
+    virtual FaceGeometryResult estimate(
         const FrameView& frame,
         const FaceBox& box,
         const std::vector<FaceLandmark>& landmarks) = 0;
+    virtual void reset() noexcept = 0;
 };
 
 class FacePipelineConfig {
