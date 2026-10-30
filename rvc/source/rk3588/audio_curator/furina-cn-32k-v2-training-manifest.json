@@ -1,0 +1,72 @@
+{
+  "experiment": "furina_cn_32k_v2_20261030",
+  "completed_at": "2026-10-30T01:30:30+08:00",
+  "status": "completed",
+  "training_exit_code": 0,
+  "source": {
+    "workspace_commit": "f5e508b03d6b0a787dc5bee123950600aa4fb38b",
+    "branch": "main",
+    "remote_source_note": "The synchronized remote source directory does not contain .git metadata.",
+    "train_py_sha256": "8bbc8e01630354f53c7d48c7fcc2ef9038948f818a633ea25845b6db74150b8f",
+    "download_script_sha256": "6eeb85bb5788d9a523a87e8d5a6b8710f63cf9e119dde196fdffe889bd3639e0",
+    "prepare_script_sha256": "0b4993f81d808021d1f7a7cf14993b807bb776db7910707a5933465ef76829ec"
+  },
+  "dataset": {
+    "name": "BWIKI Furina Chinese voice lines",
+    "source_clips": 71,
+    "duration_seconds": 835.317,
+    "training_segments": 113,
+    "training_sample_rate_hz": 32000,
+    "manifest_sha256": "48b0de39793bb6877d01bde536c80d25773ba408d11f93247dd2fb626b93a431",
+    "original_sha256s_sha256": "8755c81b18263d64b21e62031f2eb086619f3eeab3e2fc4f340fa7a9c1d70196",
+    "training_sha256s_sha256": "c60ba689307db1c62cbc896870fcf7a46c47500570cd62a7be3f200108757ebd"
+  },
+  "environment": {
+    "host": "10.191.32.121",
+    "architecture": "x86_64",
+    "gpu": "NVIDIA GeForce RTX 3090 (GPU1)",
+    "driver": "550.120",
+    "python": "3.10.20",
+    "torch": "2.4.0+cu121",
+    "cuda_runtime": "12.1",
+    "precision": "FP16"
+  },
+  "training": {
+    "model": "RVC v2 with F0",
+    "sample_rate": "32k",
+    "epochs": 200,
+    "batch_size": 8,
+    "save_every_epochs": 25,
+    "feature_dimension": 768,
+    "command": "python -m train.train -e furina_cn_32k_v2_20261030 -sr 32k -f0 1 -bs 8 -g 1 -te 200 -se 25 -pg assets/pretrained_v2/f0G32k.pth -pd assets/pretrained_v2/f0D32k.pth -l 1 -c 0 -sw 1 -v v2",
+    "config_sha256": "63bbe33fc6c2ae029a7c0f4a4ce46ec22f695df3508d4fc100e38f0d59990df9",
+    "filelist_sha256": "8bf63406bb2590b815dd6bb465cd7a2464c8569923b897cb616dce1fe1a2b03c",
+    "preparation_summary_sha256": "9eebb2a2f6c2ef814352d70e10dedab2254950556ade5021550eb9fddac7ab57"
+  },
+  "artifacts": {
+    "model": {
+      "file": "furina_cn_32k_v2_20261030.pth",
+      "bytes": 56272458,
+      "sha256": "1d1b79870e582917897493f2d8c7176800c11b562668ebcda801cce64e1fe3c9",
+      "metadata": {
+        "version": "v2",
+        "sample_rate": "32k",
+        "f0": 1,
+        "weight_tensors": 457
+      }
+    },
+    "index": {
+      "file": "added_IVF375_Flat_nprobe_1_furina_cn_32k_v2_20261030_v2.index",
+      "bytes": 46301779,
+      "sha256": "35edb696397196f5aeca0ecde97e71b8cc9c1d3b613dcc366867902647d94e56",
+      "dimension": 768,
+      "vectors": 14658,
+      "ivf_lists": 375,
+      "nprobe": 1
+    }
+  },
+  "target": {
+    "board": "RK3588 ARM64",
+    "note": "These are trained RVC/PyTorch artifacts. ONNX and RKNN conversion is a separate step."
+  }
+}
