@@ -381,7 +381,7 @@ RknnFaceDetector::RknnFaceDetector(
       confidence_threshold_(confidence_threshold) {
     require_unit_interval(
         confidence_threshold_, "Detector confidence must be within [0, 1]");
-    model_->require_output_shapes({{2, 56, 56}, {1, 56, 56}});
+    model_->require_output_shapes({{2, 56, 56}, {2, 56, 56}});
 }
 
 RknnFaceDetector::~RknnFaceDetector() = default;
@@ -393,30 +393,26 @@ const ModelInputSpec& RknnFaceDetector::input_spec() const noexcept {
 std::optional<FaceDetection> RknnFaceDetector::detect(
     const ModelInputView& input) {
     const std::vector<RknnTensor> tensors = model_->run(input);
-    const RknnTensor* detection = nullptr;
-    const RknnTensor* max_pool = nullptr;
-    for (const RknnTensor& tensor : tensors) {
-        if (tensor.height() == 56 && tensor.width() == 56 &&
-            tensor.channels() == 2) {
-            detection = &tensor;
-        }
-        if (tensor.height() == 56 && tensor.width() == 56 &&
-            tensor.channels() == 1) {
-            max_pool = &tensor;
-        }
-    }
-    if (detection == nullptr || max_pool == nullptr) {
+    if (tensors.size() != 2 ||
+        tensors[0].height() != 56 || tensors[0].width() != 56 ||
+        tensors[0].channels() != 2 ||
+        tensors[1].height() != 56 || tensors[1].width() != 56 ||
+        tensors[1].channels() != 2) {
         throw std::runtime_error(
-            "Detector RKNN outputs must contain 2x56x56 and 1x56x56 tensors");
+            "Detector RKNN outputs must contain two 2x56x56 tensors");
     }
+    // The converted OpenSeeFace model preserves the ONNX output order:
+    // detector values first, per-channel max-pool values second.
+    const RknnTensor& detection = tensors[0];
+    const RknnTensor& max_pool = tensors[1];
 
     float best_confidence = -std::numeric_limits<float>::infinity();
     std::uint32_t best_x = 0;
     std::uint32_t best_y = 0;
     for (std::uint32_t y = 0; y < 56; ++y) {
         for (std::uint32_t x = 0; x < 56; ++x) {
-            const float confidence = detection->value(0, y, x);
-            if (confidence != max_pool->value(0, y, x)) {
+            const float confidence = detection.value(0, y, x);
+            if (confidence != max_pool.value(0, y, x)) {
                 continue;
             }
             if (confidence > best_confidence) {
@@ -431,7 +427,7 @@ std::optional<FaceDetection> RknnFaceDetector::detect(
         return std::nullopt;
     }
 
-    const float radius = detection->value(1, best_y, best_x) * 112.0F;
+    const float radius = detection.value(1, best_y, best_x) * 112.0F;
     if (!std::isfinite(radius) || radius <= 0.0F) {
         return std::nullopt;
     }
