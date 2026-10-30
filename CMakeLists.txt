@@ -14,10 +14,18 @@ option(VTB_ENABLE_RKNN_FACE
     "Build the RK3588 RKNN OpenSeeFace detector and landmark models" OFF)
 option(VTB_ENABLE_OPENCV_FACE_PIPELINE
     "Build the OpenCV video source and OpenSeeFace geometry estimator" OFF)
+option(VTB_ENABLE_EMBEDDED_GODOT
+    "Build the VTB-owned LibGodot host executable" OFF)
 set(VTB_ROCKCHIP_SYSROOT "" CACHE PATH
     "Target-board sysroot containing Rockchip MPP and RGA development files")
 set(VTB_RKNN_SYSROOT "" CACHE PATH
     "Target-board sysroot containing rknn_api.h and librknnrt.so")
+set(VTB_GODOT_SOURCE_ROOT "" CACHE PATH
+    "Godot source root containing core/extension/libgodot.h")
+set(VTB_LIBGODOT_LIBRARY "" CACHE FILEPATH
+    "ARM64 LibGodot shared library containing the OpenVT bridge")
+set(VTB_EMBEDDED_RPATH_LINK "" CACHE STRING
+    "Semicolon-separated ARM64 dependency directories for the LibGodot host link")
 
 function(vtb_configure_target target)
     target_compile_features(${target} PRIVATE cxx_std_17)
@@ -194,6 +202,14 @@ target_include_directories(vtb_live2d_core PUBLIC include)
 target_link_libraries(vtb_live2d_core PUBLIC vtb_face_core)
 vtb_configure_target(vtb_live2d_core)
 
+add_library(vtb_render_runtime STATIC
+    src/render/godot_runtime.cpp
+)
+add_library(vtb::render_runtime ALIAS vtb_render_runtime)
+target_include_directories(vtb_render_runtime PUBLIC include)
+target_link_libraries(vtb_render_runtime PUBLIC vtb_live2d_core)
+vtb_configure_target(vtb_render_runtime)
+
 if(VTB_ENABLE_OPENCV_FACE_PIPELINE)
     find_package(OpenCV REQUIRED COMPONENTS
         core
@@ -278,6 +294,43 @@ add_executable(vtb src/main.cpp)
 target_link_libraries(vtb PRIVATE vtb_capture)
 vtb_configure_target(vtb)
 
+if(VTB_ENABLE_EMBEDDED_GODOT)
+    if(VTB_GODOT_SOURCE_ROOT STREQUAL "")
+        message(FATAL_ERROR
+            "VTB_GODOT_SOURCE_ROOT is required for the embedded Godot host")
+    endif()
+    if(VTB_LIBGODOT_LIBRARY STREQUAL "")
+        message(FATAL_ERROR
+            "VTB_LIBGODOT_LIBRARY is required for the embedded Godot host")
+    endif()
+    if(NOT EXISTS "${VTB_GODOT_SOURCE_ROOT}/core/extension/libgodot.h")
+        message(FATAL_ERROR "VTB_GODOT_SOURCE_ROOT does not contain LibGodot headers")
+    endif()
+    if(NOT EXISTS "${VTB_LIBGODOT_LIBRARY}")
+        message(FATAL_ERROR "VTB_LIBGODOT_LIBRARY does not exist")
+    endif()
+
+    add_executable(vtb-live2d apps/vtb-live2d/main.cpp)
+    target_include_directories(vtb-live2d
+        PRIVATE
+            "${VTB_GODOT_SOURCE_ROOT}"
+            experiments/godot/embedded-runtime/module
+    )
+    target_link_libraries(vtb-live2d PRIVATE "${VTB_LIBGODOT_LIBRARY}")
+    target_link_options(vtb-live2d PRIVATE -Wl,--allow-shlib-undefined)
+    foreach(dependency_directory IN LISTS VTB_EMBEDDED_RPATH_LINK)
+        target_link_options(vtb-live2d PRIVATE
+            "-Wl,-rpath-link,${dependency_directory}")
+    endforeach()
+    set_target_properties(vtb-live2d PROPERTIES
+        BUILD_RPATH "$ORIGIN"
+        BUILD_RPATH_USE_ORIGIN TRUE
+        BUILD_WITH_INSTALL_RPATH TRUE
+        INSTALL_RPATH "$ORIGIN"
+    )
+    vtb_configure_target(vtb-live2d)
+endif()
+
 add_executable(camera-info examples/camera-info/main.cpp)
 vtb_configure_target(camera-info)
 
@@ -291,4 +344,12 @@ if(BUILD_TESTING)
     target_link_libraries(output-manager-test PRIVATE vtb_output_core)
     vtb_configure_target(output-manager-test)
     add_test(NAME output-manager COMMAND output-manager-test)
+
+    add_executable(godot-runtime-state-machine-test
+        tests/godot_runtime_state_machine_test.cpp)
+    target_link_libraries(godot-runtime-state-machine-test
+        PRIVATE vtb_render_runtime)
+    vtb_configure_target(godot-runtime-state-machine-test)
+    add_test(NAME godot-runtime-state-machine
+        COMMAND godot-runtime-state-machine-test)
 endif()

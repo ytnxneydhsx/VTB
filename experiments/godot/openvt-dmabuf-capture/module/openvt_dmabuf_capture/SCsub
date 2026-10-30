@@ -62,6 +62,8 @@ env_openvt.Append(
         ffmpeg_sysroot + "/usr/include/aarch64-linux-gnu",
         rknn_root + "/usr/include/rknn",
         vtb_source_root + "/include",
+        Dir(".").abspath,
+        vtb_source_root + "/experiments/godot/embedded-runtime/module",
     ]
 )
 env_openvt.MergeFlags(shlex.split(opencv_cflags))
@@ -82,6 +84,18 @@ env_openvt.add_source_files(env.modules_sources, vtb_source_root + "/src/face/rk
 env_openvt.add_source_files(env.modules_sources, vtb_source_root + "/src/face/openseeface_geometry_estimator.cpp")
 env_openvt.add_source_files(env.modules_sources, vtb_source_root + "/src/live2d/live2d_face_mapper.cpp")
 env_openvt.add_source_files(env.modules_sources, vtb_source_root + "/src/pipeline/pipeline_runtime.cpp")
+env_openvt.add_source_files(
+    env.modules_sources,
+    vtb_source_root + "/experiments/godot/embedded-runtime/module/openvt_libgodot_bridge.cpp",
+)
+env_openvt.add_source_files(
+    env.modules_sources,
+    vtb_source_root + "/experiments/godot/embedded-runtime/module/live2d_render_session.cpp",
+)
+env_openvt.add_source_files(
+    env.modules_sources,
+    vtb_source_root + "/experiments/godot/embedded-runtime/module/embedded_live2d_application.cpp",
+)
 
 env.Append(
     LIBPATH=opencv_library_paths,
