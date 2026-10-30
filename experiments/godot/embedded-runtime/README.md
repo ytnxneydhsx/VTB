@@ -41,6 +41,7 @@ The Godot module is installed from
 
 ```text
 deployment/
+├── BUILD_MANIFEST.md
 ├── bin/
 │   ├── vtb-live2d
 │   └── libgodot.linuxbsd.template_release.arm64.so
