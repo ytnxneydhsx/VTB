@@ -1,6 +1,7 @@
 #include "openvt_libgodot_bridge.h"
 
 #include <exception>
+#include <limits>
 #include <memory>
 #include <string>
 
@@ -62,13 +63,30 @@ extern "C" int openvt_libgodot_iteration(void *p_instance) {
 	return 0;
 }
 
-extern "C" int openvt_libgodot_application_initialize(void) {
+extern "C" int openvt_libgodot_application_initialize(
+		const OpenVTEmbeddedApplicationConfig *p_config) {
 	if (application != nullptr) {
 		application_error = "Embedded Live2D application is already initialized";
 		return static_cast<int>(ERR_ALREADY_IN_USE);
 	}
+	if (p_config == nullptr || p_config->live2d_model == nullptr ||
+			p_config->rtsp_url == nullptr ||
+			p_config->output_width > static_cast<uint32_t>(std::numeric_limits<int>::max()) ||
+			p_config->output_height > static_cast<uint32_t>(std::numeric_limits<int>::max()) ||
+			p_config->output_fps > static_cast<uint32_t>(std::numeric_limits<int>::max()) ||
+			p_config->total_frames > static_cast<uint32_t>(std::numeric_limits<int>::max())) {
+		application_error = "Embedded application configuration is null";
+		return static_cast<int>(ERR_INVALID_PARAMETER);
+	}
 	application = std::make_unique<vtb::EmbeddedLive2DApplication>();
-	const Error error = application->initialize_from_environment();
+	vtb::EmbeddedLive2DApplicationConfig config;
+	config.live2d_model = String::utf8(p_config->live2d_model);
+	config.rtsp_url = String::utf8(p_config->rtsp_url);
+	config.output_width = static_cast<int>(p_config->output_width);
+	config.output_height = static_cast<int>(p_config->output_height);
+	config.output_fps = static_cast<int>(p_config->output_fps);
+	config.total_frames = static_cast<int>(p_config->total_frames);
+	const Error error = application->initialize(config);
 	if (error != OK) {
 		const int result = remember_application_error(error);
 		application->shutdown();

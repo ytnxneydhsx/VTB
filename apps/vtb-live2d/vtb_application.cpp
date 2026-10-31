@@ -1,10 +1,7 @@
 #include "vtb_application.hpp"
 
-#include <cerrno>
 #include <chrono>
-#include <cmath>
 #include <cstdint>
-#include <cstdlib>
 #include <iostream>
 #include <memory>
 #include <optional>
@@ -16,11 +13,13 @@
 
 #include "core/extension/libgodot.h"
 #include "openvt_libgodot_bridge.h"
+#include "vtb/config/config_file_reader.hpp"
+#include "vtb/config/vtb_application_config.hpp"
 #include "vtb/face/cpu_image_transformer.hpp"
 #include "vtb/face/face_tracking_service.hpp"
 #include "vtb/face/openseeface_geometry_estimator.hpp"
 #include "vtb/face/rknn_face_models.hpp"
-#include "vtb/video/opencv_video_source.hpp"
+#include "vtb/video/video_input_factory.hpp"
 
 namespace vtb {
 namespace {
@@ -44,67 +43,25 @@ GDExtensionBool host_extension_init(
     return 1;
 }
 
-std::string required_environment(const char* name) {
-    const char* value = std::getenv(name);
-    if (value == nullptr || value[0] == '\0') {
-        throw std::invalid_argument(std::string(name) + " is required");
-    }
-    return value;
-}
-
-std::string optional_environment(const char* name, const char* default_value) {
-    const char* value = std::getenv(name);
-    if (value == nullptr || value[0] == '\0') {
-        return default_value;
-    }
-    return value;
-}
-
-int integer_environment(
-    const char* name,
-    int default_value,
-    int minimum,
-    int maximum) {
-    const char* text = std::getenv(name);
-    if (text == nullptr || text[0] == '\0') {
-        return default_value;
-    }
-    errno = 0;
-    char* end = nullptr;
-    const long parsed = std::strtol(text, &end, 10);
-    if (errno == ERANGE || end == text || end == nullptr || end[0] != '\0' ||
-        parsed < minimum || parsed > maximum) {
-        throw std::invalid_argument(
-            std::string(name) + " is outside the supported range");
-    }
-    return static_cast<int>(parsed);
-}
-
-float floating_environment(const char* name, float default_value) {
-    const char* text = std::getenv(name);
-    if (text == nullptr || text[0] == '\0') {
-        return default_value;
-    }
-    errno = 0;
-    char* end = nullptr;
-    const float parsed = std::strtof(text, &end);
-    if (errno == ERANGE || end == text || end == nullptr || end[0] != '\0' ||
-        !std::isfinite(parsed)) {
-        throw std::invalid_argument(
-            std::string(name) + " must be a finite number");
-    }
-    return parsed;
-}
-
-class ApplicationArguments final {
+class CommandLineArguments final {
 public:
-    ApplicationArguments(int argc, char** argv) {
+    CommandLineArguments(int argc, char** argv) {
         if (argc < 1 || argv == nullptr || argv[0] == nullptr) {
             throw std::invalid_argument("Invalid process arguments");
         }
-        godot_arguments_.emplace_back(argv[0]);
+        passthrough_arguments_.emplace_back(argv[0]);
         for (int index = 1; index < argc; ++index) {
             const std::string argument(argv[index]);
+            if (argument == "--config") {
+                if (index + 1 >= argc) {
+                    throw std::invalid_argument("--config requires a value");
+                }
+                if (!config_path_.empty()) {
+                    throw std::invalid_argument("--config may only be specified once");
+                }
+                config_path_ = argv[++index];
+                continue;
+            }
             if (argument == "--vtb-iterations") {
                 if (index + 1 >= argc) {
                     throw std::invalid_argument(
@@ -113,24 +70,86 @@ public:
                 iteration_limit_ = parse_positive_integer(argv[++index]);
                 continue;
             }
-            godot_arguments_.push_back(argument);
+            passthrough_arguments_.push_back(argument);
         }
-        if (!has_argument("--path")) {
-            godot_arguments_.emplace_back("--path");
-            godot_arguments_.push_back(
-                required_environment("OPENVT_GODOT_PROJECT_DIR"));
+        if (config_path_.empty()) {
+            throw std::invalid_argument("--config is required");
         }
+    }
+
+    ~CommandLineArguments() = default;
+
+    CommandLineArguments(const CommandLineArguments&) = delete;
+    CommandLineArguments& operator=(const CommandLineArguments&) = delete;
+    CommandLineArguments(CommandLineArguments&&) = delete;
+    CommandLineArguments& operator=(CommandLineArguments&&) = delete;
+
+    const std::string& config_path() const noexcept {
+        return config_path_;
+    }
+
+    const std::vector<std::string>& passthrough_arguments() const noexcept {
+        return passthrough_arguments_;
+    }
+
+    unsigned long iteration_limit() const noexcept {
+        return iteration_limit_;
+    }
+
+private:
+    static unsigned long parse_positive_integer(const char* text) {
+        if (text == nullptr || text[0] == '\0' || text[0] == '-') {
+            throw std::invalid_argument(
+                "Iteration limit must be a positive integer");
+        }
+        std::size_t consumed = 0;
+        unsigned long value = 0;
+        try {
+            value = std::stoul(text, &consumed, 10);
+        } catch (const std::exception&) {
+            throw std::invalid_argument(
+                "Iteration limit must be a positive integer");
+        }
+        if (consumed != std::string(text).size() || value == 0) {
+            throw std::invalid_argument(
+                "Iteration limit must be a positive integer");
+        }
+        return value;
+    }
+
+    std::string config_path_;
+    std::vector<std::string> passthrough_arguments_;
+    unsigned long iteration_limit_ = 0;
+};
+
+VtbApplicationConfiguration load_application_configuration(
+    const std::string& path) {
+    ConfigurationFileReader reader;
+    VtbApplicationConfigParser parser;
+    return parser.parse(reader.read(path));
+}
+
+class ApplicationArguments final {
+public:
+    ApplicationArguments(
+        const CommandLineArguments& command_line,
+        const RenderConfiguration& render)
+        : godot_arguments_(command_line.passthrough_arguments()),
+          iteration_limit_(command_line.iteration_limit()),
+          output_fps_(render.output_fps) {
+        if (has_argument("--path") || has_argument("--fixed-fps")) {
+            throw std::invalid_argument(
+                "--path and --fixed-fps are managed by the JSON configuration");
+        }
+        godot_arguments_.emplace_back("--path");
+        godot_arguments_.push_back(render.godot_project_dir);
         append_default_argument("--display-driver", "x11");
         append_default_argument("--rendering-driver", "opengl3_es");
         append_default_flag("--single-window");
         append_default_flag("--disable-crash-handler");
         append_default_flag("--disable-vsync");
-        output_fps_ = integer_environment(
-            "OPENVT_OUTPUT_FPS", 30, 1, 1000);
-        if (!has_argument("--fixed-fps")) {
-            godot_arguments_.emplace_back("--fixed-fps");
-            godot_arguments_.push_back(std::to_string(output_fps_));
-        }
+        godot_arguments_.emplace_back("--fixed-fps");
+        godot_arguments_.push_back(std::to_string(output_fps_));
         refresh_pointers();
     }
 
@@ -159,21 +178,6 @@ public:
     }
 
 private:
-    static unsigned long parse_positive_integer(const char* text) {
-        if (text == nullptr || text[0] == '\0') {
-            throw std::invalid_argument("Iteration limit is empty");
-        }
-        errno = 0;
-        char* end = nullptr;
-        const unsigned long value = std::strtoul(text, &end, 10);
-        if (errno == ERANGE || end == text || end == nullptr ||
-            end[0] != '\0' || value == 0) {
-            throw std::invalid_argument(
-                "Iteration limit must be a positive integer");
-        }
-        return value;
-    }
-
     bool has_argument(const std::string& name) const {
         for (const std::string& argument : godot_arguments_) {
             if (argument == name) {
@@ -209,59 +213,7 @@ private:
     std::vector<std::string> godot_arguments_;
     std::vector<char*> godot_argument_pointers_;
     unsigned long iteration_limit_ = 0;
-    int output_fps_ = 30;
-};
-
-class FaceModuleConfig final {
-public:
-    FaceModuleConfig()
-        : source(required_environment("OPENVT_FACE_SOURCE")),
-          detector_model(required_environment("OPENVT_FACE_DETECTOR_MODEL")),
-          landmark_model(required_environment("OPENVT_FACE_LANDMARK_MODEL")),
-          width(integer_environment("OPENVT_FACE_WIDTH", 1280, 1, 8192)),
-          height(integer_environment("OPENVT_FACE_HEIGHT", 720, 1, 8192)),
-          fps(integer_environment("OPENVT_FACE_FPS", 60, 1, 240)),
-          buffer_count(integer_environment("OPENVT_FACE_BUFFERS", 4, 2, 64)),
-          calibration_frames(integer_environment(
-              "OPENVT_FACE_CALIBRATION_FRAMES", 30, 1, 10000)),
-          smoothing_tau_ms(floating_environment(
-              "OPENVT_FACE_SMOOTHING_MS", 50.0F)),
-          angle_x_sign(floating_environment(
-              "OPENVT_FACE_ANGLE_X_SIGN", -1.0F)),
-          angle_y_sign(floating_environment(
-              "OPENVT_FACE_ANGLE_Y_SIGN", -1.0F)),
-          angle_z_sign(floating_environment(
-              "OPENVT_FACE_ANGLE_Z_SIGN", -1.0F)),
-          control_address(optional_environment(
-              "OPENVT_LIVE2D_CONTROL_ADDRESS", "192.168.77.2")),
-          control_port(integer_environment(
-              "OPENVT_LIVE2D_CONTROL_PORT", 11575, 1, 65535)),
-          control_origin(optional_environment(
-              "OPENVT_LIVE2D_CONTROL_ORIGIN",
-              "http://192.168.77.1:8900")) {}
-
-    ~FaceModuleConfig() = default;
-
-    FaceModuleConfig(const FaceModuleConfig&) = default;
-    FaceModuleConfig& operator=(const FaceModuleConfig&) = default;
-    FaceModuleConfig(FaceModuleConfig&&) noexcept = default;
-    FaceModuleConfig& operator=(FaceModuleConfig&&) noexcept = default;
-
-    std::string source;
-    std::string detector_model;
-    std::string landmark_model;
-    int width = 1280;
-    int height = 720;
-    int fps = 60;
-    int buffer_count = 4;
-    int calibration_frames = 30;
-    float smoothing_tau_ms = 50.0F;
-    float angle_x_sign = -1.0F;
-    float angle_y_sign = -1.0F;
-    float angle_z_sign = -1.0F;
-    std::string control_address;
-    int control_port = 11575;
-    std::string control_origin;
+    std::uint32_t output_fps_ = 0;
 };
 
 class LibGodotInstance final {
@@ -285,14 +237,21 @@ public:
     LibGodotInstance(LibGodotInstance&&) = delete;
     LibGodotInstance& operator=(LibGodotInstance&&) = delete;
 
-    void start() {
+    void start(const RenderConfiguration& config) {
         const int result = openvt_libgodot_start(instance_);
         if (result != 0) {
             throw std::runtime_error(
                 "LibGodot start failed: " + std::to_string(result));
         }
+        OpenVTEmbeddedApplicationConfig embedded_config{};
+        embedded_config.live2d_model = config.live2d_model.c_str();
+        embedded_config.rtsp_url = config.rtsp_url.c_str();
+        embedded_config.output_width = config.output_width;
+        embedded_config.output_height = config.output_height;
+        embedded_config.output_fps = config.output_fps;
+        embedded_config.total_frames = config.total_frames;
         const int application_result =
-            openvt_libgodot_application_initialize();
+            openvt_libgodot_application_initialize(&embedded_config);
         if (application_result != 0) {
             throw_application_error(
                 "C++ Live2D application initialization failed",
@@ -386,20 +345,8 @@ private:
     bool application_initialized_ = false;
 };
 
-std::unique_ptr<VideoSource> create_video_input(
-    const FaceModuleConfig& config) {
-    OpenCvVideoSourceConfig source_config;
-    source_config.source = config.source;
-    source_config.width = static_cast<std::uint32_t>(config.width);
-    source_config.height = static_cast<std::uint32_t>(config.height);
-    source_config.fps = static_cast<std::uint32_t>(config.fps);
-    source_config.buffer_count =
-        static_cast<std::uint32_t>(config.buffer_count);
-    return std::make_unique<OpenCvVideoSource>(std::move(source_config));
-}
-
 std::unique_ptr<FacePipeline> create_face_pipeline(
-    const FaceModuleConfig& config) {
+    const FacePipelineConfiguration& config) {
     auto image_transformer = std::make_unique<CpuImageTransformer>();
     auto detector = std::make_unique<RknnFaceDetector>(
         config.detector_model, RknnCore::core0);
@@ -407,8 +354,9 @@ std::unique_ptr<FacePipeline> create_face_pipeline(
         config.landmark_model, RknnCore::core1);
     auto geometry = std::make_unique<OpenSeeFaceGeometryEstimator>();
     FacePipelineConfig face_config;
-    face_config.redetect_interval_frames = 0;
-    face_config.minimum_tracking_confidence = 0.6F;
+    face_config.redetect_interval_frames = config.redetect_interval_frames;
+    face_config.minimum_tracking_confidence =
+        config.minimum_tracking_confidence;
     return std::make_unique<FacePipeline>(
         face_config,
         std::move(image_transformer),
@@ -418,21 +366,22 @@ std::unique_ptr<FacePipeline> create_face_pipeline(
 }
 
 std::unique_ptr<FaceTrackingService> create_face_tracking_service(
-    const FaceModuleConfig& config,
+    const FaceMappingConfiguration& mapping,
+    const ControlConfiguration& control,
     std::unique_ptr<VideoSource> video_input,
     std::unique_ptr<FacePipeline> face_pipeline) {
     Live2DMappingConfig mapping_config;
     mapping_config.calibration_frames =
-        static_cast<std::size_t>(config.calibration_frames);
-    mapping_config.smoothing_tau_ms = config.smoothing_tau_ms;
-    mapping_config.angle_x_sign = config.angle_x_sign;
-    mapping_config.angle_y_sign = config.angle_y_sign;
-    mapping_config.angle_z_sign = config.angle_z_sign;
+        static_cast<std::size_t>(mapping.calibration_frames);
+    mapping_config.smoothing_tau_ms = mapping.smoothing_tau_ms;
+    mapping_config.angle_x_sign = mapping.angle_x_sign;
+    mapping_config.angle_y_sign = mapping.angle_y_sign;
+    mapping_config.angle_z_sign = mapping.angle_z_sign;
 
     FaceTrackingControlConfig control_config;
-    control_config.bind_address = config.control_address;
-    control_config.port = config.control_port;
-    control_config.allowed_origin = config.control_origin;
+    control_config.bind_address = control.bind_address;
+    control_config.port = control.port;
+    control_config.allowed_origin = control.allowed_origin;
 
     return std::make_unique<FaceTrackingService>(
         std::move(video_input),
@@ -446,7 +395,9 @@ std::unique_ptr<FaceTrackingService> create_face_tracking_service(
 class VtbApplication::Impl final {
 public:
     Impl(int argc, char** argv)
-        : arguments_(argc, argv), face_config_() {}
+        : command_line_(argc, argv),
+          config_(load_application_configuration(command_line_.config_path())),
+          arguments_(command_line_, config_.render) {}
 
     ~Impl() = default;
 
@@ -456,18 +407,20 @@ public:
     Impl& operator=(Impl&&) = delete;
 
     int run(const std::atomic<bool>& stop_requested) {
+        VideoInputFactory video_input_factory;
         std::unique_ptr<VideoSource> video_input =
-            create_video_input(face_config_);
+            video_input_factory.create(config_.video_input);
         std::unique_ptr<FacePipeline> face_pipeline =
-            create_face_pipeline(face_config_);
+            create_face_pipeline(config_.face_pipeline);
         std::unique_ptr<FaceTrackingService> face_tracking =
             create_face_tracking_service(
-                face_config_,
+                config_.mapping,
+                config_.control,
                 std::move(video_input),
                 std::move(face_pipeline));
 
         LibGodotInstance godot(arguments_);
-        godot.start();
+        godot.start(config_.render);
         face_tracking->start();
 
         unsigned long iterations = 0;
@@ -511,8 +464,9 @@ public:
     }
 
 private:
+    CommandLineArguments command_line_;
+    VtbApplicationConfiguration config_;
     ApplicationArguments arguments_;
-    FaceModuleConfig face_config_;
 };
 
 VtbApplication::VtbApplication(int argc, char** argv)

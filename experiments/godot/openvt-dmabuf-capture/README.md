@@ -77,14 +77,12 @@ RKNN 已移到 `vtb-live2d` 宿主，不进入 LibGodot 模块的源码和链接
 路径使用 `experiments/godot/embedded-runtime/run_on_rk.sh` 启动 `vtb-live2d`：
 
 ```bash
-OPENVT_FACE_SOURCE=/dev/video0 \
-OPENVT_FACE_DETECTOR_MODEL=/home/huangnv/VTB/models/openseeface/mnv3_detection_fp16.rknn \
-OPENVT_FACE_LANDMARK_MODEL=/home/huangnv/VTB/models/openseeface/lm_model3_fp16.rknn \
-OPENVT_LIVE2D_TOTAL_FRAMES=0 \
+OPENVT_CONFIG=/path/to/deployment/config/vtb-live2d.json \
 ./experiments/godot/embedded-runtime/run_on_rk.sh
 ```
 
-视频输入、模型推理、校准和控制口由宿主中的纯 C++ `FaceTrackingService` 管理。
+视频输入、模型推理、校准和控制口由宿主中的纯 C++ `FaceTrackingService` 管理；
+配置来自 JSON，启动前会验证 V4L2 设备和实际协商参数。
 Godot 通过固定 C ABI 只接收最终 Live2D 参数帧。完整边界见
 [`docs/live2d-face-tracking-bridge.md`](../../../docs/live2d-face-tracking-bridge.md)。
 

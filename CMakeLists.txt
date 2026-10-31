@@ -34,6 +34,27 @@ endfunction()
 
 find_package(Threads REQUIRED)
 
+include(FetchContent)
+set(JSON_BuildTests OFF CACHE BOOL "" FORCE)
+set(JSON_Install OFF CACHE BOOL "" FORCE)
+FetchContent_Declare(nlohmann_json
+    URL
+        https://github.com/nlohmann/json/releases/download/v3.11.3/json.tar.xz
+    URL_HASH
+        SHA256=d6c65aca6b1ed68e7a182f4757257b107ae403032760ed6ef121c9d55e81757d
+)
+FetchContent_MakeAvailable(nlohmann_json)
+
+add_library(vtb_application_config STATIC
+    src/config/config_file_reader.cpp
+    src/config/vtb_application_config.cpp
+)
+add_library(vtb::application_config ALIAS vtb_application_config)
+target_include_directories(vtb_application_config PUBLIC include)
+target_link_libraries(vtb_application_config
+    PRIVATE nlohmann_json::nlohmann_json)
+vtb_configure_target(vtb_application_config)
+
 add_library(vtb_instrumentation STATIC
     src/instrumentation/timer.cpp
 )
@@ -178,6 +199,7 @@ vtb_configure_target(vtb_video_core)
 add_library(vtb_capture STATIC
     src/v4l2_camera.cpp
     src/video/camera_source.cpp
+    src/video/v4l2_device_validator.cpp
 )
 add_library(vtb::capture ALIAS vtb_capture)
 target_include_directories(vtb_capture PUBLIC include)
@@ -232,6 +254,21 @@ if(VTB_ENABLE_OPENCV_FACE_PIPELINE)
         PRIVATE ${OpenCV_LIBS}
     )
     vtb_configure_target(vtb_video_opencv)
+
+    add_library(vtb_video_input STATIC
+        src/video/video_input_factory.cpp
+    )
+    add_library(vtb::video_input ALIAS vtb_video_input)
+    target_include_directories(vtb_video_input PUBLIC include)
+    target_link_libraries(vtb_video_input
+        PUBLIC
+            vtb_application_config
+            vtb_video_core
+        PRIVATE
+            vtb_capture
+            vtb_video_opencv
+    )
+    vtb_configure_target(vtb_video_input)
 
     add_library(vtb_face_geometry_opencv STATIC
         src/face/openseeface_geometry_estimator.cpp
@@ -342,7 +379,8 @@ if(VTB_ENABLE_EMBEDDED_GODOT)
     target_link_libraries(vtb-live2d
         PRIVATE
             vtb_face_tracking_service
-            vtb_video_opencv
+            vtb_application_config
+            vtb_video_input
             vtb_face_rknn
             vtb_face_geometry_opencv
             "${VTB_LIBGODOT_LIBRARY}"
@@ -365,6 +403,13 @@ add_executable(camera-info examples/camera-info/main.cpp)
 vtb_configure_target(camera-info)
 
 if(BUILD_TESTING)
+    add_executable(vtb-application-config-test
+        tests/vtb_application_config_test.cpp)
+    target_link_libraries(vtb-application-config-test
+        PRIVATE vtb_application_config)
+    vtb_configure_target(vtb-application-config-test)
+    add_test(NAME vtb-application-config COMMAND vtb-application-config-test)
+
     add_executable(instrumentation-timer-test tests/instrumentation_timer_test.cpp)
     target_link_libraries(instrumentation-timer-test PRIVATE vtb_instrumentation)
     vtb_configure_target(instrumentation-timer-test)

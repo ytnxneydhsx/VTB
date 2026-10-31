@@ -45,6 +45,8 @@ LibGodot module source list and link list. The module compiles only the
 ```text
 deployment/
 ├── BUILD_MANIFEST.md
+├── config/
+│   └── vtb-live2d.json
 ├── bin/
 │   ├── vtb-live2d
 │   └── libgodot.linuxbsd.template_release.arm64.so
@@ -69,14 +71,14 @@ On the RK3588, start MediaMTX first and then run:
 
 ```bash
 OPENVT_EMBEDDED_DEPLOY_DIR=/home/huangnv/VTB/runtime/cpp-host-libgodot-20261030-01 \
-OPENVT_LIVE2D_TOTAL_FRAMES=300 \
+OPENVT_CONFIG=/home/huangnv/VTB/runtime/cpp-host-libgodot-20261030-01/config/vtb-live2d.json \
 ./experiments/godot/embedded-runtime/run_on_rk.sh
 ```
 
-Set `OPENVT_LIVE2D_TOTAL_FRAMES=0` for continuous operation. The C++ host uses
-`steady_clock` as the process monotonic frame clock and paces iterations at
-`OPENVT_OUTPUT_FPS`; `--fixed-fps` only supplies the matching Godot simulation
-step.
+Set `render.total_frames` to `0` in the JSON file for continuous operation. The
+C++ host uses `steady_clock` as the process monotonic frame clock and paces
+iterations at `render.output_fps`; `--fixed-fps` only supplies the matching
+Godot simulation step.
 
 ## Known first-version boundaries
 

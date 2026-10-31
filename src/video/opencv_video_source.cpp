@@ -1,9 +1,8 @@
 #include "vtb/video/opencv_video_source.hpp"
 
-#include <algorithm>
 #include <array>
 #include <atomic>
-#include <cctype>
+#include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
@@ -20,23 +19,6 @@
 namespace vtb {
 namespace {
 
-bool is_decimal_device_index(const std::string& source) noexcept {
-    if (source.empty()) {
-        return false;
-    }
-    return std::all_of(
-        source.begin(), source.end(), [](unsigned char value) {
-            return std::isdigit(value) != 0;
-        });
-}
-
-bool is_live_camera_source(const std::string& source) noexcept {
-    if (is_decimal_device_index(source)) {
-        return true;
-    }
-    return source.rfind("/dev/video", 0) == 0;
-}
-
 std::uint64_t monotonic_now_ns() {
     timespec timestamp{};
     if (clock_gettime(CLOCK_MONOTONIC, &timestamp) != 0) {
@@ -46,49 +28,74 @@ std::uint64_t monotonic_now_ns() {
         static_cast<std::uint64_t>(timestamp.tv_nsec);
 }
 
+void set_capture_property(
+    cv::VideoCapture& capture,
+    int property,
+    double value,
+    const char* description) {
+    if (!capture.set(property, value)) {
+        throw std::runtime_error(
+            std::string("OpenCV V4L2 backend rejected ") + description);
+    }
+}
+
+void require_capture_property(
+    const cv::VideoCapture& capture,
+    int property,
+    std::uint32_t expected,
+    const char* description) {
+    const double raw_value = capture.get(property);
+    if (!std::isfinite(raw_value) || raw_value < 0.0 ||
+        static_cast<std::uint64_t>(std::llround(raw_value)) != expected) {
+        throw std::runtime_error(
+            std::string("OpenCV V4L2 backend did not apply ") + description);
+    }
+}
+
 }  // namespace
 
-class OpenCvVideoSourceState final {
+class OpenCvVideoSource::Impl final {
 public:
-    explicit OpenCvVideoSourceState(OpenCvVideoSourceConfig config)
-        : config_(std::move(config)), live_camera_(is_live_camera_source(config_.source)) {
-        if (config_.source.empty() || config_.width == 0 || config_.height == 0 ||
-            config_.fps == 0 || config_.buffer_count < 2) {
+    explicit Impl(OpenCvVideoSourceConfig config)
+        : config_(std::move(config)) {
+        if (config_.device_path.empty() || config_.pixel_format == 0 ||
+            config_.width == 0 || config_.height == 0 || config_.fps == 0 ||
+            config_.buffer_count < 2) {
             throw std::invalid_argument("OpenCV video source configuration is invalid");
         }
-        bool opened = false;
-        if (is_decimal_device_index(config_.source)) {
-            opened = capture_.open(std::stoi(config_.source), cv::CAP_V4L2);
-        } else if (live_camera_) {
-            opened = capture_.open(config_.source, cv::CAP_V4L2);
-        } else {
-            opened = capture_.open(config_.source);
-        }
-        if (!opened) {
+        if (!capture_.open(config_.device_path, cv::CAP_V4L2)) {
             throw std::runtime_error(
-                "Unable to open OpenCV video source: " + config_.source);
+                "Unable to open OpenCV V4L2 device: " + config_.device_path);
         }
-        if (live_camera_) {
-            capture_.set(cv::CAP_PROP_BUFFERSIZE, config_.buffer_count);
-            if (config_.request_mjpeg) {
-                capture_.set(
-                    cv::CAP_PROP_FOURCC,
-                    cv::VideoWriter::fourcc('M', 'J', 'P', 'G'));
-            }
-            capture_.set(cv::CAP_PROP_FRAME_WIDTH, config_.width);
-            capture_.set(cv::CAP_PROP_FRAME_HEIGHT, config_.height);
-            capture_.set(cv::CAP_PROP_FPS, config_.fps);
-        }
+        set_capture_property(
+            capture_, cv::CAP_PROP_FOURCC, config_.pixel_format, "pixel format");
+        set_capture_property(
+            capture_, cv::CAP_PROP_FRAME_WIDTH, config_.width, "frame width");
+        set_capture_property(
+            capture_, cv::CAP_PROP_FRAME_HEIGHT, config_.height, "frame height");
+        set_capture_property(capture_, cv::CAP_PROP_FPS, config_.fps, "frame rate");
+        set_capture_property(
+            capture_, cv::CAP_PROP_BUFFERSIZE, config_.buffer_count, "buffer count");
+        require_capture_property(
+            capture_, cv::CAP_PROP_FOURCC, config_.pixel_format, "pixel format");
+        require_capture_property(
+            capture_, cv::CAP_PROP_FRAME_WIDTH, config_.width, "frame width");
+        require_capture_property(
+            capture_, cv::CAP_PROP_FRAME_HEIGHT, config_.height, "frame height");
+        require_capture_property(
+            capture_, cv::CAP_PROP_FPS, config_.fps, "frame rate");
+        require_capture_property(
+            capture_, cv::CAP_PROP_BUFFERSIZE, config_.buffer_count, "buffer count");
     }
 
-    ~OpenCvVideoSourceState() {
+    ~Impl() {
         close();
     }
 
-    OpenCvVideoSourceState(const OpenCvVideoSourceState&) = delete;
-    OpenCvVideoSourceState& operator=(const OpenCvVideoSourceState&) = delete;
-    OpenCvVideoSourceState(OpenCvVideoSourceState&&) = delete;
-    OpenCvVideoSourceState& operator=(OpenCvVideoSourceState&&) = delete;
+    Impl(const Impl&) = delete;
+    Impl& operator=(const Impl&) = delete;
+    Impl(Impl&&) = delete;
+    Impl& operator=(Impl&&) = delete;
 
     std::optional<DecodedFrameLease> read() {
         if (stop_requested_.load(std::memory_order_acquire)) {
@@ -149,30 +156,29 @@ private:
     cv::VideoCapture capture_;
     std::atomic<bool> stop_requested_{false};
     std::uint64_t next_frame_id_ = 1;
-    bool live_camera_ = false;
 };
 
 OpenCvVideoSource::OpenCvVideoSource(OpenCvVideoSourceConfig config)
-    : state_(std::make_unique<OpenCvVideoSourceState>(std::move(config))) {}
+    : impl_(std::make_unique<Impl>(std::move(config))) {}
 
 OpenCvVideoSource::~OpenCvVideoSource() = default;
 
 std::optional<DecodedFrameLease> OpenCvVideoSource::read() {
-    if (!state_) {
+    if (!impl_) {
         return std::nullopt;
     }
-    return state_->read();
+    return impl_->read();
 }
 
 void OpenCvVideoSource::request_stop() noexcept {
-    if (state_) {
-        state_->request_stop();
+    if (impl_) {
+        impl_->request_stop();
     }
 }
 
 void OpenCvVideoSource::close() noexcept {
-    if (state_) {
-        state_->close();
+    if (impl_) {
+        impl_->close();
     }
 }
 

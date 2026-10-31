@@ -193,6 +193,10 @@ ssh -fN \
 Ayagami。产品路径不再启动 Python、JSON 或 UDP 参数桥接，浏览器校准和取景控制由
 宿主 C++ 服务提供。
 
+产品配置统一从 `--config` 指定的 JSON 文件读取。摄像头类型、设备、FourCC、尺寸、
+帧率和缓冲区数量均为显式字段；启动时会先通过 V4L2 检查设备和实际协商结果。示例
+见 [`config/vtb-live2d.example.json`](config/vtb-live2d.example.json)。
+
 协议、映射表、启动方式、失效恢复和当前尚未连接的实时推流边界见
 [`docs/live2d-face-tracking-bridge.md`](docs/live2d-face-tracking-bridge.md)。
 

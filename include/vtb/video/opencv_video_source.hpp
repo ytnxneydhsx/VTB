@@ -10,15 +10,13 @@ namespace vtb {
 
 class OpenCvVideoSourceConfig {
 public:
-    std::string source = "/dev/video0";
-    std::uint32_t width = 1280;
-    std::uint32_t height = 720;
-    std::uint32_t fps = 60;
-    std::uint32_t buffer_count = 4;
-    bool request_mjpeg = true;
+    std::string device_path;
+    std::uint32_t pixel_format = 0;
+    std::uint32_t width = 0;
+    std::uint32_t height = 0;
+    std::uint32_t fps = 0;
+    std::uint32_t buffer_count = 0;
 };
-
-class OpenCvVideoSourceState;
 
 class OpenCvVideoSource final : public VideoSource {
 public:
@@ -35,7 +33,8 @@ public:
     void close() noexcept override;
 
 private:
-    std::unique_ptr<OpenCvVideoSourceState> state_;
+    class Impl;
+    std::unique_ptr<Impl> impl_;
 };
 
 }  // namespace vtb

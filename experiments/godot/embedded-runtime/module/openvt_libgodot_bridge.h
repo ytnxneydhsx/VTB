@@ -27,12 +27,23 @@ public:
 	uint64_t generation;
 };
 
+class OpenVTEmbeddedApplicationConfig {
+public:
+	const char *live2d_model;
+	const char *rtsp_url;
+	uint32_t output_width;
+	uint32_t output_height;
+	uint32_t output_fps;
+	uint32_t total_frames;
+};
+
 extern "C" {
 
 OPENVT_LIBGODOT_API int openvt_libgodot_start(void *p_instance);
 OPENVT_LIBGODOT_API int openvt_libgodot_is_started(void *p_instance);
 OPENVT_LIBGODOT_API int openvt_libgodot_iteration(void *p_instance);
-OPENVT_LIBGODOT_API int openvt_libgodot_application_initialize(void);
+OPENVT_LIBGODOT_API int openvt_libgodot_application_initialize(
+		const OpenVTEmbeddedApplicationConfig *p_config);
 OPENVT_LIBGODOT_API int openvt_libgodot_application_submit_live2d_frame(
 		const OpenVTLive2DFrameInput *p_input);
 OPENVT_LIBGODOT_API int openvt_libgodot_application_prepare_frame(uint64_t p_monotonic_timestamp_ns);

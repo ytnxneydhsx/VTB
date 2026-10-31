@@ -66,20 +66,14 @@ Godot/Ayagami、渲染提交和媒体输出继续使用已经验证的实现。`
 运行脚本启动一个 `vtb-live2d` 进程，Godot 作为进程内 LibGodot 实例运行：
 
 ```bash
-OPENVT_FACE_SOURCE=/dev/video0 \
-OPENVT_FACE_WIDTH=1280 \
-OPENVT_FACE_HEIGHT=720 \
-OPENVT_FACE_FPS=60 \
-OPENVT_FACE_BUFFERS=4 \
-OPENVT_FACE_DETECTOR_MODEL=/home/huangnv/VTB/models/openseeface/mnv3_detection_fp16.rknn \
-OPENVT_FACE_LANDMARK_MODEL=/home/huangnv/VTB/models/openseeface/lm_model3_fp16.rknn \
-OPENVT_LIVE2D_TOTAL_FRAMES=0 \
+OPENVT_CONFIG=/path/to/deployment/config/vtb-live2d.json \
 ./experiments/godot/embedded-runtime/run_on_rk.sh
 ```
 
-摄像头输入默认请求 MJPEG。OpenCV 构建启用了 V4L2、JPEG/PNG 和图像序列；固定
-FFmpeg sysroot 当前缺少 `libswscale`，因此这个构建不承诺压缩视频文件的 FFmpeg
-解码能力。
+配置结构见 [`video-input-configuration.md`](video-input-configuration.md) 和
+[`config/vtb-live2d.example.json`](../config/vtb-live2d.example.json)。启动时先通过
+V4L2 确认设备类型、采集能力和实际协商的 FourCC、尺寸、帧率，再由 OpenCV V4L2
+后端读取。当前产品配置只接受 `v4l2_camera` 输入。
 
 ## 控制口
 
@@ -89,10 +83,8 @@ FFmpeg sysroot 当前缺少 `libswscale`，因此这个构建不承诺压缩视�
 - `POST /recalibrate`：请求推理线程在下一次更新前清空中立姿态。
 - `POST /view`：更新 `zoom`、`offset_x` 和 `offset_y`。
 
-默认只为 `http://192.168.77.1:8900` 返回浏览器跨域许可。可用
-`OPENVT_LIVE2D_CONTROL_ADDRESS`、`OPENVT_LIVE2D_CONTROL_PORT` 和
-`OPENVT_LIVE2D_CONTROL_ORIGIN` 覆盖。控制口没有认证或加密，只适用于受信的直连
-本地网段。
+绑定地址、端口和浏览器来源由 JSON 的 `control` 段提供。控制口没有认证或加密，
+只适用于受信的直连本地网段。
 
 ## 构建依赖
 

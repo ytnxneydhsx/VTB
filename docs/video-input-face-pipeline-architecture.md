@@ -438,7 +438,10 @@ FaceTrackingResult
 - `RknnFaceDetector` 与 `RknnLandmarkEstimator`，分别封装 RKNN context、
   NPU core 选择、输入输出张量检查、推理资源释放以及 OpenSeeFace 检测框和
   66 点关键点后处理。
-- `OpenCvVideoSource` 作为当前 Live2D 摄像头和文件 CPU 后备入口。
+- `ConfigurationFileReader` 与 `VtbApplicationConfigParser` 分别负责读取配置文件和
+  生成分段的强类型配置。
+- `V4l2DeviceValidator` 在创建读取模块前确认设备采集能力以及 FourCC、尺寸和帧率。
+- `OpenCvVideoSource` 作为当前 Live2D V4L2 摄像头 CPU 解码入口。
 - `OpenSeeFaceGeometryEstimator` 的 14 点 PnP、Euler 角、66 点三维反投影和
   眼睛/嘴部自适应特征。
 - `Live2DFaceMapper` 的中立姿态校准、十个 Ayagami 参数映射和按单调时钟平滑。
@@ -455,9 +458,9 @@ MPP 摄像头 MJPEG 解码、RGA 模型预处理和 DMA-BUF 跨组件零拷贝�
 
 当前 `CameraSource` 只接受驱动实际协商为 YUYV、NV12 或 NV21 的完整原始帧。
 驱动协商为 MJPEG、H.264 或其他压缩格式时会明确报错，避免把压缩数据标记成
-`DecodedFrameLease`。Live2D 应用当前改用 `OpenCvVideoSource`，由 OpenCV V4L2
-后端处理摄像头 MJPEG 并输出 BGR 完整帧；两条输入实现共享同一个
-`VideoSource` 接口。
+`DecodedFrameLease`。Live2D 应用根据 JSON 中显式声明的 `v4l2_camera` 类型创建
+`OpenCvVideoSource`，由 OpenCV V4L2 后端处理摄像头 MJPEG 并输出 BGR 完整帧；
+两条输入实现共享同一个 `VideoSource` 接口。当前产品入口没有文件和网络读取实现。
 
 以下设备实现仍待后续阶段完成：
 

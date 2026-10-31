@@ -1,10 +1,6 @@
 #include "embedded_live2d_application.h"
 
-#include <cerrno>
 #include <cmath>
-#include <cstdlib>
-#include <limits>
-#include <string>
 
 #include "core/string/print_string.h"
 #include "live2d_render_session.h"
@@ -15,39 +11,6 @@ namespace vtb {
 namespace {
 
 constexpr double kFallbackTauSeconds = 0.25;
-
-String required_environment(const char *p_name, String &r_error) {
-	const char *value = std::getenv(p_name);
-	if (value == nullptr || value[0] == '\0') {
-		r_error = String::utf8(p_name) + " is required";
-		return String();
-	}
-	return String::utf8(value);
-}
-
-bool integer_environment(
-		const char *p_name,
-		int p_default,
-		int p_minimum,
-		int p_maximum,
-		int &r_value,
-		String &r_error) {
-	const char *text = std::getenv(p_name);
-	if (text == nullptr || text[0] == '\0') {
-		r_value = p_default;
-		return true;
-	}
-	errno = 0;
-	char *end = nullptr;
-	const long parsed = std::strtol(text, &end, 10);
-	if (errno == ERANGE || end == text || end == nullptr || end[0] != '\0' ||
-			parsed < p_minimum || parsed > p_maximum) {
-		r_error = String::utf8(p_name) + " is outside the supported range";
-		return false;
-	}
-	r_value = static_cast<int>(parsed);
-	return true;
-}
 
 float approach(float p_current, float p_target, float p_alpha) {
 	return p_current + p_alpha * (p_target - p_current);
@@ -76,23 +39,24 @@ EmbeddedLive2DApplication::~EmbeddedLive2DApplication() {
 	shutdown();
 }
 
-Error EmbeddedLive2DApplication::initialize_from_environment() {
+Error EmbeddedLive2DApplication::initialize(
+		const EmbeddedLive2DApplicationConfig &p_config) {
 	if (initialized_) {
 		return fail(ERR_ALREADY_IN_USE, "Embedded Live2D application is already initialized");
 	}
-	String parse_error;
-	if (!integer_environment("OPENVT_OUTPUT_WIDTH", 1920, 2, 8192, output_width_, parse_error) ||
-			!integer_environment("OPENVT_OUTPUT_HEIGHT", 1080, 2, 8192, output_height_, parse_error) ||
-			!integer_environment("OPENVT_OUTPUT_FPS", 30, 1, 240, output_fps_, parse_error) ||
-			!integer_environment(
-					"OPENVT_LIVE2D_TOTAL_FRAMES",
-					0,
-					0,
-					std::numeric_limits<int>::max(),
-					total_frames_,
-					parse_error)) {
-		return fail(ERR_INVALID_PARAMETER, parse_error);
+	if (p_config.live2d_model.is_empty() || p_config.rtsp_url.is_empty() ||
+			p_config.output_width < 2 || p_config.output_width > 8192 ||
+			p_config.output_height < 2 || p_config.output_height > 8192 ||
+			p_config.output_fps < 1 || p_config.output_fps > 240 ||
+			p_config.total_frames < 0) {
+		return fail(ERR_INVALID_PARAMETER, "Embedded application configuration is invalid");
 	}
+	output_width_ = p_config.output_width;
+	output_height_ = p_config.output_height;
+	output_fps_ = p_config.output_fps;
+	total_frames_ = p_config.total_frames;
+	live2d_model_ = p_config.live2d_model;
+	rtsp_url_ = p_config.rtsp_url;
 	if (output_width_ % 2 != 0 || output_height_ % 2 != 0) {
 		return fail(ERR_INVALID_PARAMETER, "Output dimensions must be even for NV12 encoding");
 	}
@@ -112,14 +76,9 @@ Error EmbeddedLive2DApplication::initialize_from_environment() {
 }
 
 Error EmbeddedLive2DApplication::configure_render_session() {
-	String error_message;
-	const String model_path = required_environment("OPENVT_LIVE2D_MODEL", error_message);
-	if (!error_message.is_empty()) {
-		return fail(ERR_INVALID_PARAMETER, error_message);
-	}
 	render_session_ = std::make_unique<Live2DRenderSession>();
 	Live2DRenderSessionConfig config;
-	config.model_path = model_path;
+	config.model_path = live2d_model_;
 	config.output_size = Vector2i(output_width_, output_height_);
 	Error error = render_session_->initialize(config);
 	if (error == OK) {
@@ -135,14 +94,9 @@ Error EmbeddedLive2DApplication::configure_render_session() {
 }
 
 Error EmbeddedLive2DApplication::configure_output() {
-	String error_message;
-	const String rtsp_url = required_environment("OPENVT_RTSP_URL", error_message);
-	if (!error_message.is_empty()) {
-		return fail(ERR_INVALID_PARAMETER, error_message);
-	}
 	capture_.instantiate();
 	const Error error = capture_->configure(
-			rtsp_url, output_width_, output_height_, output_fps_, total_frames_);
+			rtsp_url_, output_width_, output_height_, output_fps_, total_frames_);
 	if (error != OK) {
 		return fail(error, "DMA-BUF output configuration failed: " + capture_->get_last_error());
 	}

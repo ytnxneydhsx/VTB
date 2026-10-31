@@ -14,6 +14,16 @@ namespace vtb {
 
 class Live2DRenderSession;
 
+class EmbeddedLive2DApplicationConfig {
+public:
+	String live2d_model;
+	String rtsp_url;
+	int output_width = 0;
+	int output_height = 0;
+	int output_fps = 0;
+	int total_frames = 0;
+};
+
 class EmbeddedLive2DApplication final {
 public:
 	EmbeddedLive2DApplication();
@@ -24,7 +34,7 @@ public:
 	EmbeddedLive2DApplication(EmbeddedLive2DApplication &&) = delete;
 	EmbeddedLive2DApplication &operator=(EmbeddedLive2DApplication &&) = delete;
 
-	Error initialize_from_environment();
+	Error initialize(const EmbeddedLive2DApplicationConfig &p_config);
 	Error submit_live2d_frame(
 			const Live2DParameters &p_parameters,
 			float p_view_zoom,
@@ -64,6 +74,8 @@ private:
 	int output_height_ = 1080;
 	int output_fps_ = 30;
 	int total_frames_ = 0;
+	String live2d_model_;
+	String rtsp_url_;
 	uint64_t maximum_parameter_age_ns_ = 150000000ULL;
 	bool has_pending_parameters_ = false;
 	bool initialized_ = false;

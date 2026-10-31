@@ -128,4 +128,22 @@ std::string fourcc_to_string(std::uint32_t fourcc) {
     return value;
 }
 
+std::uint32_t fourcc_from_string(const std::string& value) {
+    if (value.size() != 4U) {
+        throw std::invalid_argument(
+            "V4L2 pixel format must contain exactly four characters");
+    }
+    return static_cast<std::uint32_t>(
+        static_cast<unsigned char>(value[0])) |
+        (static_cast<std::uint32_t>(
+             static_cast<unsigned char>(value[1]))
+         << 8U) |
+        (static_cast<std::uint32_t>(
+             static_cast<unsigned char>(value[2]))
+         << 16U) |
+        (static_cast<std::uint32_t>(
+             static_cast<unsigned char>(value[3]))
+         << 24U);
+}
+
 }  // namespace vtb

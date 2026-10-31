@@ -25,5 +25,6 @@ private:
 };
 
 std::string fourcc_to_string(std::uint32_t fourcc);
+std::uint32_t fourcc_from_string(const std::string& value);
 
 }  // namespace vtb
