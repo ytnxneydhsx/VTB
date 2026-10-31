@@ -1,7 +1,7 @@
 # VTB-owned LibGodot runtime
 
 This directory contains the product path where `vtb-live2d` owns the process
-entry point, frame clock, Godot iteration, face tracking, Live2D rendering,
+entry point, frame clock, face tracking, Godot iteration, Live2D rendering,
 DMA-BUF capture, RGA/MPP encoding, RTSP output, and shutdown order.
 
 The product bootstrap project contains one empty scene and no GDScript. C++
@@ -23,9 +23,10 @@ x11=yes wayland=no vulkan=no opengl3=yes use_static_cpp=no
 
 `disable_path_overrides=no` is required because the host deliberately passes a
 separate resource root with `--path`. The host CMake target is enabled with
-`VTB_ENABLE_EMBEDDED_GODOT=ON`, `VTB_GODOT_SOURCE_ROOT`, and
+`VTB_ENABLE_EMBEDDED_GODOT=ON`, `VTB_ENABLE_OPENCV_FACE_PIPELINE=ON`,
+`VTB_ENABLE_RKNN_FACE=ON`, `VTB_GODOT_SOURCE_ROOT`, and
 `VTB_LIBGODOT_LIBRARY`. `VTB_EMBEDDED_RPATH_LINK` contains the pinned OpenCV,
-FFmpeg, Rockchip, and RKNN ARM64 library directories used only while linking.
+FFmpeg, Rockchip, and RKNN ARM64 library directories used while linking the host.
 The resulting executable has an `$ORIGIN` runtime search path.
 
 The Godot module is installed from
@@ -34,8 +35,10 @@ The Godot module is installed from
 - `OPENVT_VTB_SOURCE_ROOT`
 - `OPENVT_BOARD_SYSROOT`
 - `OPENVT_FFMPEG_SYSROOT`
-- `OPENVT_OPENCV_ROOT`
-- `OPENVT_RKNN_ROOT`
+
+OpenCV and RKNN are host executable dependencies. They are absent from the
+LibGodot module source list and link list. The module compiles only the
+`Live2DParameters` value object; `Live2DFaceMapper` remains on the host side.
 
 ## Deployment layout
 

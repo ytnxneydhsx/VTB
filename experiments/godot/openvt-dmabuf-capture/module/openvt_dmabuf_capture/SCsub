@@ -1,8 +1,6 @@
 #!/usr/bin/env python
 
 import os
-import shlex
-import subprocess
 
 Import("env")
 Import("env_modules")
@@ -10,47 +8,6 @@ Import("env_modules")
 board_sysroot = os.environ["OPENVT_BOARD_SYSROOT"]
 ffmpeg_sysroot = os.environ["OPENVT_FFMPEG_SYSROOT"]
 vtb_source_root = os.environ["OPENVT_VTB_SOURCE_ROOT"]
-opencv_root = os.environ["OPENVT_OPENCV_ROOT"]
-rknn_root = os.environ["OPENVT_RKNN_ROOT"]
-
-pkg_config_environment = os.environ.copy()
-pkg_config_environment["PKG_CONFIG_SYSROOT_DIR"] = opencv_root
-pkg_config_environment["PKG_CONFIG_LIBDIR"] = (
-    opencv_root + "/usr/lib/aarch64-linux-gnu/pkgconfig"
-)
-pkg_config_environment.pop("PKG_CONFIG_PATH", None)
-opencv_cflags = subprocess.check_output(
-    ["pkg-config", "--cflags", "opencv5"],
-    env=pkg_config_environment,
-    text=True,
-).strip()
-opencv_libs = subprocess.check_output(
-    ["pkg-config", "--libs", "opencv5"],
-    env=pkg_config_environment,
-    text=True,
-).strip()
-
-opencv_library_paths = []
-opencv_link_items = []
-opencv_link_flags = []
-for token in shlex.split(opencv_libs):
-    if token.startswith("-L"):
-        opencv_library_paths.append(token[2:])
-        continue
-    if token.startswith("-l"):
-        library_name = token[2:]
-        static_archive = None
-        for library_path in opencv_library_paths:
-            candidate = os.path.join(library_path, "lib" + library_name + ".a")
-            if os.path.isfile(candidate):
-                static_archive = candidate
-                break
-        if static_archive is not None:
-            opencv_link_items.append(env.File(static_archive))
-        else:
-            opencv_link_items.append(library_name)
-        continue
-    opencv_link_flags.append(token)
 
 env_openvt = env_modules.Clone()
 env_openvt.Append(
@@ -60,30 +17,20 @@ env_openvt.Append(
         board_sysroot + "/usr/include/rga",
         ffmpeg_sysroot + "/usr/include",
         ffmpeg_sysroot + "/usr/include/aarch64-linux-gnu",
-        rknn_root + "/usr/include/rknn",
         vtb_source_root + "/include",
         Dir(".").abspath,
         vtb_source_root + "/experiments/godot/embedded-runtime/module",
     ]
 )
-env_openvt.MergeFlags(shlex.split(opencv_cflags))
 env_openvt.Append(CXXFLAGS=["-fexceptions"])
 
-env_openvt.add_source_files(env.modules_sources, "*.cpp")
+env_openvt.add_source_files(env.modules_sources, "openvt_dmabuf_capture.cpp")
+env_openvt.add_source_files(env.modules_sources, "register_types.cpp")
 env_openvt.add_source_files(env.modules_sources, vtb_source_root + "/src/instrumentation/timer.cpp")
 env_openvt.add_source_files(env.modules_sources, vtb_source_root + "/src/output/media.cpp")
 env_openvt.add_source_files(env.modules_sources, vtb_source_root + "/src/output/output_manager.cpp")
 env_openvt.add_source_files(env.modules_sources, vtb_source_root + "/src/output/rtsp_output.cpp")
-env_openvt.add_source_files(env.modules_sources, vtb_source_root + "/src/video/frame.cpp")
-env_openvt.add_source_files(env.modules_sources, vtb_source_root + "/src/video/latest_frame_slot.cpp")
-env_openvt.add_source_files(env.modules_sources, vtb_source_root + "/src/video/opencv_video_source.cpp")
-env_openvt.add_source_files(env.modules_sources, vtb_source_root + "/src/face/model_input.cpp")
-env_openvt.add_source_files(env.modules_sources, vtb_source_root + "/src/face/cpu_image_transformer.cpp")
-env_openvt.add_source_files(env.modules_sources, vtb_source_root + "/src/face/face_pipeline.cpp")
-env_openvt.add_source_files(env.modules_sources, vtb_source_root + "/src/face/rknn_face_models.cpp")
-env_openvt.add_source_files(env.modules_sources, vtb_source_root + "/src/face/openseeface_geometry_estimator.cpp")
-env_openvt.add_source_files(env.modules_sources, vtb_source_root + "/src/live2d/live2d_face_mapper.cpp")
-env_openvt.add_source_files(env.modules_sources, vtb_source_root + "/src/pipeline/pipeline_runtime.cpp")
+env_openvt.add_source_files(env.modules_sources, vtb_source_root + "/src/live2d/live2d_parameters.cpp")
 env_openvt.add_source_files(
     env.modules_sources,
     vtb_source_root + "/experiments/godot/embedded-runtime/module/openvt_libgodot_bridge.cpp",
@@ -98,20 +45,12 @@ env_openvt.add_source_files(
 )
 
 env.Append(
-    LIBPATH=opencv_library_paths,
-    LIBS=opencv_link_items,
-    LINKFLAGS=opencv_link_flags,
-)
-
-env.Append(
     LIBPATH=[
         board_sysroot + "/usr/lib/aarch64-linux-gnu",
         ffmpeg_sysroot + "/usr/lib/aarch64-linux-gnu",
-        rknn_root + "/usr/lib/aarch64-linux-gnu",
     ],
-    LIBS=["rga", "rockchip_mpp", "avformat", "avcodec", "avutil", "rknnrt"],
+    LIBS=["rga", "rockchip_mpp", "avformat", "avcodec", "avutil"],
     LINKFLAGS=[
-        "-Wl,-rpath-link," + opencv_root + "/usr/lib/aarch64-linux-gnu",
         "-Wl,-rpath-link," + ffmpeg_sysroot + "/usr/lib/aarch64-linux-gnu",
         "-Wl,-rpath-link," + board_sysroot + "/usr/lib/aarch64-linux-gnu",
         "-Wl,--allow-shlib-undefined",

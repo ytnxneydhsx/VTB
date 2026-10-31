@@ -7,10 +7,8 @@
 #include <string>
 
 #include "core/string/print_string.h"
-#include "core/variant/dictionary.h"
 #include "live2d_render_session.h"
 #include "openvt_dmabuf_capture.h"
-#include "openvt_face_tracking_runtime.h"
 
 namespace vtb {
 
@@ -23,14 +21,6 @@ String required_environment(const char *p_name, String &r_error) {
 	if (value == nullptr || value[0] == '\0') {
 		r_error = String::utf8(p_name) + " is required";
 		return String();
-	}
-	return String::utf8(value);
-}
-
-String optional_environment(const char *p_name, const char *p_default) {
-	const char *value = std::getenv(p_name);
-	if (value == nullptr || value[0] == '\0') {
-		return String::utf8(p_default);
 	}
 	return String::utf8(value);
 }
@@ -57,50 +47,6 @@ bool integer_environment(
 	}
 	r_value = static_cast<int>(parsed);
 	return true;
-}
-
-bool floating_environment(
-		const char *p_name,
-		double p_default,
-		double &r_value,
-		String &r_error) {
-	const char *text = std::getenv(p_name);
-	if (text == nullptr || text[0] == '\0') {
-		r_value = p_default;
-		return true;
-	}
-	errno = 0;
-	char *end = nullptr;
-	const double parsed = std::strtod(text, &end);
-	if (errno == ERANGE || end == text || end == nullptr || end[0] != '\0' ||
-			!std::isfinite(parsed)) {
-		r_error = String::utf8(p_name) + " must be a finite number";
-		return false;
-	}
-	r_value = parsed;
-	return true;
-}
-
-float dictionary_float(const Dictionary &p_dictionary, const char *p_key, float p_default) {
-	const String key = String::utf8(p_key);
-	if (!p_dictionary.has(key)) {
-		return p_default;
-	}
-	return static_cast<float>(p_dictionary[key]);
-}
-
-Live2DParameters parameters_from_dictionary(const Dictionary &p_parameters) {
-	return Live2DParameters(
-			dictionary_float(p_parameters, "ParamAngleX", 0.0F),
-			dictionary_float(p_parameters, "ParamAngleY", 0.0F),
-			dictionary_float(p_parameters, "ParamAngleZ", 0.0F),
-			dictionary_float(p_parameters, "ParamBodyAngleX", 0.0F),
-			dictionary_float(p_parameters, "ParamBodyAngleY", 0.0F),
-			dictionary_float(p_parameters, "ParamBodyAngleZ", 0.0F),
-			dictionary_float(p_parameters, "ParamEyeLOpen", 1.0F),
-			dictionary_float(p_parameters, "ParamEyeROpen", 1.0F),
-			dictionary_float(p_parameters, "ParamMouthOpenY", 0.0F),
-			dictionary_float(p_parameters, "ParamMouthForm", 0.0F));
 }
 
 float approach(float p_current, float p_target, float p_alpha) {
@@ -155,9 +101,6 @@ Error EmbeddedLive2DApplication::initialize_from_environment() {
 	if (error == OK) {
 		error = configure_output();
 	}
-	if (error == OK) {
-		error = configure_face_tracking();
-	}
 	if (error != OK) {
 		shutdown();
 		return error;
@@ -206,65 +149,6 @@ Error EmbeddedLive2DApplication::configure_output() {
 	return OK;
 }
 
-Error EmbeddedLive2DApplication::configure_face_tracking() {
-	String error_message;
-	const String source = required_environment("OPENVT_FACE_SOURCE", error_message);
-	const String detector = required_environment("OPENVT_FACE_DETECTOR_MODEL", error_message);
-	const String landmark = required_environment("OPENVT_FACE_LANDMARK_MODEL", error_message);
-	if (!error_message.is_empty()) {
-		return fail(ERR_INVALID_PARAMETER, error_message);
-	}
-	int width = 1280;
-	int height = 720;
-	int fps = 60;
-	int buffers = 4;
-	int calibration_frames = 30;
-	int control_port = 11575;
-	double smoothing_ms = 50.0;
-	double angle_x_sign = -1.0;
-	double angle_y_sign = -1.0;
-	double angle_z_sign = -1.0;
-	if (!integer_environment("OPENVT_FACE_WIDTH", 1280, 1, 8192, width, error_message) ||
-			!integer_environment("OPENVT_FACE_HEIGHT", 720, 1, 8192, height, error_message) ||
-			!integer_environment("OPENVT_FACE_FPS", 60, 1, 240, fps, error_message) ||
-			!integer_environment("OPENVT_FACE_BUFFERS", 4, 2, 64, buffers, error_message) ||
-			!integer_environment(
-					"OPENVT_FACE_CALIBRATION_FRAMES", 30, 1, 10000, calibration_frames, error_message) ||
-			!integer_environment(
-					"OPENVT_LIVE2D_CONTROL_PORT", 11575, 1, 65535, control_port, error_message) ||
-			!floating_environment("OPENVT_FACE_SMOOTHING_MS", 50.0, smoothing_ms, error_message) ||
-			!floating_environment("OPENVT_FACE_ANGLE_X_SIGN", -1.0, angle_x_sign, error_message) ||
-			!floating_environment("OPENVT_FACE_ANGLE_Y_SIGN", -1.0, angle_y_sign, error_message) ||
-			!floating_environment("OPENVT_FACE_ANGLE_Z_SIGN", -1.0, angle_z_sign, error_message)) {
-		return fail(ERR_INVALID_PARAMETER, error_message);
-	}
-
-	face_tracking_.instantiate();
-	Error error = face_tracking_->configure(
-			source,
-			width,
-			height,
-			fps,
-			buffers,
-			detector,
-			landmark,
-			calibration_frames,
-			smoothing_ms,
-			angle_x_sign,
-			angle_y_sign,
-			angle_z_sign,
-			optional_environment("OPENVT_LIVE2D_CONTROL_ADDRESS", "192.168.77.2"),
-			control_port,
-			optional_environment("OPENVT_LIVE2D_CONTROL_ORIGIN", "http://192.168.77.1:8900"));
-	if (error == OK) {
-		error = face_tracking_->start();
-	}
-	if (error != OK) {
-		return fail(error, "Face tracking start failed: " + face_tracking_->get_last_error());
-	}
-	return OK;
-}
-
 Error EmbeddedLive2DApplication::prepare_frame(uint64_t p_monotonic_timestamp_ns) {
 	if (!initialized_ || render_session_ == nullptr) {
 		return fail(ERR_UNCONFIGURED, "Embedded Live2D application is not initialized");
@@ -272,49 +156,73 @@ Error EmbeddedLive2DApplication::prepare_frame(uint64_t p_monotonic_timestamp_ns
 	if (output_finished_) {
 		return OK;
 	}
-	return apply_latest_face_parameters(p_monotonic_timestamp_ns);
+	return apply_pending_parameters(p_monotonic_timestamp_ns);
 }
 
-Error EmbeddedLive2DApplication::apply_latest_face_parameters(uint64_t p_monotonic_timestamp_ns) {
-	Dictionary packet = face_tracking_->take_latest();
-	if (packet.is_empty()) {
+Error EmbeddedLive2DApplication::submit_live2d_frame(
+		const Live2DParameters &p_parameters,
+		float p_view_zoom,
+		float p_view_offset_x,
+		float p_view_offset_y,
+		uint64_t p_produced_timestamp_ns,
+		uint64_t p_generation) {
+	if (!initialized_ || render_session_ == nullptr) {
+		return fail(ERR_UNCONFIGURED, "Embedded Live2D application is not initialized");
+	}
+	if (!std::isfinite(p_view_zoom) || !std::isfinite(p_view_offset_x) ||
+			!std::isfinite(p_view_offset_y) || p_view_zoom <= 0.0F ||
+			p_produced_timestamp_ns == 0 || p_generation == 0) {
+		return fail(ERR_INVALID_PARAMETER, "Live2D frame input is invalid");
+	}
+	pending_parameters_ = p_parameters;
+	pending_view_zoom_ = p_view_zoom;
+	pending_view_offset_x_ = p_view_offset_x;
+	pending_view_offset_y_ = p_view_offset_y;
+	pending_produced_timestamp_ns_ = p_produced_timestamp_ns;
+	pending_generation_ = p_generation;
+	has_pending_parameters_ = true;
+	return OK;
+}
+
+Error EmbeddedLive2DApplication::apply_pending_parameters(uint64_t p_monotonic_timestamp_ns) {
+	if (!has_pending_parameters_) {
 		return apply_fallback_parameters(p_monotonic_timestamp_ns);
 	}
-	const int64_t age_usec = packet.get("age_usec", -1);
-	if (age_usec < 0 || static_cast<uint64_t>(age_usec) * 1000ULL > maximum_parameter_age_ns_) {
+	has_pending_parameters_ = false;
+	uint64_t age_ns = 0;
+	if (p_monotonic_timestamp_ns >= pending_produced_timestamp_ns_) {
+		age_ns = p_monotonic_timestamp_ns - pending_produced_timestamp_ns_;
+	}
+	if (age_ns > maximum_parameter_age_ns_) {
 		return apply_fallback_parameters(p_monotonic_timestamp_ns);
 	}
-	Dictionary parameters = packet.get("parameters", Dictionary());
-	last_parameters_ = parameters_from_dictionary(parameters);
+	last_parameters_ = pending_parameters_;
 	Error error = render_session_->submit_parameters(last_parameters_);
 	if (error != OK) {
 		return fail(error, "Live2D parameter submission failed: " + render_session_->last_error());
 	}
-	Dictionary view = packet.get("view", Dictionary());
-	if (!view.is_empty()) {
-		Live2DRenderViewState view_state(
-				dictionary_float(view, "zoom", 1.0F),
-				dictionary_float(view, "offset_x", 0.0F),
-				dictionary_float(view, "offset_y", 0.0F));
-		error = render_session_->set_view_state(view_state);
-		if (error != OK) {
-			return fail(error, "Live2D view update failed: " + render_session_->last_error());
-		}
+	Live2DRenderViewState view_state(
+			pending_view_zoom_, pending_view_offset_x_, pending_view_offset_y_);
+	error = render_session_->set_view_state(view_state);
+	if (error != OK) {
+		return fail(error, "Live2D view update failed: " + render_session_->last_error());
 	}
-	last_parameter_timestamp_ns_ = p_monotonic_timestamp_ns;
-	last_generation_ = static_cast<uint64_t>(static_cast<int64_t>(packet.get("generation", 0)));
+	last_parameter_update_timestamp_ns_ = p_monotonic_timestamp_ns;
+	last_generation_ = pending_generation_;
 	return OK;
 }
 
 Error EmbeddedLive2DApplication::apply_fallback_parameters(uint64_t p_monotonic_timestamp_ns) {
 	float delta_seconds = 1.0F / static_cast<float>(output_fps_);
-	if (last_parameter_timestamp_ns_ > 0 && p_monotonic_timestamp_ns > last_parameter_timestamp_ns_) {
+	if (last_parameter_update_timestamp_ns_ > 0 &&
+			p_monotonic_timestamp_ns > last_parameter_update_timestamp_ns_) {
 		delta_seconds = static_cast<float>(
-				static_cast<double>(p_monotonic_timestamp_ns - last_parameter_timestamp_ns_) / 1000000000.0);
+				static_cast<double>(p_monotonic_timestamp_ns - last_parameter_update_timestamp_ns_) /
+				1000000000.0);
 	}
 	const float alpha = static_cast<float>(1.0 - std::exp(-delta_seconds / kFallbackTauSeconds));
 	last_parameters_ = relaxed_parameters(last_parameters_, alpha);
-	last_parameter_timestamp_ns_ = p_monotonic_timestamp_ns;
+	last_parameter_update_timestamp_ns_ = p_monotonic_timestamp_ns;
 	const Error error = render_session_->submit_parameters(last_parameters_);
 	if (error != OK) {
 		return fail(error, "Live2D fallback submission failed: " + render_session_->last_error());
@@ -356,14 +264,6 @@ Error EmbeddedLive2DApplication::complete_frame() {
 
 Error EmbeddedLive2DApplication::shutdown() {
 	Error result = OK;
-	if (face_tracking_.is_valid()) {
-		const Error face_error = face_tracking_->stop();
-		if (face_error != OK) {
-			result = face_error;
-			last_error_ = "Face tracking shutdown failed: " + face_tracking_->get_last_error();
-		}
-		face_tracking_.unref();
-	}
 	if (capture_.is_valid()) {
 		const Error capture_error = capture_->finish();
 		if (capture_error != OK && result == OK) {

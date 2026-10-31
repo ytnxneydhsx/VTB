@@ -2,8 +2,8 @@
 
 ## 当前结构
 
-实时 Live2D 产品路径由一个定制 Godot 进程承载。Python、JSON 和 UDP 已从该
-运行路径移除：
+实时 Live2D 产品路径由 `vtb-live2d` 主程序统一编排。摄像头、RKNN、几何估计和
+参数映射位于 LibGodot 外部；Godot 只接收已经生成的 Live2D 参数帧：
 
 ```text
 OpenCV V4L2 camera source
@@ -12,15 +12,17 @@ OpenCV V4L2 camera source
   → RKNN 66-point landmark model (NPU core 1)
   → OpenSeeFace-compatible C++ PnP / expression features
   → C++ Live2DFaceMapper
-  → capacity-one parameter snapshot
-  → Godot main thread
+  → FaceTrackingService capacity-one parameter snapshot
+  → openvt_libgodot_application_submit_live2d_frame()
+  → Godot main thread parameter input
   → Ayagami model parameters
   → SubViewport → DMA-BUF → RGA → MPP H.264
   → OutputManager → RTSP
 ```
 
-Godot/Ayagami、渲染提交和媒体输出继续使用已经验证的实现。人脸输入、推理、
-几何、表情、校准、参数映射和浏览器控制口都编入同一个 Godot ARM64 可执行文件。
+Godot/Ayagami、渲染提交和媒体输出继续使用已经验证的实现。`vtb-live2d` 可执行文件
+直接链接视频输入、OpenCV、RKNN 和 `FaceTrackingService`；LibGodot 共享库不再编译
+摄像头、RKNN 模型、几何估计和人脸管线源码。
 
 ## 模块边界
 
@@ -30,12 +32,17 @@ Godot/Ayagami、渲染提交和媒体输出继续使用已经验证的实现。�
 - `OpenSeeFaceGeometryEstimator`：保留 70 点模板、14 点 PnP、Euler 角、66 点反投影和
   Remedian 表情特征语义。
 - `Live2DFaceMapper`：中立姿态校准、限幅、参数映射和按单调时钟计算的一阶平滑。
-- `OpenVTFaceTrackingRuntime`：Godot 内置类，负责上述对象的生命周期、容量一的
-  参数快照以及 HTTP 控制线程。
-- `render_dmabuf_video.gd`：只在 Godot 主线程取最新快照并写 Ayagami 参数。
+- `FaceTrackingService`：纯 C++ 服务，接收独立创建的 `VideoSource` 和 `FacePipeline`，
+  管理容量一的参数快照、校准和 HTTP 控制线程。
+- `VtbApplication`：分别创建视频输入与模型管线，读取最新参数快照并提交给 Godot。
+- `Live2DParameters`：独立的十参数值对象；Godot 只编译这个数据类型，不编译
+  `Live2DFaceMapper`。
+- `OpenVTLive2DFrameInput`：宿主与 LibGodot 之间的固定数值帧对象，只包含十个
+  Live2D 参数、取景状态、结果时间戳和 generation；通过 C linkage 函数提交。
+- `EmbeddedLive2DApplication`：Godot 内部渲染/输出编排，只消费参数帧并驱动 Ayagami。
 
-推理回调不访问 Godot 对象。它只更新纯 C++ mailbox；`Dictionary` 在 Godot 主线程
-调用 `take_latest()` 时构造。
+推理回调不访问 Godot 对象。它只更新纯 C++ mailbox；宿主主线程通过固定桥接函数
+提交数值字段，跨边界不再传递 Godot `Dictionary`、摄像头对象或模型对象。
 
 ## 参数映射
 
@@ -51,12 +58,12 @@ Godot/Ayagami、渲染提交和媒体输出继续使用已经验证的实现。�
 | `mouth_open` | `ParamMouthOpenY` | 归一化到 0～1 |
 | `mouth_wide` | `ParamMouthForm` | 限幅 -1～1 |
 
-映射结果默认使用 50 ms 时间常数。参数快照超过 150 ms 后，GDScript 以 250 ms
-时间常数把模型恢复到默认值。
+映射结果默认使用 50 ms 时间常数。参数快照超过 150 ms 后，Godot 内部的
+`EmbeddedLive2DApplication` 以 250 ms 时间常数把模型恢复到默认值。
 
 ## 启动
 
-运行脚本只启动一个 Godot 进程：
+运行脚本启动一个 `vtb-live2d` 进程，Godot 作为进程内 LibGodot 实例运行：
 
 ```bash
 OPENVT_FACE_SOURCE=/dev/video0 \
@@ -67,7 +74,7 @@ OPENVT_FACE_BUFFERS=4 \
 OPENVT_FACE_DETECTOR_MODEL=/home/huangnv/VTB/models/openseeface/mnv3_detection_fp16.rknn \
 OPENVT_FACE_LANDMARK_MODEL=/home/huangnv/VTB/models/openseeface/lm_model3_fp16.rknn \
 OPENVT_LIVE2D_TOTAL_FRAMES=0 \
-./experiments/godot/openvt-dmabuf-capture/run_render_on_rk.sh
+./experiments/godot/embedded-runtime/run_on_rk.sh
 ```
 
 摄像头输入默认请求 MJPEG。OpenCV 构建启用了 V4L2、JPEG/PNG 和图像序列；固定
@@ -89,7 +96,7 @@ FFmpeg sysroot 当前缺少 `libswscale`，因此这个构建不承诺压缩视�
 
 ## 构建依赖
 
-Godot 内置模块除原有 Rockchip/FFmpeg sysroot 外，还需要：
+主程序的 CMake 构建需要 OpenCV 与 RKNN sysroot：
 
 ```bash
 export OPENVT_VTB_SOURCE_ROOT=/path/to/VTB
@@ -99,12 +106,11 @@ export OPENVT_OPENCV_ROOT=/path/to/arm64-opencv-sysroot
 export OPENVT_RKNN_ROOT=/path/to/arm64-rknn-sysroot
 ```
 
-`SCsub` 从 ARM64 OpenCV `opencv5.pc` 读取共享库链接参数，并链接板端匹配的
-`librknnrt.so`。Godot 与 OpenCV 都内建 JPEG/PNG 实现，因此最终 Godot 使用
-OpenCV shared 构建隔离两组图像编解码符号；运行脚本通过
-`OPENVT_OPENCV_LIB_DIR` 指定部署后的 OpenCV `.so` 目录。
+Godot 内置模块只需要 `OPENVT_VTB_SOURCE_ROOT`、`OPENVT_BOARD_SYSROOT` 和
+`OPENVT_FFMPEG_SYSROOT`。OpenCV 与 `librknnrt.so` 由 `vtb-live2d` 宿主链接并在部署
+目录提供运行库；它们不再成为 LibGodot 模块依赖。
 
-2026-10-30 已在 RK3588 完成实机验证。摄像头路径连续处理 300 个渲染帧，
+2026-10-30 的拆分前路径已在 RK3588 完成实机验证。摄像头路径连续处理 300 个渲染帧，
 MPP 编码和 RTSP 写出均为 300，丢弃和错误均为 0，渲染吞吐为 29.788 FPS。
 已知正脸图片序列路径完成 C++ RKNN 检测、关键点、PnP、30 帧校准和 Live2D
 参数更新，最终健康状态为 `tracking_valid=true`、`calibrated=true`、置信度
@@ -120,8 +126,9 @@ MPP 编码和 RTSP 写出均为 300，丢弃和错误均为 0，渲染吞吐为 
 该数值不包含摄像头曝光、编码、网络和浏览器解码，不能当作端到端延迟。取证完成后
 用 `SIGTERM` 停止持续运行，退出码 143 来自本次主动清理。
 
-当前仍需完成 C++/Python 数值精度对照、长时间稳定性和摄像头到浏览器的关联时间戳
-端到端延迟测量。
+本次宿主/LibGodot 边界拆分已经通过 ARM64 交叉编译和动态依赖检查，尚未在
+RK3588 上运行。仍需完成新边界的板端回归、C++/Python 数值精度对照、长时间
+稳定性和摄像头到浏览器的关联时间戳端到端延迟测量。
 
 ## Python 文件的定位
 

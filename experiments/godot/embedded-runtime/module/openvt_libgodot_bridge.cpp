@@ -1,5 +1,6 @@
 #include "openvt_libgodot_bridge.h"
 
+#include <exception>
 #include <memory>
 #include <string>
 
@@ -76,6 +77,44 @@ extern "C" int openvt_libgodot_application_initialize(void) {
 	}
 	application_error.clear();
 	return static_cast<int>(OK);
+}
+
+extern "C" int openvt_libgodot_application_submit_live2d_frame(
+		const OpenVTLive2DFrameInput *p_input) {
+	if (application == nullptr) {
+		application_error = "Embedded Live2D application is unavailable";
+		return static_cast<int>(ERR_UNCONFIGURED);
+	}
+	if (p_input == nullptr) {
+		application_error = "Live2D frame input is null";
+		return static_cast<int>(ERR_INVALID_PARAMETER);
+	}
+	try {
+		const vtb::Live2DParameters parameters(
+				p_input->angle_x,
+				p_input->angle_y,
+				p_input->angle_z,
+				p_input->body_angle_x,
+				p_input->body_angle_y,
+				p_input->body_angle_z,
+				p_input->left_eye_open,
+				p_input->right_eye_open,
+				p_input->mouth_open,
+				p_input->mouth_form);
+		return remember_application_error(application->submit_live2d_frame(
+				parameters,
+				p_input->view_zoom,
+				p_input->view_offset_x,
+				p_input->view_offset_y,
+				p_input->produced_timestamp_ns,
+				p_input->generation));
+	} catch (const std::exception &error) {
+		application_error = error.what();
+		return static_cast<int>(ERR_INVALID_PARAMETER);
+	} catch (...) {
+		application_error = "Live2D frame input conversion failed";
+		return static_cast<int>(ERR_INVALID_PARAMETER);
+	}
 }
 
 extern "C" int openvt_libgodot_application_prepare_frame(uint64_t p_monotonic_timestamp_ns) {

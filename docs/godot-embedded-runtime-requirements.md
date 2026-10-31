@@ -14,36 +14,36 @@
 
 ## 2. 设计动机
 
-### 2.1 当前链路
+### 2.1 改造前链路
 
-当前产品链路由定制 Godot 可执行文件拥有进程入口和主循环：
+改造前由定制 Godot 可执行文件拥有进程入口和主循环：
 
 ```text
 Godot main()
   → 加载 project.godot 和 GDScript 场景
   → render_dmabuf_video.gd 负责应用编排
-  → C++ OpenVTFaceTrackingRuntime
   → Rust Ayagami GDExtension
   → Godot RenderingServer / SubViewport
   → C++ OpenVTDmaBufCapture
   → RGBA DMA-BUF → RGA → MPP → OutputManager → RTSP
 ```
 
-当前实现已经证明人脸跟踪、Ayagami、Godot、Mali-G610、RGA、MPP 和 WebRTC 可以在
-一个进程及其输出链路中工作。当前应用生命周期仍由 Godot 场景和 GDScript 驱动，
-VTB C++ 代码以 Godot 内置模块的形式被调用。
+该链路已经证明人脸跟踪、Ayagami、Godot、Mali-G610、RGA、MPP 和 WebRTC 可以在
+一个进程及其输出链路中工作。它保留为历史验证基线。
 
-### 2.2 目标链路
+### 2.2 当前链路
 
-改造后由 VTB 自己的 C++ `main()` 拥有应用生命周期：
+当前由 VTB 自己的 C++ `main()` 拥有应用生命周期：
 
 ```text
 VTB C++ main()
   → VtbApplication
+  → VideoSource + FacePipeline + FaceTrackingService
+  → Live2D parameter frame C ABI
   → LibGodotAdapter::create_instance()
   → GodotRuntime::start()
   → C++ 创建 SceneTree、SubViewport 和 Ayagami 模型
-  → C++ 每帧提交 Live2D 参数并驱动 Godot iteration
+  → C++ 每帧向 Godot 提交已完成的 Live2D 参数并驱动 iteration
   → Godot RenderingServer / Mali-G610 完成离屏绘制
   → C++ 取得已完成帧的 GPU 纹理
   → RGBA DMA-BUF → RGA → MPP → OutputManager
@@ -180,7 +180,11 @@ VtbApplication
 - 决定停止条件和退出码；
 - 按逆序关闭所有模块。
 
-`VtbApplication` 不包含具体 RKNN、Godot、RGA、MPP 或协议实现。
+`VtbApplication` 作为组合根选择具体的视频、RKNN、Godot 和输出实现，但不承载这些
+组件内部的采集、推理、渲染、编码或协议算法。
+
+视频输入和模型管线通过独立工厂函数构造，并以 `VideoSource`、`FacePipeline` 和
+`FaceTrackingService` 三个边界组合。`VtbApplication` 只拥有并排序它们的生命周期。
 
 ### 6.2 `GodotRuntime`
 
@@ -193,6 +197,10 @@ VtbApplication
 - 驱动一次 Godot iteration；
 - 暴露已经完成的渲染帧；
 - 有序销毁 Godot 对象并清理全局单例。
+
+Godot 输入接口只接受 `OpenVTLive2DFrameInput`。该结构包含最终 Live2D 参数、取景
+状态、单调时钟结果时间戳和 generation；接口不接受摄像头句柄、模型路径、关键点、
+RKNN context 或 `FacePipeline` 对象。
 
 它拥有系统资源和 Godot 全局状态，复制和移动操作必须明确删除。
 

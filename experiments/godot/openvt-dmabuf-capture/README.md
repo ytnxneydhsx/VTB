@@ -60,48 +60,33 @@ Live2D H.264 使用 MPP FIXQP、QP 18，以固定量化质量替代 CBR 的目�
 编码包到 `MediaPacket`、再到 FFmpeg `AVPacket` 的内存复制，也不保证网络断连时零丢帧。
 是否继续优化复制次数，以端到端 P95/P99、CPU、队列深度和丢帧数为依据。
 
-内置模块构建还需要提供 VTB 源码、FFmpeg、OpenCV 和 RKNN sysroot：
+内置模块构建需要提供 VTB 源码、Rockchip 板端 sysroot 和 FFmpeg sysroot：
 
 ```bash
 export OPENVT_VTB_SOURCE_ROOT=/path/to/VTB
 export OPENVT_BOARD_SYSROOT=/path/to/board-sysroot
 export OPENVT_FFMPEG_SYSROOT=/path/to/ffmpeg-sysroot
-export OPENVT_OPENCV_ROOT=/path/to/arm64-opencv-sysroot
-export OPENVT_RKNN_ROOT=/path/to/arm64-rknn-sysroot
 ```
 
-Godot 最终链接使用 OpenCV shared sysroot，避免与 Godot 内建 JPEG/PNG 静态实现
-发生重复符号。部署后用 `OPENVT_OPENCV_LIB_DIR` 指向 OpenCV `.so` 所在目录。
+该 Godot 模块只负责 Live2D 渲染帧的 DMA-BUF、RGA、MPP 和 RTSP 输出。OpenCV 与
+RKNN 已移到 `vtb-live2d` 宿主，不进入 LibGodot 模块的源码和链接列表。
 
-## C++ OpenSeeFace 实时参数输入
+## 与实时人脸输入的边界
 
-场景可以在同一个 Godot 进程中启动 C++ 人脸运行时。未设置
-`OPENVT_FACE_SOURCE` 时继续运行原有固定动画。启用方式：
+`run_render_on_rk.sh` 保留为 Godot-hosted 固定动画和媒体输出对照路径。实时人脸产品
+路径使用 `experiments/godot/embedded-runtime/run_on_rk.sh` 启动 `vtb-live2d`：
 
 ```bash
 OPENVT_FACE_SOURCE=/dev/video0 \
 OPENVT_FACE_DETECTOR_MODEL=/home/huangnv/VTB/models/openseeface/mnv3_detection_fp16.rknn \
 OPENVT_FACE_LANDMARK_MODEL=/home/huangnv/VTB/models/openseeface/lm_model3_fp16.rknn \
 OPENVT_LIVE2D_TOTAL_FRAMES=0 \
-OPENVT_RTSP_URL=rtsp://127.0.0.1:8554/live2d \
-OPENVT_DMABUF_OUTPUT_DIR=/home/huangnv/openvt-live2d-tracking-run-01 \
-./experiments/godot/openvt-dmabuf-capture/run_render_on_rk.sh
+./experiments/godot/embedded-runtime/run_on_rk.sh
 ```
 
-运行脚本默认使用
-`/home/huangnv/tools/godot-ayagami-live2d-rtsp-4.7.1/godot-ayagami-live2d-rtsp-4.7.1-linux.arm64`。
-部署到其他目录时通过 `OPENVT_GODOT_BIN` 显式指定，避免误用仍采用文件输出接口的旧 Godot 产物。
-`OPENVT_LIVE2D_TOTAL_FRAMES=0` 表示持续推流；省略时保留 300 帧验证模式。
-
-采集线程和推理线程之间只保留最新帧，C++ mapper 和 Godot 主线程之间只保留
-最新参数快照。参数年龄超过 150 ms 时，角色在 250 ms 时间常数下回到模型默认值。
-完整边界见 [`docs/live2d-face-tracking-bridge.md`](../../../docs/live2d-face-tracking-bridge.md)。
-
-需要采集全链路性能统计时增加 `OPENVT_PROFILE=1`。运行脚本会同时启用
-GDScript 跟踪统计和 Ayagami profiler，并让原生 DMA-BUF 模块输出通过
-`vtb::instrumentation` 聚合的阶段统计。持续模式默认每 300 个渲染帧输出一次
-跟踪窗口，可用 `OPENVT_PROFILE_REPORT_FRAMES` 修改。原生模块的 P50/P95/P99
-窗口固定为最近 4096 个样本，详细阶段和边界见上述桥接文档。
+视频输入、模型推理、校准和控制口由宿主中的纯 C++ `FaceTrackingService` 管理。
+Godot 通过固定 C ABI 只接收最终 Live2D 参数帧。完整边界见
+[`docs/live2d-face-tracking-bridge.md`](../../../docs/live2d-face-tracking-bridge.md)。
 
 ## RK3588 实机结果
 

@@ -139,9 +139,9 @@ VTB_FACE3D_LIVE2D_UDP=127.0.0.1:11574 \
 ./scripts/run-face3d-browser-stream.sh
 ```
 
-新的 Live2D 产品链路不会读取这个 UDP 参数流；它由 Godot 内置 C++ 模块直接
-打开输入并生成 `/live2d` 流。不要让旧诊断进程和 C++ Live2D 进程同时独占同一个
-摄像头节点。
+新的 Live2D 产品链路不会读取这个 UDP 参数流；`vtb-live2d` 宿主独立打开输入、
+执行 RKNN 推理并向 Godot 提交最终参数，然后生成 `/live2d` 流。不要让旧诊断进程
+和 C++ Live2D 进程同时独占同一个摄像头节点。
 在 Mac 上启动左侧人脸检测、右侧 Live2D 的双流监看页：
 
 ```bash
@@ -152,7 +152,7 @@ VTB_FACE3D_LIVE2D_UDP=127.0.0.1:11574 \
 网卡地址或端口变化时，分别设置 `VTB_MONITOR_BIND_ADDRESS` 和
 `VTB_MONITOR_PORT`。
 
-监看页的“以当前正脸校准”按钮会请求 RK 上的 Godot C++ 人脸运行时清空
+监看页的“以当前正脸校准”按钮会请求 RK 上的纯 C++ `FaceTrackingService` 清空
 原中立姿态，再用接下来 30 个有效正脸帧计算新零点。校准期间页面
 显示进度，Live2D 头部参数先回到中立值。控制口默认只绑定
 `192.168.77.2:11575`，浏览器请求来源限制为
@@ -187,10 +187,11 @@ ssh -fN \
 
 ## OpenSeeFace 驱动 Live2D
 
-当前分支把实时人脸路径编入定制 Godot：C++ 完成摄像头输入、RKNN 检测与
-66 点关键点、OpenSeeFace 兼容 PnP/表情、校准和 Live2D 参数映射；Godot 主线程
-读取容量为一的最新参数快照并写入 Ayagami。产品路径不再启动 Python、JSON 或
-UDP 参数桥接，浏览器校准和取景控制也由同一 C++ 进程提供。
+当前分支由 `VtbApplication` 分别创建视频输入和模型管线。纯 C++
+`FaceTrackingService` 完成 RKNN 检测、66 点关键点、OpenSeeFace 兼容 PnP/表情、
+校准和 Live2D 参数映射；Godot 只通过固定 C ABI 接收容量为一的最终参数快照并写入
+Ayagami。产品路径不再启动 Python、JSON 或 UDP 参数桥接，浏览器校准和取景控制由
+宿主 C++ 服务提供。
 
 协议、映射表、启动方式、失效恢复和当前尚未连接的实时推流边界见
 [`docs/live2d-face-tracking-bridge.md`](docs/live2d-face-tracking-bridge.md)。

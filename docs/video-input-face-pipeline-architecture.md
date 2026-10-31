@@ -442,8 +442,9 @@ FaceTrackingResult
 - `OpenSeeFaceGeometryEstimator` 的 14 点 PnP、Euler 角、66 点三维反投影和
   眼睛/嘴部自适应特征。
 - `Live2DFaceMapper` 的中立姿态校准、十个 Ayagami 参数映射和按单调时钟平滑。
-- `OpenVTFaceTrackingRuntime` 将采集、RKNN、几何、映射和控制口编入同一个
-  Godot 进程，并通过容量一的 C++ 参数快照交给 Godot 主线程。
+- `FaceTrackingService` 在 LibGodot 外部组合采集线程、模型线程、映射 mailbox 和
+  控制口；`VtbApplication` 通过固定桥接函数将容量一的最终参数快照交给 Godot
+  主线程。
 
 MPP 摄像头 MJPEG 解码、RGA 模型预处理和 DMA-BUF 跨组件零拷贝仍属于后续按
 测量引入的硬件优化。当前 C++ Live2D 主路径使用 OpenCV V4L2 解码和 CPU
@@ -465,10 +466,11 @@ MPP 摄像头 MJPEG 解码、RGA 模型预处理和 DMA-BUF 跨组件零拷贝�
 - RK3588 设备上的 DMA-BUF 缓冲区生命周期和摄像头到浏览器关联时间戳延迟验证。
 
 当前基础层、RKNN 模型层、OpenCV PnP/输入层和 Live2D mapper 使用
-Buildroot/Godot ARM64 GCC 13.2.0 构建。2026-10-30 已在 RK3588 打开摄像头并
+Buildroot/Godot ARM64 GCC 13.2.0 构建。2026-10-30 的拆分前路径已在 RK3588 打开摄像头并
 完成 300 帧 C++ 人脸运行时、Godot/Ayagami、RGA、MPP 和 RTSP 写出验证；另用
 已知正脸图片序列确认 C++ RKNN、PnP、30 帧校准和参数映射进入有效状态。真实
 摄像头真人画面也完成 30/30 校准，置信度为 0.904445；重新标定、视图控制以及
 H.264 WebRTC 浏览器播放均已验证。浏览器连续播放 121.6 秒时共显示 3651 帧、
 丢弃 11 帧且无媒体错误。当前仍未完成 C++/Python 数值精度对照、长时间稳定性和
-带关联时间戳的摄像头到浏览器端到端延迟测量。
+带关联时间戳的摄像头到浏览器端到端延迟测量。本次宿主/LibGodot 边界拆分已通过
+ARM64 交叉编译与动态依赖检查，尚未进行 RK3588 板端回归。

@@ -1,7 +1,6 @@
 #include "register_types.h"
 
 #include "openvt_dmabuf_capture.h"
-#include "openvt_face_tracking_runtime.h"
 #include "openvt_libgodot_bridge.h"
 
 #include "core/object/class_db.h"
@@ -13,7 +12,6 @@ void initialize_openvt_dmabuf_capture_module(ModuleInitializationLevel p_level) 
 	}
 
 	GDREGISTER_CLASS(OpenVTDmaBufCapture);
-	GDREGISTER_CLASS(OpenVTFaceTrackingRuntime);
 }
 
 void uninitialize_openvt_dmabuf_capture_module(ModuleInitializationLevel p_level) {

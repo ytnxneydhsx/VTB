@@ -12,7 +12,7 @@
 #include "scene/main/window.h"
 #include "servers/rendering/rendering_device_commons.h"
 #include "servers/rendering/rendering_server.h"
-#include "vtb/live2d/live2d_face_mapper.hpp"
+#include "vtb/live2d/live2d_parameters.hpp"
 
 namespace vtb {
 

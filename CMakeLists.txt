@@ -195,6 +195,7 @@ target_link_libraries(vtb_face_core PUBLIC vtb_video_core)
 vtb_configure_target(vtb_face_core)
 
 add_library(vtb_live2d_core STATIC
+    src/live2d/live2d_parameters.cpp
     src/live2d/live2d_face_mapper.cpp
 )
 add_library(vtb::live2d_core ALIAS vtb_live2d_core)
@@ -290,11 +291,30 @@ target_link_libraries(vtb_pipeline_runtime
 )
 vtb_configure_target(vtb_pipeline_runtime)
 
+if(VTB_ENABLE_OPENCV_FACE_PIPELINE AND VTB_ENABLE_RKNN_FACE)
+    add_library(vtb_face_tracking_service STATIC
+        src/face/face_tracking_service.cpp
+    )
+    add_library(vtb::face_tracking_service ALIAS vtb_face_tracking_service)
+    target_include_directories(vtb_face_tracking_service PUBLIC include)
+    target_link_libraries(vtb_face_tracking_service
+        PUBLIC
+            vtb_pipeline_runtime
+            vtb_live2d_core
+            Threads::Threads
+    )
+    vtb_configure_target(vtb_face_tracking_service)
+endif()
+
 add_executable(vtb src/main.cpp)
 target_link_libraries(vtb PRIVATE vtb_capture)
 vtb_configure_target(vtb)
 
 if(VTB_ENABLE_EMBEDDED_GODOT)
+    if(NOT VTB_ENABLE_OPENCV_FACE_PIPELINE OR NOT VTB_ENABLE_RKNN_FACE)
+        message(FATAL_ERROR
+            "VTB_ENABLE_EMBEDDED_GODOT requires the OpenCV and RKNN face pipeline")
+    endif()
     if(VTB_GODOT_SOURCE_ROOT STREQUAL "")
         message(FATAL_ERROR
             "VTB_GODOT_SOURCE_ROOT is required for the embedded Godot host")
@@ -310,13 +330,23 @@ if(VTB_ENABLE_EMBEDDED_GODOT)
         message(FATAL_ERROR "VTB_LIBGODOT_LIBRARY does not exist")
     endif()
 
-    add_executable(vtb-live2d apps/vtb-live2d/main.cpp)
+    add_executable(vtb-live2d
+        apps/vtb-live2d/main.cpp
+        apps/vtb-live2d/vtb_application.cpp
+    )
     target_include_directories(vtb-live2d
         PRIVATE
             "${VTB_GODOT_SOURCE_ROOT}"
             experiments/godot/embedded-runtime/module
     )
-    target_link_libraries(vtb-live2d PRIVATE "${VTB_LIBGODOT_LIBRARY}")
+    target_link_libraries(vtb-live2d
+        PRIVATE
+            vtb_face_tracking_service
+            vtb_video_opencv
+            vtb_face_rknn
+            vtb_face_geometry_opencv
+            "${VTB_LIBGODOT_LIBRARY}"
+    )
     target_link_options(vtb-live2d PRIVATE -Wl,--allow-shlib-undefined)
     foreach(dependency_directory IN LISTS VTB_EMBEDDED_RPATH_LINK)
         target_link_options(vtb-live2d PRIVATE

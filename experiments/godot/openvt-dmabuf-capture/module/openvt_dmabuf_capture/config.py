@@ -7,8 +7,6 @@ def can_build(env, platform):
         and bool(os.environ.get("OPENVT_BOARD_SYSROOT"))
         and bool(os.environ.get("OPENVT_FFMPEG_SYSROOT"))
         and bool(os.environ.get("OPENVT_VTB_SOURCE_ROOT"))
-        and bool(os.environ.get("OPENVT_OPENCV_ROOT"))
-        and bool(os.environ.get("OPENVT_RKNN_ROOT"))
     )
 
 
