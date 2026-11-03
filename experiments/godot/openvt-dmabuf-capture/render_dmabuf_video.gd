@@ -47,6 +47,9 @@ func _ready() -> void:
 		total_frames = total_frames_text.to_int()
 
 	dma_capture = ClassDB.instantiate("OpenVTDmaBufCapture")
+	if not dma_capture.has_method("configure"):
+		_fail(2, "This archived scene requires the pre-ABI-v2 module. Use vtb-live2d --config with the current host-owned output pipeline.")
+		return
 	var configure_error: int = dma_capture.configure(
 		rtsp_url,
 		OUTPUT_SIZE.x,

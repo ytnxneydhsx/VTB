@@ -15,19 +15,7 @@ namespace {
     throw std::system_error(errno, std::generic_category(), operation);
 }
 
-std::string c_string(const __u8* value) {
-    return reinterpret_cast<const char*>(value);
-}
-
 }  // namespace
-
-double NegotiatedCaptureConfig::fps() const {
-    if (frame_interval_numerator == 0) {
-        return 0.0;
-    }
-    return static_cast<double>(frame_interval_denominator) /
-           static_cast<double>(frame_interval_numerator);
-}
 
 V4l2Camera::V4l2Camera(CaptureConfig config) : config_(std::move(config)) {}
 
@@ -37,7 +25,7 @@ V4l2Camera::~V4l2Camera() {
     }
 }
 
-NegotiatedCaptureConfig V4l2Camera::open_and_configure() {
+std::uint32_t V4l2Camera::open_and_configure() {
     if (fd_ >= 0) {
         throw std::logic_error("V4L2 camera is already open");
     }
@@ -76,13 +64,29 @@ NegotiatedCaptureConfig V4l2Camera::open_and_configure() {
     if (ioctl(fd_, VIDIOC_S_FMT, &format) < 0) {
         throw_errno("VIDIOC_S_FMT");
     }
+    if (format.fmt.pix.pixelformat != config_.pixel_format) {
+        throw std::runtime_error(
+            config_.device_path + " rejected pixel format " +
+            fourcc_to_string(config_.pixel_format) + " and selected " +
+            fourcc_to_string(format.fmt.pix.pixelformat));
+    }
+    if (format.fmt.pix.width != config_.width ||
+        format.fmt.pix.height != config_.height) {
+        throw std::runtime_error(
+            config_.device_path + " rejected resolution " +
+            std::to_string(config_.width) + "x" +
+            std::to_string(config_.height) + " and selected " +
+            std::to_string(format.fmt.pix.width) + "x" +
+            std::to_string(format.fmt.pix.height));
+    }
 
     v4l2_streamparm stream_parameters{};
     stream_parameters.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
     if (ioctl(fd_, VIDIOC_G_PARM, &stream_parameters) < 0) {
         throw_errno("VIDIOC_G_PARM");
     }
-    if ((stream_parameters.parm.capture.capability & V4L2_CAP_TIMEPERFRAME) == 0) {
+    if ((stream_parameters.parm.capture.capability & V4L2_CAP_TIMEPERFRAME) ==
+        0) {
         throw std::runtime_error(config_.device_path +
                                  " does not allow configuring the frame interval");
     }
@@ -98,21 +102,26 @@ NegotiatedCaptureConfig V4l2Camera::open_and_configure() {
     if (ioctl(fd_, VIDIOC_G_PARM, &actual_stream_parameters) < 0) {
         throw_errno("VIDIOC_G_PARM after VIDIOC_S_PARM");
     }
-
-    NegotiatedCaptureConfig actual;
-    actual.driver = c_string(capability.driver);
-    actual.card = c_string(capability.card);
-    actual.bus_info = c_string(capability.bus_info);
-    actual.pixel_format = format.fmt.pix.pixelformat;
-    actual.width = format.fmt.pix.width;
-    actual.height = format.fmt.pix.height;
-    actual.bytes_per_line = format.fmt.pix.bytesperline;
-    actual.size_image = format.fmt.pix.sizeimage;
-    actual.frame_interval_numerator =
+    const std::uint32_t actual_numerator =
         actual_stream_parameters.parm.capture.timeperframe.numerator;
-    actual.frame_interval_denominator =
+    const std::uint32_t actual_denominator =
         actual_stream_parameters.parm.capture.timeperframe.denominator;
-    return actual;
+    const std::uint64_t requested_denominator =
+        static_cast<std::uint64_t>(config_.fps) * actual_numerator;
+    if (actual_numerator == 0 ||
+        actual_denominator != requested_denominator) {
+        double actual_fps = 0.0;
+        if (actual_numerator != 0) {
+            actual_fps = static_cast<double>(actual_denominator) /
+                static_cast<double>(actual_numerator);
+        }
+        throw std::runtime_error(
+            config_.device_path + " rejected " +
+            std::to_string(config_.fps) + " FPS and selected " +
+            std::to_string(actual_fps) + " FPS");
+    }
+
+    return format.fmt.pix.bytesperline;
 }
 
 int V4l2Camera::fd() const noexcept {

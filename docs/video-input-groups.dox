@@ -1,0 +1,242 @@
+/**
+ * @defgroup video_input 视频输入模块
+ * @brief 统一视频源接口、视频帧视图、帧租约以及采集缓冲区生命周期。
+ *
+ * 推荐阅读顺序：
+ *
+ * 1. @ref vtb::VideoSource "VideoSource"：视频输入统一入口。
+ * 2. @ref vtb::CameraSource "CameraSource"：产品直接 V4L2 摄像头实现。
+ * 3. @ref vtb::DecodedFrameLease "DecodedFrameLease"：一帧视频的生命周期控制。
+ * 4. @ref vtb::FrameView "FrameView" 和
+ *    @ref vtb::FramePlaneView "FramePlaneView"：帧与图像平面元数据。
+ * 5. @ref vtb::LatestFrameSlot "LatestFrameSlot"：采集线程与消费线程之间的最新帧交接。
+ * 6. @ref vtb::VideoFrameConsumer "VideoFrameConsumer" 和
+ *    @ref vtb::VideoProcessingRuntime "VideoProcessingRuntime"：统一消费接口与通用运行时。
+ * 7. @ref vtb::FaceFrameConsumer "FaceFrameConsumer"：人脸管线消费适配器。
+ * 8. @ref face_data "人脸数据" 与 @ref face_processing "人脸处理"：人脸值类型、
+ *    单帧算法和消费适配边界。
+ * 9. @ref application_composition "应用装配"：产品会话、HTTP 控制和输出生命周期。
+ *
+ * @par 核心数据路径
+ *
+ * @code
+ * VideoSource::read()
+ *     -> DecodedFrameLease
+ *     -> LatestFrameSlot
+ *     -> VideoFrameConsumer::consume()
+ * @endcode
+ */
+
+/**
+ * @defgroup video_input_api 公共接口
+ * @ingroup video_input
+ * @brief 调用视频输入模块时首先阅读的稳定类型。
+ */
+
+/**
+ * @defgroup video_input_sources 视频源实现
+ * @ingroup video_input
+ * @brief 直接 V4L2 摄像头输入实现。
+ */
+
+/**
+ * @defgroup video_input_handoff 帧传递
+ * @ingroup video_input
+ * @brief 在线程之间以 latest-only 策略传递帧租约。
+ */
+
+/**
+ * @defgroup video_input_consumers 帧消费
+ * @ingroup video_input
+ * @brief 通用帧消费者、latest-only 运行时和具体业务适配器。
+ */
+
+/**
+ * @defgroup face_data 人脸数据
+ * @ingroup video_input
+ * @brief 检测、关键点、姿态、表情和跟踪结果值类型。
+ */
+
+/**
+ * @defgroup face_processing 人脸处理
+ * @ingroup video_input
+ * @brief 人脸算法接口、单帧 Pipeline 和消费适配器。
+ */
+
+/**
+ * @defgroup video_input_config 配置类型
+ * @ingroup video_input
+ * @brief 视频设备请求参数。
+ */
+
+/**
+ * @defgroup video_input_internal 内部实现
+ * @ingroup video_input
+ * @brief 视频源内部状态、V4L2 设备与缓冲池实现细节。
+ */
+
+/**
+ * @class vtb::VideoSource
+ * @ingroup video_input_api
+ * @brief 视频输入模块的抽象入口。
+ *
+ * 调用方只依赖该接口，通过 read() 取得 DecodedFrameLease，并通过
+ * request_stop() 与 close() 控制视频源生命周期。
+ */
+
+/**
+ * @class vtb::DecodedFrameLease
+ * @ingroup video_input_api
+ */
+
+/**
+ * @class vtb::FrameView
+ * @ingroup video_input_api
+ * @brief 一帧视频的格式、尺寸、编号、时间戳和图像平面视图。
+ */
+
+/**
+ * @class vtb::FramePlaneView
+ * @ingroup video_input_api
+ */
+
+/**
+ * @class vtb::CameraSource
+ * @ingroup video_input_sources
+ * @brief 直接使用 Linux V4L2 和驱动缓冲区的视频源实现。
+ */
+
+/**
+ * @class vtb::LatestFrameSlot
+ * @ingroup video_input_handoff
+ * @brief 最多保存一个 DecodedFrameLease 的线程安全交接槽。
+ */
+
+/**
+ * @class vtb::VideoFrameConsumer
+ * @ingroup video_input_consumers
+ * @brief 同步接收 DecodedFrameLease 的统一消费接口。
+ */
+
+/**
+ * @class vtb::VideoProcessingRuntime
+ * @ingroup video_input_consumers
+ * @brief 只依赖 VideoSource 和 VideoFrameConsumer 的 latest-only 线程运行时。
+ */
+
+/**
+ * @class vtb::FaceFrameConsumer
+ * @ingroup video_input_consumers
+ * @brief 将统一帧消费接口适配到 FacePipeline。
+ */
+
+/**
+ * @class vtb::FaceBox
+ * @ingroup face_data
+ */
+/**
+ * @class vtb::FaceDetection
+ * @ingroup face_data
+ */
+/**
+ * @class vtb::FaceLandmark
+ * @ingroup face_data
+ */
+/**
+ * @class vtb::LandmarkEstimate
+ * @ingroup face_data
+ */
+/**
+ * @class vtb::FacePose
+ * @ingroup face_data
+ */
+/**
+ * @class vtb::FaceExpression
+ * @ingroup face_data
+ */
+/**
+ * @class vtb::FaceGeometryResult
+ * @ingroup face_data
+ */
+/**
+ * @class vtb::FaceTrackingResult
+ * @ingroup face_data
+ */
+/**
+ * @class vtb::Live2DTrackingViewState
+ * @ingroup application_composition
+ */
+/**
+ * @class vtb::Live2DTrackingSnapshot
+ * @ingroup application_composition
+ */
+/**
+ * @class vtb::Live2DTrackingStatus
+ * @ingroup application_composition
+ */
+/**
+ * @class vtb::FacePipelineConfig
+ * @ingroup face_data
+ */
+
+/**
+ * @class vtb::FaceDetector
+ * @ingroup face_processing
+ */
+/**
+ * @class vtb::LandmarkEstimator
+ * @ingroup face_processing
+ */
+/**
+ * @class vtb::FaceGeometryEstimator
+ * @ingroup face_processing
+ */
+/**
+ * @class vtb::FacePipeline
+ * @ingroup face_processing
+ */
+/**
+ * @class vtb::FaceFrameConsumer
+ * @ingroup face_processing
+ */
+/**
+ * @class vtb::Live2DTrackingSession
+ * @ingroup application_composition
+ */
+
+/**
+ * @class vtb::CaptureConfig
+ * @ingroup video_input_config
+ * @brief V4L2 设备请求配置。
+ */
+
+/**
+ * @class vtb::V4l2BufferPool
+ * @ingroup video_input_internal
+ * @brief V4L2 MMAP、DMA-BUF、DQBUF 和 QBUF 生命周期管理。
+ */
+
+/**
+ * @class vtb::V4l2Camera
+ * @ingroup video_input_internal
+ * @brief V4L2 设备打开、严格配置和驱动回填校验封装。
+ */
+
+/**
+ * @defgroup application_composition 应用装配
+ * @ingroup video_input
+ * @brief 产品装配、跟踪会话、HTTP 控制、快照与输出协议交接；算法模块不依赖该组。
+ */
+/** @class vtb::Live2DControlServer
+ * @ingroup application_composition
+ */
+/** @class vtb::MediaOutputSession
+ * @ingroup application_composition
+ */
+/** @class vtb::VideoInputFactory
+ * @ingroup application_composition
+ */
+/** @class vtb::Live2DMappingResult
+ * @ingroup application_composition
+ * @brief 独立的 Live2D 映射值类型，不包含 mapper 算法依赖。
+ */

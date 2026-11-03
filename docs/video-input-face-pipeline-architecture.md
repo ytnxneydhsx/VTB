@@ -6,7 +6,7 @@
 
 ## 2. 设计目标
 
-- 同时支持摄像头和本地视频文件。
+- 当前产品只支持 V4L2 摄像头输入。
 - 模型不感知输入来源、压缩格式、V4L2、MPP 或 RGA。
 - 摄像头、解码器、RGA 和 RKNN 之间保留 DMA-BUF 与零 CPU 整帧复制能力。
 - 使用 RAII 管理帧的所有权，业务代码不手动调用释放接口。
@@ -22,7 +22,7 @@
 - V4L2、MPP、RGA 和 RKNN 使用可相互导入的 DMA-BUF 或等价硬件缓冲区。
 - 下游使用完成前，缓冲区不能被生产者覆盖或复用。
 - 异步硬件操作以完成回调或 fence 表示真正的读取完成。
-- CPU/OpenCV 后备路径明确标记为 CPU 内存路径。
+- CPU 后备路径明确标记为 CPU 内存路径。
 
 ## 4. 组件关系
 
@@ -30,21 +30,16 @@
 +---------------------------------------------------------------------+
 |                         vtb-live2d 进程                              |
 |                                                                     |
-|  PipelineRuntime                                                    |
+|  VideoProcessingRuntime                                             |
+|       +-- VideoSource                                               |
+|       |       `-- CameraSource("/dev/video0")                        |
 |       |                                                             |
-|       +-- 创建 VideoSource                                          |
-|       |       |                                                     |
-|       |       +-- CameraSource("/dev/video0")                        |
-|       |       |                                                     |
-|       |       `-- FileSource("video.mp4")                            |
-|       |                                                             |
-|       +-- 创建 ImageTransformer                                     |
-|       |       `-- RgaImageTransformer                               |
-|       |                                                             |
-|       `-- 创建 FacePipeline                                         |
-|               |                                                     |
-|               +-- FaceDetector                                      |
-|               `-- LandmarkEstimator                                 |
+|       `-- VideoFrameConsumer                                        |
+|               `-- FaceFrameConsumer                                 |
+|                       `-- FacePipeline                               |
+|                               +-- ImageTransformer                   |
+|                               +-- FaceDetector                       |
+|                               `-- LandmarkEstimator                  |
 +---------------------------------------------------------------------+
 ```
 
@@ -52,14 +47,27 @@
 
 | 组件 | 职责 |
 | --- | --- |
-| `VideoSource` | 读取摄像头或文件，完成必要的解复用和压缩视频解码，产出完整解码帧 |
+| `VideoSource` | 从 V4L2 摄像头读取一帧并产出完整原始帧租约 |
 | `DecodedFrameLease` | 持有完整解码帧及其生命周期 |
 | `ImageTransformer` | 按模型要求完成 ROI 裁剪、缩放和颜色转换；RK3588 实现使用 RGA |
 | `ModelInputSpec` | 描述模型所需宽高、像素格式、布局、数据类型和归一化约定 |
 | `ModelInputLease` | 持有已经满足模型要求的输入缓冲区 |
 | `FacePipeline` | 组织检测、跟踪、关键点和姿态计算 |
+| `VideoFrameConsumer` | 统一同步消费一帧租约，不包含具体模型和结果类型 |
+| `FaceFrameConsumer` | 把通用帧租约交给 `FacePipeline` 并发布人脸结果 |
 | `LatestFrameSlot` | 在采集线程和模型线程之间保存最新一帧，替换时自动释放旧帧 |
-| `PipelineRuntime` | 组合组件并管理线程、启动、停止、错误传播和恢复策略 |
+| `VideoProcessingRuntime` | 组合视频源和消费者，管理线程、停止、latest-only 和错误传播 |
+
+人脸模块的 `face_types.hpp` 保存检测、关键点、姿态、表情和跟踪结果值类型；
+`face_pipeline.hpp`、`face_frame_consumer.hpp` 保存单帧算法流程和同步消费适配。
+应用层 `apps/vtb-live2d/live2d_tracking_session.hpp` 组合视频运行时与 Live2D mapper，
+`live2d_tracking_snapshot.hpp` 保存产品快照和取景状态，`live2d_control_server.hpp`
+负责 HTTP 控制。`include/vtb/live2d/live2d_mapping_result.hpp` 独立保存映射结果；
+值类型不包含算法、线程和 HTTP。完整依赖图见 [模块边界](module-boundaries.md)。
+
+`VideoProcessingRuntime` 的启动、停止、等待和析构由拥有它的控制线程顺序调用。
+采集线程和消费线程只访问内部状态对象；运行时在释放该对象前完成两个线程的
+`join()`。内部状态仅为实际跨线程的停止请求、异常和计数保留同步。
 
 ## 5. 输入格式选择
 
@@ -71,16 +79,16 @@
                  +----------------------------+
                  | 判断输入来源和实际格式     |
                  +----------------------------+
-                     |          |          |
-              Camera MJPG  Camera YUYV   Video File
-                     |          |          |
-                     v          |          v
-                V4L2 DQBUF      |       Demuxer
-                     |          |          |
-                     v          |          v
-                 MPP Decode     |      MPP Decode
-                     |          |          |
-                     +----------+----------+
+                     |          |
+              Camera MJPG  Camera YUYV
+                     |          |
+                     v          |
+                V4L2 DQBUF      |
+                     |          |
+                     v          |
+                 MPP Decode     |
+                     |          |
+                     +----------+
                                 |
                                 v
                    DecodedFrameLease
@@ -99,14 +107,13 @@
 | MJPG/MJPEG | 压缩帧 | V4L2 → MPP → 解码帧 |
 | YUYV/YUY2 | 原始 YUV 4:2:2 | V4L2 → 解码帧视图，后续直接交给 RGA |
 | NV12/NV21 | 原始 YUV | V4L2 → 解码帧视图，后续直接交给 RGA |
-| H.264/H.265 文件 | 压缩视频 | Demuxer → MPP → 解码帧 |
-| OpenCV 文件后备路径 | CPU 解码 | `cv::Mat`/CPU 缓冲区 → CPU 或 RGA 可用路径 |
 
-打开摄像头以后必须读取驱动实际协商的 FourCC、宽高、stride 和帧率。请求格式不能代替协商结果。
+设置摄像头以后必须读取驱动回填的 FourCC、宽高、stride 和帧率。FourCC、宽高和
+帧率当场与请求比较，不一致就终止启动；stride 作为帧内存布局保留。
 
 ## 6. 模型输入契约
 
-模型只声明输入要求，不创建摄像头、文件输入流或 RGA 实例。
+模型只声明输入要求，不创建摄像头或 RGA 实例。
 
 ```text
 ModelInputSpec
@@ -127,8 +134,8 @@ DecodedFrameLease
         v
 ImageTransformer::prepare()
         |
-        | RK3588: RGA
-        | 后备路径: CPU/OpenCV
+        | 产品路径: RGA
+        | 对照路径: CPU
         v
 ModelInputLease
         |
@@ -137,6 +144,29 @@ FaceDetector / LandmarkEstimator
 ```
 
 `ImageTransformer` 可以根据输入和输出规格选择最短路径。例如 YUYV 可以由一次 RGA 操作同时完成 ROI 裁剪、缩放和 RGB 转换。MPP 输出的 NV12 也直接交给 RGA，无需提前生成完整分辨率 RGB 中间帧。
+
+当前产品路径使用 `RgaImageTransformer`。它直接导入 V4L2 帧的 DMA-BUF，并由一次
+同步 RGA 操作完成 ROI 裁剪、缩放和 BT.601 limited YUV 到 RGB888 转换。输出缓冲区
+从 JSON 指定的 DMA heap 分配并复用。输出同时保留 DMA-BUF fd 和 CPU 映射地址；
+当前 `rknn_inputs_set()` 仍通过 CPU 地址接收数据，因此这一步还没有形成 RGA 到 RKNN
+的完整零拷贝。后续只有在实际测量证明输入复制是瓶颈后，才需要改为 RKNN 内存导入。
+
+两个 RKNN 模型都在 `RknnModel` 初始化时根据固定的输出属性预分配 FP32 缓冲区。
+`rknn_outputs_get()` 使用 `is_prealloc = 1` 直接写入这些缓冲区，检测和关键点后处理
+通过 `RknnOutputLease` 读取同一块内存；每帧不再创建输出 `vector<float>`，也不再
+执行应用层 `memcpy`。租约释放前禁止下一次同模型推理覆盖缓冲区。该边界实现了
+RKNN Runtime 输出到 CPU 后处理之间的应用层零拷贝；`want_float = 1` 仍可能让
+RKNN Runtime 在内部把模型原生输出转换为 FP32，因此不等同于 NPU 输出内存的原生
+零拷贝。若后续测量确认这段转换是瓶颈，需要改用 RKNN zero-copy IO memory API，
+并让 CPU 后处理读取模型原生输出类型。
+
+`CpuImageTransformer` 和 `RgaImageTransformer` 都实现同一个 `ImageTransformer`
+接口。CPU 实现保留用于功能对照和不依赖 RGA 的构建；当前 `vtb-live2d` 组装时明确
+选择 RGA 实现。RGA 失败时不会自动切换到 CPU，避免运行性能和内存路径发生未声明的
+变化。RGA 路径解决 CPU 预处理开销和整帧 CPU 读取问题；它不会改变检测与关键点
+模型的调用顺序，也不会自行降低 RKNN 推理耗时。验证指标应分别记录两种实现的
+`prepare()` 耗时、模型输入差异、`rknn_inputs_set()` 到 `rknn_run()` 的耗时以及
+完整消费帧耗时。
 
 第一版预处理把源图 ROI 直接缩放到模型尺寸，不加入未记录的 letterbox 或 padding。
 `ModelInputView` 保存本次预处理使用的源图 ROI。检测框、关键点和更新后的人脸框统一使用
@@ -289,8 +319,8 @@ public:
 
 ```cpp
 FrameLease frame = source.acquire();
-FaceTrackingResult result = face_pipeline.process(frame.view());
-// process 返回以后，frame 离开作用域并自动归还缓冲区。
+frame_consumer.consume(std::move(frame));
+// consume 返回以后，frame 在消费者内部离开作用域并自动归还缓冲区。
 ```
 
 异步交接：
@@ -318,14 +348,15 @@ LatestFrameSlot
      |
      | wait_and_take()
      v
-InferenceThread
+ConsumerThread
      |
-     | FacePipeline::process()，线程内部同步处理
+     | VideoFrameConsumer::consume()
      |
-     +-- RGA detector input
-     +-- FaceDetector
-     +-- RGA landmark input
-     +-- LandmarkEstimator
+     `-- FaceFrameConsumer
+             +-- RGA detector input
+             +-- FaceDetector
+             +-- RGA landmark input
+             `-- LandmarkEstimator
      |
      v
 FaceTrackingResult
@@ -397,7 +428,7 @@ FaceTrackingResult
 
 实现后至少记录以下指标：
 
-- 摄像头实际协商的 FourCC、宽高、stride 和 FPS。
+- 摄像头请求值、驱动回填的 FourCC、宽高、stride 和 FPS，以及严格校验结果。
 - 每帧经过的 DMA-BUF fd、缓冲池槽位和生命周期事件。
 - CPU 整帧复制次数和复制字节数。
 - V4L2 `DQBUF` 到 `QBUF` 的持有时间分布。
@@ -414,13 +445,12 @@ FaceTrackingResult
 ## 14. 分阶段实现
 
 1. 定义 `FrameView`、`DecodedFrameLease`、`ModelInputSpec` 和 `ModelInputLease` 的最小契约。
-2. 实现摄像头 `VideoSource`，读取并报告实际协商格式。
-3. 实现本地文件 CPU 后备路径，用于模型功能对照。
-4. 接入 MPP 摄像头 MJPEG 解码和文件硬件解码。
-5. 实现 RGA `ImageTransformer`，先覆盖检测和关键点所需格式。
-6. 接入容量为一的 `LatestFrameSlot` 和模型线程。
-7. 在 RK3588 上验证格式、缓冲区生命周期、复制次数和阶段延迟。
-8. 测量确认需要后，再引入应用自有完整帧池或硬件异步 fence 管线。
+2. 实现摄像头 `VideoSource`，读取并严格校验驱动回填值。
+3. 实现 RGA `ImageTransformer`，覆盖检测和关键点所需格式。
+4. 接入 MPP 摄像头 MJPEG 解码。
+5. 接入容量为一的 `LatestFrameSlot` 和模型线程。
+6. 在 RK3588 上验证格式、缓冲区生命周期、复制次数和阶段延迟。
+7. 测量确认需要后，再引入应用自有完整帧池或硬件异步 fence 管线。
 
 ## 15. 当前实现状态
 
@@ -432,48 +462,54 @@ FaceTrackingResult
   `VIDIOC_EXPBUF` DMA-BUF 导出。
 - 容量为一的 `LatestFrameSlot`，替换旧帧时通过租约析构归还底层缓冲区。
 - `FacePipeline` 对检测、关键点、姿态计算和重新检测策略的同步编排。
-- `PipelineRuntime` 的采集线程、推理线程、停止顺序、异常保存和结果回调。
-- `CpuImageTransformer` 的 RGB/BGR/YUYV/NV12/NV21 到 224x224 RGB888
-  后备预处理路径。
+- `VideoFrameConsumer` 统一消费接口和 `FaceFrameConsumer` 人脸适配器。
+- `VideoProcessingRuntime` 的采集线程、消费线程、latest-only 交接、停止顺序和
+  异常保存；该运行时不依赖人脸类型。
+- `RgaImageTransformer` 直接导入 V4L2 DMA-BUF，并在一次同步 RGA 操作中完成
+  YUYV/NV12/NV21 ROI 裁剪、缩放和 224x224 RGB888 转换。
+- `CpuImageTransformer` 保留相同的 `ImageTransformer` 契约，用于功能对照和
+  不依赖 Rockchip RGA 的构建；产品入口不做隐式 CPU 回退。
 - `RknnFaceDetector` 与 `RknnLandmarkEstimator`，分别封装 RKNN context、
   NPU core 选择、输入输出张量检查、推理资源释放以及 OpenSeeFace 检测框和
   66 点关键点后处理。
 - `ConfigurationFileReader` 与 `VtbApplicationConfigParser` 分别负责读取配置文件和
   生成分段的强类型配置。
-- `V4l2DeviceValidator` 在创建读取模块前确认设备采集能力以及 FourCC、尺寸和帧率。
-- `OpenCvVideoSource` 作为当前 Live2D V4L2 摄像头 CPU 解码入口。
+- `V4l2Camera` 在执行 `VIDIOC_S_FMT` 和 `VIDIOC_S_PARM` 后立即将驱动回填的
+  FourCC、尺寸和帧率与请求值严格比较，不接受驱动回退，也不生成第二套配置对象。
+- `CameraSource` 作为当前 Live2D 直接 V4L2 摄像头入口，使用 MMAP、
+  `VIDIOC_DQBUF/QBUF` 和可用时的 `VIDIOC_EXPBUF`。
 - `OpenSeeFaceGeometryEstimator` 的 14 点 PnP、Euler 角、66 点三维反投影和
   眼睛/嘴部自适应特征。
 - `Live2DFaceMapper` 的中立姿态校准、十个 Ayagami 参数映射和按单调时钟平滑。
-- `FaceTrackingService` 在 LibGodot 外部组合采集线程、模型线程、映射 mailbox 和
-  控制口；`VtbApplication` 通过固定桥接函数将容量一的最终参数快照交给 Godot
-  主线程。
+- 应用层 `Live2DTrackingSession` 组合视频运行时、算法和映射状态；独立的
+  `Live2DControlServer` 只调用状态查询、取景修改和校准重置。
+- `VtbApplication` 通过 ABI v2 提交参数快照；Godot 返回编码包视图，由宿主
+  `MediaOutputSession` 拷贝并交给 `OutputManager`。协议配置位于 `output` 段。
 
-MPP 摄像头 MJPEG 解码、RGA 模型预处理和 DMA-BUF 跨组件零拷贝仍属于后续按
-测量引入的硬件优化。当前 C++ Live2D 主路径使用 OpenCV V4L2 解码和 CPU
-`CpuImageTransformer`，因此不能标记为零 CPU 拷贝。
+MPP 摄像头 MJPEG 解码和 RGA 到 RKNN 的直接内存导入仍属于后续按测量引入的硬件
+优化。当前 C++ Live2D 主路径直接采集 YUYV/NV12/NV21，由 RGA 生成模型输入；
+`rknn_inputs_set()` 继续从 RGA 输出缓冲区的 CPU 映射地址接收数据，因此仍不能标记为
+RGA 到 RKNN 端到端零拷贝。
 
-- RKNN 能力通过 `VTB_ENABLE_RKNN_FACE` 单独启用，应用仍负责把输入、预处理、
+- RKNN 和 RGA 分别通过 `VTB_ENABLE_RKNN_FACE`、`VTB_ENABLE_RGA_FACE` 启用；应用负责把输入、预处理、
   模型和后续姿态计算组合进同一进程。
 
-当前 `CameraSource` 只接受驱动实际协商为 YUYV、NV12 或 NV21 的完整原始帧。
-驱动协商为 MJPEG、H.264 或其他压缩格式时会明确报错，避免把压缩数据标记成
+当前 `CameraSource` 只接受请求为 YUYV、NV12 或 NV21 且驱动回填值完全一致的
+完整原始帧。请求 MJPEG、H.264 或其他压缩格式时会明确报错，避免把压缩数据标记成
 `DecodedFrameLease`。Live2D 应用根据 JSON 中显式声明的 `v4l2_camera` 类型创建
-`OpenCvVideoSource`，由 OpenCV V4L2 后端处理摄像头 MJPEG 并输出 BGR 完整帧；
-两条输入实现共享同一个 `VideoSource` 接口。当前产品入口没有文件和网络读取实现。
+`CameraSource`。当前产品入口没有压缩摄像头解码、文件和网络读取实现。
 
 以下设备实现仍待后续阶段完成：
 
-- MJPEG 摄像头和 H.264/H.265 文件的 MPP 解码。
-- RGA `ImageTransformer` 及其目标缓冲池。
+- MJPEG 摄像头的 MPP 解码。
 - RK3588 设备上的 DMA-BUF 缓冲区生命周期和摄像头到浏览器关联时间戳延迟验证。
 
-当前基础层、RKNN 模型层、OpenCV PnP/输入层和 Live2D mapper 使用
+当前基础层、RKNN 模型层、OpenCV PnP 几何层和 Live2D mapper 使用
 Buildroot/Godot ARM64 GCC 13.2.0 构建。2026-10-30 的拆分前路径已在 RK3588 打开摄像头并
 完成 300 帧 C++ 人脸运行时、Godot/Ayagami、RGA、MPP 和 RTSP 写出验证；另用
 已知正脸图片序列确认 C++ RKNN、PnP、30 帧校准和参数映射进入有效状态。真实
 摄像头真人画面也完成 30/30 校准，置信度为 0.904445；重新标定、视图控制以及
 H.264 WebRTC 浏览器播放均已验证。浏览器连续播放 121.6 秒时共显示 3651 帧、
 丢弃 11 帧且无媒体错误。当前仍未完成 C++/Python 数值精度对照、长时间稳定性和
-带关联时间戳的摄像头到浏览器端到端延迟测量。本次宿主/LibGodot 边界拆分已通过
-ARM64 交叉编译与动态依赖检查，尚未进行 RK3588 板端回归。
+带关联时间戳的摄像头到浏览器端到端延迟测量。此前宿主/LibGodot 边界拆分的编译记录不覆盖 2026-11-03 的 ABI v2；
+本轮验证边界见 [模块边界](module-boundaries.md)，尚未进行 RK3588 板端回归。

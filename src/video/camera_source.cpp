@@ -125,14 +125,61 @@ private:
 
 }  // namespace
 
+/**
+ * @brief 管理 V4L2 MMAP 采集缓冲区及每一帧从取出到归还的生命周期。
+ *
+ * 构造时复制已经完成配置的摄像头文件描述符，向驱动申请多个缓冲区，执行 mmap，
+ * 尝试导出 DMA-BUF fd，并把全部缓冲区排入采集队列。dequeue() 取出一帧后返回
+ * DecodedFrameLease；租约释放时通过回调执行 requeue()，把同一个缓冲区归还驱动。
+ *
+ * enable_shared_from_this 允许帧租约持有当前缓冲池的 shared_ptr。即使外部
+ * CameraSource 已经关闭，只要还有帧租约，缓冲池及其 mmap 内存就会继续存活。
+ * 本类不创建线程；互斥量和原子变量用于协调外部采集、推理和停止线程。
+ */
 class V4l2BufferPool final
     : public std::enable_shared_from_this<V4l2BufferPool> {
+private:
+    /**
+     * @brief 帧租约释放时把指定缓冲区归还给所属缓冲池。
+     *
+     * owner_ 延长缓冲池生命周期，index_ 标识需要重新执行 VIDIOC_QBUF 的槽位。
+     * DecodedFrameLease 通过 std::function 调用 operator()()。
+     */
+    class RequeueOnLeaseRelease final {
+    public:
+        RequeueOnLeaseRelease(
+            std::shared_ptr<V4l2BufferPool> owner,
+            std::uint32_t index)
+            : owner_(std::move(owner)), index_(index) {}
+
+        void operator()() const noexcept;
+
+    private:
+        /** @brief 持有缓冲池，保证帧租约有效期间 mmap 内存不会释放。 */
+        std::shared_ptr<V4l2BufferPool> owner_;
+
+        /** @brief 当前帧对应的 V4L2 缓冲区编号。 */
+        std::uint32_t index_ = 0;
+    };
+
 public:
+    /**
+     * @brief 接管采集所需状态并启动 V4L2 streaming。
+     * @param configured_fd 已完成格式和帧率配置的摄像头文件描述符。
+     * @param requested JSON 中的请求配置，用于描述输出帧格式和尺寸。
+     * @param bytes_per_line 驱动返回的行跨度，包含可能存在的行对齐填充。
+     * @param requested_buffer_count 向驱动申请的缓冲区数量，至少为两个；驱动必须
+     * 返回完全相同的数量。
+     *
+     * configured_fd 会通过 F_DUPFD_CLOEXEC 复制，缓冲池独立关闭复制后的 fd。
+     */
     V4l2BufferPool(
         int configured_fd,
-        NegotiatedCaptureConfig config,
+        CaptureConfig requested,
+        std::uint32_t bytes_per_line,
         std::uint32_t requested_buffer_count)
-        : config_(std::move(config)) {
+        : requested_(std::move(requested)),
+          bytes_per_line_(bytes_per_line) {
         fd_ = fcntl(configured_fd, F_DUPFD_CLOEXEC, 0);
         if (fd_ < 0) {
             throw_errno("duplicate configured V4L2 descriptor");
@@ -145,19 +192,33 @@ public:
         }
     }
 
+    /** @brief 停止采集，解除映射并关闭缓冲池持有的文件描述符。 */
     ~V4l2BufferPool() {
         shutdown();
     }
 
+    /**
+     * 缓冲池独占 fd、mmap 映射和同步状态，因此禁止复制和移动。
+     * 帧租约通过 shared_ptr 延长同一个缓冲池对象的生命周期。
+     */
     V4l2BufferPool(const V4l2BufferPool&) = delete;
     V4l2BufferPool& operator=(const V4l2BufferPool&) = delete;
     V4l2BufferPool(V4l2BufferPool&&) = delete;
     V4l2BufferPool& operator=(V4l2BufferPool&&) = delete;
 
+    /**
+     * @brief 等待并取出下一帧摄像头缓冲区。
+     *
+     * 函数使用 poll() 等待设备就绪，再通过 VIDIOC_DQBUF 取得缓冲区。返回的帧租约
+     * 直接引用 mmap 内存；租约析构时自动调用 requeue()。收到停止请求时返回空值。
+     *
+     * @return 一帧有效租约；停止采集时返回 std::nullopt。
+     * @throws std::system_error poll、DQBUF 或先前的 QBUF 操作失败。
+     * @throws std::runtime_error 驱动报告错误或返回越界的缓冲区信息。
+     */
     std::optional<DecodedFrameLease> dequeue() {
-        while (!stop_requested_.load(std::memory_order_acquire)) {
-            const int saved_requeue_error =
-                requeue_error_.load(std::memory_order_acquire);
+        while (!stop_requested_.load()) {
+            const int saved_requeue_error = requeue_error_.load();
             if (saved_requeue_error != 0) {
                 throw std::system_error(
                     saved_requeue_error,
@@ -195,14 +256,6 @@ public:
                 throw std::runtime_error("VIDIOC_DQBUF returned an invalid buffer index");
             }
 
-            {
-                std::lock_guard<std::mutex> lock(buffer_mutex_);
-                if (in_use_[buffer.index]) {
-                    throw std::logic_error("V4L2 buffer dequeued while still leased");
-                }
-                in_use_[buffer.index] = true;
-            }
-
             try {
                 BufferMapping& mapping = mappings_[buffer.index];
                 const std::size_t valid_size = buffer.bytesused;
@@ -229,14 +282,14 @@ public:
                 planes[0] = FramePlaneView(
                     mapping.data(),
                     valid_size,
-                    config_.bytes_per_line,
+                    bytes_per_line_,
                     mapping.dma_buf_fd(),
                     0);
                 FrameView view(
-                    to_video_pixel_format(config_.pixel_format),
+                    to_video_pixel_format(requested_.pixel_format),
                     memory_type,
-                    config_.width,
-                    config_.height,
+                    requested_.width,
+                    requested_.height,
                     buffer.sequence,
                     timestamp_ns,
                     timestamp_source,
@@ -247,9 +300,7 @@ public:
                 const std::uint32_t index = buffer.index;
                 return DecodedFrameLease(
                     std::move(view),
-                    [owner = std::move(owner), index]() {
-                        owner->requeue(index);
-                    });
+                    RequeueOnLeaseRelease(std::move(owner), index));
             } catch (...) {
                 requeue(buffer.index);
                 throw;
@@ -258,11 +309,21 @@ public:
         return std::nullopt;
     }
 
+    /**
+     * @brief 请求 dequeue() 停止等待并尽快返回空值。
+     *
+     * 这里只设置原子标志。dequeue() 的 poll 超时时间为 250 ms，因此不需要关闭 fd
+     * 来打断等待。
+     */
     void request_stop() noexcept {
-        stop_requested_.store(true, std::memory_order_release);
+        stop_requested_.store(true);
     }
 
 private:
+    /**
+     * @brief 申请、映射、导出并排队 V4L2 缓冲区，最后启动视频流。
+     * @param requested_buffer_count 请求的 MMAP 缓冲区数量。
+     */
     void initialize(std::uint32_t requested_buffer_count) {
         if (fd_ < 0) {
             throw std::invalid_argument("V4L2 buffer pool requires an open device");
@@ -278,12 +339,15 @@ private:
         if (ioctl(fd_, VIDIOC_REQBUFS, &request) < 0) {
             throw_errno("VIDIOC_REQBUFS");
         }
-        if (request.count < 2) {
-            throw std::runtime_error("V4L2 driver allocated fewer than two buffers");
+        if (request.count != requested_buffer_count) {
+            throw std::runtime_error(
+                "V4L2 driver allocated " +
+                std::to_string(request.count) + " buffers, but " +
+                std::to_string(requested_buffer_count) +
+                " were requested");
         }
 
         mappings_.reserve(request.count);
-        in_use_.assign(request.count, false);
         for (std::uint32_t index = 0; index < request.count; ++index) {
             v4l2_buffer query{};
             query.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
@@ -330,29 +394,35 @@ private:
         streaming_ = true;
     }
 
+    /**
+     * @brief 把帧租约使用完毕的缓冲区重新交给 V4L2 驱动。
+     * @param index 需要执行 VIDIOC_QBUF 的驱动缓冲区编号。
+     *
+     * 本函数用于租约析构回调，因此保持 noexcept。QBUF 失败时保存第一个 errno，
+     * 下一次 dequeue() 会在正常异常边界中报告该错误。
+     */
     void requeue(std::uint32_t index) noexcept {
-        std::lock_guard<std::mutex> lock(buffer_mutex_);
-        if (index >= in_use_.size() || !in_use_[index]) {
+        std::lock_guard<std::mutex> lock(requeue_mutex_);
+        if (fd_ < 0 || !streaming_) {
             return;
         }
-        if (fd_ >= 0 && streaming_) {
-            v4l2_buffer buffer{};
-            buffer.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
-            buffer.memory = V4L2_MEMORY_MMAP;
-            buffer.index = index;
-            if (ioctl(fd_, VIDIOC_QBUF, &buffer) < 0) {
-                int expected = 0;
-                requeue_error_.compare_exchange_strong(
-                    expected,
-                    errno,
-                    std::memory_order_release,
-                    std::memory_order_relaxed);
-                return;
-            }
+
+        v4l2_buffer buffer{};
+        buffer.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+        buffer.memory = V4L2_MEMORY_MMAP;
+        buffer.index = index;
+        if (ioctl(fd_, VIDIOC_QBUF, &buffer) < 0) {
+            const int error = errno;
+            int expected = 0;
+            requeue_error_.compare_exchange_strong(expected, error);
         }
-        in_use_[index] = false;
     }
 
+    /**
+     * @brief 以可重复调用的方式停止采集并释放全部系统资源。
+     *
+     * 释放顺序为停止请求、STREAMOFF、解除所有 mmap、关闭 fd。
+     */
     void shutdown() noexcept {
         request_stop();
         if (fd_ >= 0 && streaming_) {
@@ -361,29 +431,50 @@ private:
             streaming_ = false;
         }
         mappings_.clear();
-        in_use_.clear();
         if (fd_ >= 0) {
             close(fd_);
             fd_ = -1;
         }
     }
 
+    /** @brief 缓冲池独占的摄像头文件描述符，由 configured_fd 复制得到。 */
     int fd_ = -1;
-    NegotiatedCaptureConfig config_;
+
+    /** @brief JSON 请求配置，用来构造 FrameView 的格式、宽度和高度。 */
+    CaptureConfig requested_;
+
+    /** @brief 相邻两行图像起始地址之间的字节距离。 */
+    std::uint32_t bytes_per_line_ = 0;
+
+    /** @brief 每个驱动缓冲区对应的 mmap 地址、长度和可选 DMA-BUF fd。 */
     std::vector<BufferMapping> mappings_;
-    std::vector<bool> in_use_;
-    std::mutex buffer_mutex_;
+
+    /** @brief 串行化可能由不同线程同时触发的 VIDIOC_QBUF 操作。 */
+    std::mutex requeue_mutex_;
+
+    /** @brief 外部发出的停止请求，由 dequeue() 循环读取。 */
     std::atomic<bool> stop_requested_{false};
+
+    /** @brief requeue() 首次失败时保存的 errno，零表示没有错误。 */
     std::atomic<int> requeue_error_{0};
+
+    /** @brief STREAMON 已成功且尚未执行 STREAMOFF 时为 true。 */
     bool streaming_ = false;
 };
 
+void V4l2BufferPool::RequeueOnLeaseRelease::operator()() const noexcept {
+    owner_->requeue(index_);
+}
+
 CameraSource::CameraSource(CaptureConfig config, std::uint32_t buffer_count) {
-    V4l2Camera camera(std::move(config));
-    negotiated_config_ = camera.open_and_configure();
-    to_video_pixel_format(negotiated_config_.pixel_format);
+    V4l2Camera camera(config);
+    const std::uint32_t bytes_per_line = camera.open_and_configure();
+    to_video_pixel_format(config.pixel_format);
     buffer_pool_ = std::make_shared<V4l2BufferPool>(
-        camera.fd(), negotiated_config_, buffer_count);
+        camera.fd(),
+        std::move(config),
+        bytes_per_line,
+        buffer_count);
 }
 
 CameraSource::~CameraSource() {
@@ -406,10 +497,6 @@ void CameraSource::request_stop() noexcept {
 void CameraSource::close() noexcept {
     request_stop();
     buffer_pool_.reset();
-}
-
-const NegotiatedCaptureConfig& CameraSource::negotiated_config() const noexcept {
-    return negotiated_config_;
 }
 
 }  // namespace vtb

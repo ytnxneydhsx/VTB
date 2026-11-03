@@ -37,7 +37,10 @@ capture_ready
   -> browser_presented
 ```
 
-`capture_ready` 是 OpenCV `capture.read()` 返回完整帧的时刻，不包含摄像头曝光、USB 传输和 MJPEG 解码的前半段。需要曝光到屏幕的物理延迟时，再接入 V4L2 `VIDIOC_DQBUF` 时间戳或光学测量。
+旧 Python/OpenCV 路径中，`capture_ready` 是 `capture.read()` 返回完整帧的时刻。
+当前 C++ 产品路径直接使用 V4L2 `VIDIOC_DQBUF`；驱动提供单调时间戳时，
+`capture_ready` 应使用该时间戳，否则使用 `DQBUF` 返回后的单调时钟。这两种定义
+都不包含完整的摄像头曝光时间；需要曝光到屏幕的物理延迟时仍需光学测量。
 
 ## 更简单方案与取舍
 

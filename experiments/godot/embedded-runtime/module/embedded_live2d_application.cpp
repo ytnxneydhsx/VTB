@@ -44,7 +44,8 @@ Error EmbeddedLive2DApplication::initialize(
 	if (initialized_) {
 		return fail(ERR_ALREADY_IN_USE, "Embedded Live2D application is already initialized");
 	}
-	if (p_config.live2d_model.is_empty() || p_config.rtsp_url.is_empty() ||
+	if (p_config.live2d_model.is_empty() || p_config.output_sink.context == nullptr ||
+			p_config.output_sink.configure_h264 == nullptr || p_config.output_sink.publish == nullptr ||
 			p_config.output_width < 2 || p_config.output_width > 8192 ||
 			p_config.output_height < 2 || p_config.output_height > 8192 ||
 			p_config.output_fps < 1 || p_config.output_fps > 240 ||
@@ -56,7 +57,7 @@ Error EmbeddedLive2DApplication::initialize(
 	output_fps_ = p_config.output_fps;
 	total_frames_ = p_config.total_frames;
 	live2d_model_ = p_config.live2d_model;
-	rtsp_url_ = p_config.rtsp_url;
+	output_sink_ = p_config.output_sink;
 	if (output_width_ % 2 != 0 || output_height_ % 2 != 0) {
 		return fail(ERR_INVALID_PARAMETER, "Output dimensions must be even for NV12 encoding");
 	}
@@ -96,7 +97,7 @@ Error EmbeddedLive2DApplication::configure_render_session() {
 Error EmbeddedLive2DApplication::configure_output() {
 	capture_.instantiate();
 	const Error error = capture_->configure(
-			rtsp_url_, output_width_, output_height_, output_fps_, total_frames_);
+			output_sink_, output_width_, output_height_, output_fps_, total_frames_);
 	if (error != OK) {
 		return fail(error, "DMA-BUF output configuration failed: " + capture_->get_last_error());
 	}
@@ -119,13 +120,13 @@ Error EmbeddedLive2DApplication::submit_live2d_frame(
 		float p_view_offset_x,
 		float p_view_offset_y,
 		uint64_t p_produced_timestamp_ns,
-		uint64_t p_generation) {
+		uint64_t p_snapshot_generation) {
 	if (!initialized_ || render_session_ == nullptr) {
 		return fail(ERR_UNCONFIGURED, "Embedded Live2D application is not initialized");
 	}
 	if (!std::isfinite(p_view_zoom) || !std::isfinite(p_view_offset_x) ||
 			!std::isfinite(p_view_offset_y) || p_view_zoom <= 0.0F ||
-			p_produced_timestamp_ns == 0 || p_generation == 0) {
+			p_produced_timestamp_ns == 0 || p_snapshot_generation == 0) {
 		return fail(ERR_INVALID_PARAMETER, "Live2D frame input is invalid");
 	}
 	pending_parameters_ = p_parameters;
@@ -133,36 +134,41 @@ Error EmbeddedLive2DApplication::submit_live2d_frame(
 	pending_view_offset_x_ = p_view_offset_x;
 	pending_view_offset_y_ = p_view_offset_y;
 	pending_produced_timestamp_ns_ = p_produced_timestamp_ns;
-	pending_generation_ = p_generation;
+	pending_snapshot_generation_ = p_snapshot_generation;
 	has_pending_parameters_ = true;
 	return OK;
 }
 
 Error EmbeddedLive2DApplication::apply_pending_parameters(uint64_t p_monotonic_timestamp_ns) {
-	if (!has_pending_parameters_) {
+	if (has_pending_parameters_) {
+		has_pending_parameters_ = false;
+		Live2DRenderViewState view_state(
+				pending_view_zoom_, pending_view_offset_x_, pending_view_offset_y_);
+		const Error view_error = render_session_->set_view_state(view_state);
+		if (view_error != OK) {
+			return fail(view_error, "Live2D view update failed: " + render_session_->last_error());
+		}
+		last_snapshot_generation_ = pending_snapshot_generation_;
+		// View-only snapshots carry the same production time; they cannot renew freshness
+		// or replace already-decaying parameters with the old pre-decay value.
+		if (pending_produced_timestamp_ns_ > last_produced_timestamp_ns_) {
+			last_produced_timestamp_ns_ = pending_produced_timestamp_ns_;
+			if (p_monotonic_timestamp_ns >= last_produced_timestamp_ns_ &&
+					p_monotonic_timestamp_ns - last_produced_timestamp_ns_ <= maximum_parameter_age_ns_) {
+				last_parameters_ = pending_parameters_;
+			}
+		}
+	}
+	if (last_produced_timestamp_ns_ == 0 || p_monotonic_timestamp_ns < last_produced_timestamp_ns_ ||
+			p_monotonic_timestamp_ns - last_produced_timestamp_ns_ > maximum_parameter_age_ns_) {
 		return apply_fallback_parameters(p_monotonic_timestamp_ns);
 	}
-	has_pending_parameters_ = false;
-	uint64_t age_ns = 0;
-	if (p_monotonic_timestamp_ns >= pending_produced_timestamp_ns_) {
-		age_ns = p_monotonic_timestamp_ns - pending_produced_timestamp_ns_;
-	}
-	if (age_ns > maximum_parameter_age_ns_) {
-		return apply_fallback_parameters(p_monotonic_timestamp_ns);
-	}
-	last_parameters_ = pending_parameters_;
-	Error error = render_session_->submit_parameters(last_parameters_);
+	// No new snapshot: submit the held value without advancing its freshness deadline.
+	last_parameter_update_timestamp_ns_ = p_monotonic_timestamp_ns;
+	const Error error = render_session_->submit_parameters(last_parameters_);
 	if (error != OK) {
 		return fail(error, "Live2D parameter submission failed: " + render_session_->last_error());
 	}
-	Live2DRenderViewState view_state(
-			pending_view_zoom_, pending_view_offset_x_, pending_view_offset_y_);
-	error = render_session_->set_view_state(view_state);
-	if (error != OK) {
-		return fail(error, "Live2D view update failed: " + render_session_->last_error());
-	}
-	last_parameter_update_timestamp_ns_ = p_monotonic_timestamp_ns;
-	last_generation_ = pending_generation_;
 	return OK;
 }
 
@@ -204,7 +210,7 @@ Error EmbeddedLive2DApplication::complete_frame() {
 	completed_frames_ = next_frame;
 	if (completed_frames_ == 1 || completed_frames_ % static_cast<uint64_t>(output_fps_) == 0) {
 		print_line("VTB_CPP_FRAME_CAPTURED frame=" + itos(static_cast<int64_t>(completed_frames_)) +
-				" face_generation=" + itos(static_cast<int64_t>(last_generation_)));
+				" snapshot_generation=" + itos(static_cast<int64_t>(last_snapshot_generation_)));
 	}
 	if (end_of_stream) {
 		const Error finish_error = capture_->finish();

@@ -4,6 +4,7 @@
 #include "core/os/semaphore.h"
 #include "core/string/ustring.h"
 #include "core/templates/rid.h"
+#include "vtb/output/encoded_video_sink.hpp"
 
 class OpenVTDmaBufPipeline;
 
@@ -19,7 +20,7 @@ public:
 	OpenVTDmaBufCapture(OpenVTDmaBufCapture &&) = delete;
 	OpenVTDmaBufCapture &operator=(OpenVTDmaBufCapture &&) = delete;
 
-	Error configure(const String &p_rtsp_url, int p_width, int p_height, int p_fps, int p_total_frames);
+	Error configure(const vtb::EncodedVideoSink &p_sink, int p_width, int p_height, int p_fps, int p_total_frames);
 	Error capture_frame(RID p_viewport, int p_frame_index, bool p_end_of_stream);
 	Error finish();
 	String get_last_error() const;
@@ -33,7 +34,7 @@ private:
 	void _finish_render_thread();
 	void _complete_operation(Error p_error, const String &p_message);
 
-	String rtsp_url;
+	vtb::EncodedVideoSink output_sink;
 	int width = 0;
 	int height = 0;
 	int fps = 0;

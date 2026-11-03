@@ -1,7 +1,10 @@
 # VTB 嵌入式 Godot Runtime 需求说明
 
 状态：第一版实现完成，实机验收记录见 `godot-embedded-runtime-validation-2026-10-30.md`
-日期：2026-10-30
+日期：2026-10-30；2026-11-03 增补当前模块边界。
+
+历史实机验收不覆盖 ABI v2。当前实现的模块职责与验证范围以
+[模块边界](module-boundaries.md) 为准，下文保留尚未接入产品的接口设计。
 适用目标：RK3588 ARM64 单进程 Live2D 产品链路
 
 ## 1. 文档目的
@@ -38,16 +41,17 @@ Godot main()
 ```text
 VTB C++ main()
   → VtbApplication
-  → VideoSource + FacePipeline + FaceTrackingService
+  → VideoSource + VideoProcessingRuntime + VideoFrameConsumer
+  → FaceFrameConsumer + FacePipeline + Live2DTrackingSession
   → Live2D parameter frame C ABI
-  → LibGodotAdapter::create_instance()
-  → GodotRuntime::start()
+  → LibGodotInstance::start()
   → C++ 创建 SceneTree、SubViewport 和 Ayagami 模型
   → C++ 每帧向 Godot 提交已完成的 Live2D 参数并驱动 iteration
   → Godot RenderingServer / Mali-G610 完成离屏绘制
   → C++ 取得已完成帧的 GPU 纹理
-  → RGBA DMA-BUF → RGA → MPP → OutputManager
-  → GodotRuntime::shutdown()
+  → RGBA DMA-BUF → RGA → MPP → EncodedVideoSink
+  → 宿主 MediaOutputSession → OutputManager → RTSP
+  → LibGodotInstance::finish_application() → 输出排空 → shutdown()
 ```
 
 Godot 4.7.1 已提供实验性的 LibGodot Linux 静态库/共享库构建和
@@ -156,6 +160,8 @@ Headless EGL 继续由 `docs/headless-live2d-uvc-implementation-plan.md` 单独�
 ```text
 VtbApplication
 ├── VideoInput
+├── VideoProcessingRuntime
+│   └── VideoFrameConsumer
 ├── FacePipeline
 ├── Live2DFaceMapper
 ├── GodotRuntime                 VTB-owned facade
@@ -183,12 +189,14 @@ VtbApplication
 `VtbApplication` 作为组合根选择具体的视频、RKNN、Godot 和输出实现，但不承载这些
 组件内部的采集、推理、渲染、编码或协议算法。
 
-视频输入和模型管线通过独立工厂函数构造，并以 `VideoSource`、`FacePipeline` 和
-`FaceTrackingService` 三个边界组合。`VtbApplication` 只拥有并排序它们的生命周期。
+视频输入和模型管线通过独立工厂函数构造。`VideoProcessingRuntime` 只组合
+`VideoSource` 与 `VideoFrameConsumer`；`FaceFrameConsumer` 在人脸模块内适配
+`FacePipeline`。`VtbApplication` 只拥有并排序这些边界的生命周期。
 
 ### 6.2 `GodotRuntime`
 
-`GodotRuntime` 是 VTB 代码可见的唯一 Godot 生命周期接口，负责：
+`GodotRuntime` 是带替身后端的生命周期契约原型，目前仅由状态机单元测试使用。
+产品使用 `apps/vtb-live2d/vtb_application.cpp` 中的 `LibGodotInstance`。以下条目保留设计职责：
 
 - 初始化 Godot 全局运行环境；
 - 创建并持有 SceneTree；
@@ -199,7 +207,7 @@ VtbApplication
 - 有序销毁 Godot 对象并清理全局单例。
 
 Godot 输入接口只接受 `OpenVTLive2DFrameInput`。该结构包含最终 Live2D 参数、取景
-状态、单调时钟结果时间戳和 generation；接口不接受摄像头句柄、模型路径、关键点、
+状态、单调时钟结果产生时间戳和 snapshot_generation；接口不接受摄像头句柄、模型路径、关键点、
 RKNN context 或 `FacePipeline` 对象。
 
 它拥有系统资源和 Godot 全局状态，复制和移动操作必须明确删除。
@@ -504,7 +512,7 @@ setup
 ```text
 camera_frame_id
 face_result_id
-parameter_generation
+snapshot_generation
 render_frame_id
 encoded_frame_id
 output_packet_id
@@ -727,7 +735,7 @@ experiments/godot/embedded-runtime/
 
 实现：
 
-- OpenCV/V4L2 输入；
+- 直接 V4L2 摄像头输入；
 - LatestFrameSlot；
 - RKNN detector/landmark；
 - PnP、表情、校准和映射；

@@ -6,7 +6,7 @@
 #include <optional>
 #include <string>
 
-#include "vtb/live2d/live2d_face_mapper.hpp"
+#include "vtb/live2d/live2d_parameters.hpp"
 
 namespace vtb {
 

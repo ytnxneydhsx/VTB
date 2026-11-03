@@ -6,40 +6,47 @@
 参数映射位于 LibGodot 外部；Godot 只接收已经生成的 Live2D 参数帧：
 
 ```text
-OpenCV V4L2 camera source
+V4L2 CameraSource (MMAP / DQBUF / QBUF)
   → capacity-one LatestFrameSlot
+  → VideoFrameConsumer
+  → FaceFrameConsumer
   → RKNN detector (NPU core 0)
   → RKNN 66-point landmark model (NPU core 1)
   → OpenSeeFace-compatible C++ PnP / expression features
   → C++ Live2DFaceMapper
-  → FaceTrackingService capacity-one parameter snapshot
+  → Live2DTrackingSession capacity-one parameter snapshot
   → openvt_libgodot_application_submit_live2d_frame()
   → Godot main thread parameter input
   → Ayagami model parameters
   → SubViewport → DMA-BUF → RGA → MPP H.264
-  → OutputManager → RTSP
+  → EncodedVideoSink 同步编码包回调
+  → 宿主 MediaOutputSession → OutputManager → RTSP
 ```
 
-Godot/Ayagami、渲染提交和媒体输出继续使用已经验证的实现。`vtb-live2d` 可执行文件
-直接链接视频输入、OpenCV、RKNN 和 `FaceTrackingService`；LibGodot 共享库不再编译
-摄像头、RKNN 模型、几何估计和人脸管线源码。
+Godot/Ayagami、DMA-BUF、RGA 和 MPP 保留原有资源链；输出协议移到宿主。`vtb-live2d` 可执行文件
+直接链接 V4L2 视频输入、OpenCV PnP 几何计算、RKNN 和 `Live2DTrackingSession`；LibGodot 共享库不再编译
+摄像头、RKNN 模型、几何估计、人脸管线、OutputManager 或 RTSP 源码，也不链接 FFmpeg。
 
 ## 模块边界
 
-- `OpenCvVideoSource`：打开摄像头或 OpenCV 支持的文件源，输出 BGR CPU 帧租约。
-- `PipelineRuntime`：采集线程和推理线程；交接槽容量固定为一，推理落后时覆盖旧帧。
+- `CameraSource`：直接打开 V4L2 摄像头，管理 MMAP/DMA-BUF 缓冲区和
+  `DQBUF/QBUF` 帧租约，当前输出 YUYV/NV12/NV21 原始帧。
+- `VideoProcessingRuntime`：只组合 `VideoSource`、`LatestFrameSlot` 和
+  `VideoFrameConsumer`，管理采集/消费线程、latest-only 覆盖、停止和异常传播。
+- `FaceFrameConsumer`：把统一帧消费接口适配到 `FacePipeline` 并发布人脸结果。
 - `RknnFaceDetector` / `RknnLandmarkEstimator`：加载 `.rknn` 模型并固定到两个 NPU core。
 - `OpenSeeFaceGeometryEstimator`：保留 70 点模板、14 点 PnP、Euler 角、66 点反投影和
   Remedian 表情特征语义。
 - `Live2DFaceMapper`：中立姿态校准、限幅、参数映射和按单调时钟计算的一阶平滑。
-- `FaceTrackingService`：纯 C++ 服务，接收独立创建的 `VideoSource` 和 `FacePipeline`，
-  管理容量一的参数快照、校准和 HTTP 控制线程。
+- `Live2DTrackingSession`：应用层组合类，创建 `FaceFrameConsumer`，管理参数快照和校准。
+- `Live2DControlServer`：独立的 HTTP 控制组件，借用寿命更长的会话，序列化状态和转发命令。
+- `MediaOutputSession`：宿主编码包接收器，复制回调中的借用字节，管理输出启动、排空和停止。
 - `VtbApplication`：分别创建视频输入与模型管线，读取最新参数快照并提交给 Godot。
 - `Live2DParameters`：独立的十参数值对象；Godot 只编译这个数据类型，不编译
   `Live2DFaceMapper`。
 - `OpenVTLive2DFrameInput`：宿主与 LibGodot 之间的固定数值帧对象，只包含十个
-  Live2D 参数、取景状态、结果时间戳和 generation；通过 C linkage 函数提交。
-- `EmbeddedLive2DApplication`：Godot 内部渲染/输出编排，只消费参数帧并驱动 Ayagami。
+  Live2D 参数、取景状态、结果产生时间戳和 snapshot_generation；通过 C linkage 函数提交。
+- `EmbeddedLive2DApplication`：Godot 内部渲染/编码编排，只消费参数帧并驱动 Ayagami。
 
 推理回调不访问 Godot 对象。它只更新纯 C++ mailbox；宿主主线程通过固定桥接函数
 提交数值字段，跨边界不再传递 Godot `Dictionary`、摄像头对象或模型对象。
@@ -58,7 +65,11 @@ Godot/Ayagami、渲染提交和媒体输出继续使用已经验证的实现。`
 | `mouth_open` | `ParamMouthOpenY` | 归一化到 0～1 |
 | `mouth_wide` | `ParamMouthForm` | 限幅 -1～1 |
 
-映射结果默认使用 50 ms 时间常数。参数快照超过 150 ms 后，Godot 内部的
+`poll_snapshot_update()` 仅供主线程消费；空值表示没有新快照。`snapshot_generation`
+随映射或取景变化递增，不能当作摄像头帧号；来源帧号保留在映射结果的 `frame_id()`。
+取景更新保持原映射时间戳。没有新快照时继续使用最近参数，不能立即触发衰减。
+
+映射结果默认使用 50 ms 时间常数。距结果产生时间超过 150 ms 后，Godot 内部的
 `EmbeddedLive2DApplication` 以 250 ms 时间常数把模型恢复到默认值。
 
 ## 启动
@@ -72,8 +83,10 @@ OPENVT_CONFIG=/path/to/deployment/config/vtb-live2d.json \
 
 配置结构见 [`video-input-configuration.md`](video-input-configuration.md) 和
 [`config/vtb-live2d.example.json`](../config/vtb-live2d.example.json)。启动时先通过
-V4L2 确认设备类型、采集能力和实际协商的 FourCC、尺寸、帧率，再由 OpenCV V4L2
-后端读取。当前产品配置只接受 `v4l2_camera` 输入。
+V4L2 确认设备类型和采集能力，并要求驱动回填的 FourCC、尺寸、帧率与 JSON 请求
+完全一致，然后直接使用
+MMAP 缓冲区采集。当前产品配置只接受 `v4l2_camera` 输入和
+YUYV/NV12/NV21 原始格式。
 
 ## 控制口
 
@@ -88,7 +101,8 @@ V4L2 确认设备类型、采集能力和实际协商的 FourCC、尺寸、帧�
 
 ## 构建依赖
 
-主程序的 CMake 构建需要 OpenCV 与 RKNN sysroot：
+主程序的 CMake 构建需要 OpenCV core/calib 与 RKNN sysroot。OpenCV 只用于
+PnP 几何计算，摄像头采集不链接 `videoio`：
 
 ```bash
 export OPENVT_VTB_SOURCE_ROOT=/path/to/VTB
@@ -98,9 +112,13 @@ export OPENVT_OPENCV_ROOT=/path/to/arm64-opencv-sysroot
 export OPENVT_RKNN_ROOT=/path/to/arm64-rknn-sysroot
 ```
 
-Godot 内置模块只需要 `OPENVT_VTB_SOURCE_ROOT`、`OPENVT_BOARD_SYSROOT` 和
-`OPENVT_FFMPEG_SYSROOT`。OpenCV 与 `librknnrt.so` 由 `vtb-live2d` 宿主链接并在部署
-目录提供运行库；它们不再成为 LibGodot 模块依赖。
+Godot 内置模块只需要 `OPENVT_VTB_SOURCE_ROOT`、`OPENVT_BOARD_SYSROOT`。OpenCV、
+RKNN 和 FFmpeg 由宿主链接。产品构建启用 `VTB_ENABLE_EMBEDDED_GODOT`、
+`VTB_ENABLE_OPENCV_FACE_PIPELINE`、`VTB_ENABLE_RKNN_FACE`、`VTB_ENABLE_RGA_FACE`、
+`VTB_ENABLE_RTSP_OUTPUT`。两个推理后端关闭时，通用会话与消费适配仍可独立编译。
+
+ABI v2 使用 `openvt_libgodot_application_initialize_v2()`、版本查询和配置尺寸校验。
+宿主和 LibGodot 必须成对构建、成对部署。回调契约与关闭顺序见 [模块边界](module-boundaries.md)。
 
 2026-10-30 的拆分前路径已在 RK3588 完成实机验证。摄像头路径连续处理 300 个渲染帧，
 MPP 编码和 RTSP 写出均为 300，丢弃和错误均为 0，渲染吞吐为 29.788 FPS。
@@ -118,7 +136,7 @@ MPP 编码和 RTSP 写出均为 300，丢弃和错误均为 0，渲染吞吐为 
 该数值不包含摄像头曝光、编码、网络和浏览器解码，不能当作端到端延迟。取证完成后
 用 `SIGTERM` 停止持续运行，退出码 143 来自本次主动清理。
 
-本次宿主/LibGodot 边界拆分已经通过 ARM64 交叉编译和动态依赖检查，尚未在
+历史构建记录不覆盖 ABI v2；本轮以 [模块边界](module-boundaries.md) 的验证范围为准，尚未在
 RK3588 上运行。仍需完成新边界的板端回归、C++/Python 数值精度对照、长时间
 稳定性和摄像头到浏览器的关联时间戳端到端延迟测量。
 

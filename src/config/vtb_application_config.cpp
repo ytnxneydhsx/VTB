@@ -99,6 +99,15 @@ VideoInputType parse_video_input_type(const std::string& value) {
         "video_input.type is unsupported: " + value);
 }
 
+void validate_direct_v4l2_pixel_format(const std::string& value) {
+    if (value == "YUYV" || value == "NV12" || value == "NV21") {
+        return;
+    }
+    throw std::invalid_argument(
+        "video_input.pixel_format must be YUYV, NV12 or NV21 for direct "
+        "V4L2 capture; compressed formats require a decoder");
+}
+
 VideoInputConfiguration parse_video_input(const Json& root) {
     const Json& video = required_object(root, "video_input", "root");
     VideoInputConfiguration config;
@@ -112,6 +121,7 @@ VideoInputConfiguration parse_video_input(const Json& root) {
         throw std::invalid_argument(
             "video_input.pixel_format must contain exactly four characters");
     }
+    validate_direct_v4l2_pixel_format(config.pixel_format);
     config.width =
         required_uint32(video, "width", "video_input", 1, 8192);
     config.height =
@@ -130,6 +140,8 @@ FacePipelineConfiguration parse_face_pipeline(const Json& root) {
         required_nonempty_string(face, "detector_model", "face_pipeline");
     config.landmark_model =
         required_nonempty_string(face, "landmark_model", "face_pipeline");
+    config.rga_dma_heap =
+        required_nonempty_string(face, "rga_dma_heap", "face_pipeline");
     config.redetect_interval_frames = required_uint32(
         face,
         "redetect_interval_frames",
@@ -188,8 +200,9 @@ RenderConfiguration parse_render(const Json& root) {
         required_nonempty_string(render, "godot_project_dir", "render");
     config.live2d_model =
         required_nonempty_string(render, "live2d_model", "render");
-    config.rtsp_url =
-        required_nonempty_string(render, "rtsp_url", "render");
+    if (render.contains("rtsp_url")) {
+        throw std::invalid_argument("Move render.rtsp_url to output.rtsp_url");
+    }
     config.output_width =
         required_uint32(render, "output_width", "render", 2, 8192);
     config.output_height =
@@ -207,6 +220,13 @@ RenderConfiguration parse_render(const Json& root) {
         throw std::invalid_argument(
             "render output dimensions must be even for NV12 encoding");
     }
+    return config;
+}
+
+MediaOutputConfiguration parse_output(const Json& root) {
+    const Json& output = required_object(root, "output", "root");
+    MediaOutputConfiguration config;
+    config.rtsp_url = required_nonempty_string(output, "rtsp_url", "output");
     return config;
 }
 
@@ -236,6 +256,7 @@ VtbApplicationConfiguration VtbApplicationConfigParser::parse(
     config.mapping = parse_mapping(root);
     config.control = parse_control(root);
     config.render = parse_render(root);
+    config.output = parse_output(root);
     return config;
 }
 

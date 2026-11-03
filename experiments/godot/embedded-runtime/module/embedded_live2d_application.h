@@ -7,6 +7,7 @@
 #include "core/object/ref_counted.h"
 #include "core/string/ustring.h"
 #include "vtb/live2d/live2d_parameters.hpp"
+#include "vtb/output/encoded_video_sink.hpp"
 
 class OpenVTDmaBufCapture;
 
@@ -17,7 +18,7 @@ class Live2DRenderSession;
 class EmbeddedLive2DApplicationConfig {
 public:
 	String live2d_model;
-	String rtsp_url;
+	EncodedVideoSink output_sink;
 	int output_width = 0;
 	int output_height = 0;
 	int output_fps = 0;
@@ -41,7 +42,7 @@ public:
 			float p_view_offset_x,
 			float p_view_offset_y,
 			uint64_t p_produced_timestamp_ns,
-			uint64_t p_generation);
+			uint64_t p_snapshot_generation);
 	Error prepare_frame(uint64_t p_monotonic_timestamp_ns);
 	Error complete_frame();
 	Error shutdown();
@@ -63,9 +64,10 @@ private:
 	Live2DParameters last_parameters_;
 	Live2DParameters pending_parameters_;
 	uint64_t last_parameter_update_timestamp_ns_ = 0;
+	uint64_t last_produced_timestamp_ns_ = 0;
 	uint64_t pending_produced_timestamp_ns_ = 0;
-	uint64_t last_generation_ = 0;
-	uint64_t pending_generation_ = 0;
+	uint64_t last_snapshot_generation_ = 0;
+	uint64_t pending_snapshot_generation_ = 0;
 	uint64_t completed_frames_ = 0;
 	float pending_view_zoom_ = 1.0F;
 	float pending_view_offset_x_ = 0.0F;
@@ -75,7 +77,7 @@ private:
 	int output_fps_ = 30;
 	int total_frames_ = 0;
 	String live2d_model_;
-	String rtsp_url_;
+	EncodedVideoSink output_sink_;
 	uint64_t maximum_parameter_age_ns_ = 150000000ULL;
 	bool has_pending_parameters_ = false;
 	bool initialized_ = false;

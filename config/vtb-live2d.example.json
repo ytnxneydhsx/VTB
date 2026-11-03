@@ -2,15 +2,16 @@
   "video_input": {
     "type": "v4l2_camera",
     "device": "/dev/video0",
-    "pixel_format": "MJPG",
-    "width": 1280,
-    "height": 720,
-    "fps": 60,
+    "pixel_format": "YUYV",
+    "width": 640,
+    "height": 480,
+    "fps": 30,
     "buffer_count": 4
   },
   "face_pipeline": {
     "detector_model": "/home/huangnv/VTB/models/openseeface/mnv3_detection_fp16.rknn",
     "landmark_model": "/home/huangnv/VTB/models/openseeface/lm_model3_fp16.rknn",
+    "rga_dma_heap": "/dev/dma_heap/system-uncached",
     "redetect_interval_frames": 0,
     "minimum_tracking_confidence": 0.6
   },
@@ -29,10 +30,12 @@
   "render": {
     "godot_project_dir": "/home/huangnv/VTB/runtime/cpp-host-libgodot-20261030-01/project",
     "live2d_model": "/home/huangnv/open-vt-model/阿芙洛狄忒模型文件/fense_vts/fense.model3.json",
-    "rtsp_url": "rtsp://127.0.0.1:8554/live2d",
     "output_width": 1920,
     "output_height": 1080,
     "output_fps": 30,
     "total_frames": 0
+  },
+  "output": {
+    "rtsp_url": "rtsp://127.0.0.1:8554/live2d"
   }
 }

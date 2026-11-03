@@ -13,8 +13,6 @@
 #include "platform/linuxbsd/platform_gl.h"
 #include "servers/rendering/rendering_server.h"
 #include "vtb/instrumentation/timer.hpp"
-#include "vtb/output/output_manager.hpp"
-#include "vtb/output/rtsp_output.hpp"
 
 #include <drm/drm_fourcc.h>
 #include <linux/dma-heap.h>
@@ -550,170 +548,6 @@ private:
 	size_t encoded_bytes = 0;
 };
 
-class TimedOutput final : public vtb::Output {
-public:
-	TimedOutput(std::unique_ptr<vtb::Output> p_output,
-			vtb::instrumentation::TimerHandle p_write_timer) :
-			output(std::move(p_output)), write_timer(std::move(p_write_timer)) {}
-	~TimedOutput() override = default;
-
-	TimedOutput(const TimedOutput &) = delete;
-	TimedOutput &operator=(const TimedOutput &) = delete;
-	TimedOutput(TimedOutput &&) = delete;
-	TimedOutput &operator=(TimedOutput &&) = delete;
-
-	bool supports(const vtb::StreamDescriptor &p_descriptor) const override {
-		return output->supports(p_descriptor);
-	}
-
-	void start(const std::vector<vtb::StreamDescriptor> &p_descriptors) override {
-		output->start(p_descriptors);
-	}
-
-	void write(const vtb::MediaPacket &p_packet) override {
-		auto timer = write_timer.scope();
-		output->write(p_packet);
-	}
-
-	void request_stop() noexcept override { output->request_stop(); }
-	void stop() noexcept override { output->stop(); }
-	std::string name() const override { return output->name(); }
-
-private:
-	std::unique_ptr<vtb::Output> output;
-	vtb::instrumentation::TimerHandle write_timer;
-};
-
-class RtspPublisher {
-public:
-	RtspPublisher() = default;
-	~RtspPublisher() { shutdown(); }
-
-	RtspPublisher(const RtspPublisher &) = delete;
-	RtspPublisher &operator=(const RtspPublisher &) = delete;
-	RtspPublisher(RtspPublisher &&) = delete;
-	RtspPublisher &operator=(RtspPublisher &&) = delete;
-
-	Error initialize(const String &p_rtsp_url, int p_width, int p_height, int p_fps,
-			const std::vector<uint8_t> &p_codec_configuration,
-			vtb::instrumentation::TimerHandle p_write_timer, String &r_error) {
-		try {
-			CharString url_utf8 = p_rtsp_url.utf8();
-			vtb::StreamDescriptor descriptor = vtb::StreamDescriptor::video(
-					STREAM_ID, 1, "h264", static_cast<uint32_t>(p_width), static_cast<uint32_t>(p_height),
-					static_cast<uint32_t>(p_fps), 1, true, p_codec_configuration);
-			manager.register_stream(descriptor);
-			vtb::OutputOptions options;
-			options.queue_capacity = OUTPUT_QUEUE_CAPACITY;
-			auto rtsp_output = std::make_unique<vtb::RtspOutput>(url_utf8.get_data());
-			manager.add(OUTPUT_ID,
-					std::make_unique<TimedOutput>(std::move(rtsp_output), std::move(p_write_timer)),
-					options);
-			manager.bind(OUTPUT_ID, STREAM_ID);
-			manager.start(OUTPUT_ID);
-			started = true;
-			const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
-			while (std::chrono::steady_clock::now() < deadline) {
-				const std::vector<vtb::OutputStatus> statuses = manager.status();
-				if (!statuses.empty() && statuses.front().state == vtb::OutputState::running) {
-					return OK;
-				}
-				std::this_thread::sleep_for(std::chrono::milliseconds(20));
-			}
-			const std::vector<vtb::OutputStatus> statuses = manager.status();
-			if (!statuses.empty()) {
-				r_error = "RTSP output did not start: " + String::utf8(statuses.front().last_error.c_str());
-			} else {
-				r_error = "RTSP output did not expose startup status";
-			}
-			shutdown();
-			return ERR_CANT_CONNECT;
-		} catch (const std::exception &error) {
-			r_error = "initialize RTSP output failed: " + String::utf8(error.what());
-			return ERR_CANT_CREATE;
-		} catch (...) {
-			r_error = "initialize RTSP output failed with an unknown exception";
-			return ERR_CANT_CREATE;
-		}
-	}
-
-	Error publish(const std::shared_ptr<const std::vector<uint8_t>> &p_payload,
-			uint64_t p_pts_ns, uint64_t p_dts_ns, uint64_t p_duration_ns,
-			uint64_t p_sequence, bool p_keyframe, String &r_error) {
-		try {
-			const vtb::MediaPacket packet(STREAM_ID, p_payload, p_pts_ns, p_dts_ns,
-					p_duration_ns, p_sequence, p_keyframe, false);
-			manager.publish(packet);
-			return OK;
-		} catch (const std::exception &error) {
-			r_error = "publish RTSP packet failed: " + String::utf8(error.what());
-			return FAILED;
-		} catch (...) {
-			r_error = "publish RTSP packet failed with an unknown exception";
-			return FAILED;
-		}
-	}
-
-	Error finish(String &r_error) {
-		if (!started) {
-			return OK;
-		}
-		const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
-		while (std::chrono::steady_clock::now() < deadline) {
-			const std::vector<vtb::OutputStatus> statuses = manager.status();
-			if (!statuses.empty()) {
-				const vtb::OutputStatus &status = statuses.front();
-				if (status.queue_depth == 0 && status.written + status.dropped >= status.published) {
-					break;
-				}
-			}
-			std::this_thread::sleep_for(std::chrono::milliseconds(10));
-		}
-
-		try {
-			manager.stop(OUTPUT_ID);
-			started = false;
-			const std::vector<vtb::OutputStatus> statuses = manager.status();
-			if (!statuses.empty()) {
-				last_status = statuses.front();
-			}
-		} catch (const std::exception &error) {
-			r_error = "stop RTSP output failed: " + String::utf8(error.what());
-			return FAILED;
-		} catch (...) {
-			r_error = "stop RTSP output failed with an unknown exception";
-			return FAILED;
-		}
-		if (last_status.written == 0) {
-			r_error = "RTSP output did not write any encoded packets: " + String::utf8(last_status.last_error.c_str());
-			return ERR_CANT_CONNECT;
-		}
-		return OK;
-	}
-
-	void shutdown() {
-		if (!started) {
-			return;
-		}
-		try {
-			manager.stop(OUTPUT_ID);
-		} catch (...) {
-		}
-		started = false;
-	}
-
-	const vtb::OutputStatus &get_last_status() const { return last_status; }
-
-private:
-	static constexpr const char *OUTPUT_ID = "rtsp";
-	static constexpr const char *STREAM_ID = "live2d-video";
-	static constexpr size_t OUTPUT_QUEUE_CAPACITY = 16;
-
-	vtb::OutputManager manager;
-	vtb::OutputStatus last_status;
-	bool started = false;
-};
-
 class FrameSlot {
 public:
 	enum class State {
@@ -780,7 +614,6 @@ public:
 			rga_timer(timers.register_timer("live2d.rga")),
 			mpp_timer(timers.register_timer("live2d.mpp")),
 			publish_timer(timers.register_timer("live2d.output_publish_call")),
-			rtsp_write_timer(timers.register_timer("live2d.rtsp_write")),
 			media_timer(timers.register_timer("live2d.media_total")) {}
 	~OpenVTDmaBufPipeline() { shutdown(); }
 
@@ -789,7 +622,7 @@ public:
 	OpenVTDmaBufPipeline(OpenVTDmaBufPipeline &&) = delete;
 	OpenVTDmaBufPipeline &operator=(OpenVTDmaBufPipeline &&) = delete;
 
-	Error initialize(const String &p_rtsp_url, int p_width, int p_height, int p_fps, int p_total_frames,
+	Error initialize(const vtb::EncodedVideoSink &p_sink, int p_width, int p_height, int p_fps, int p_total_frames,
 			String &r_error) {
 		width = p_width;
 		height = p_height;
@@ -834,10 +667,16 @@ public:
 		if (error != OK) {
 			return error;
 		}
-		error = rtsp_publisher.initialize(p_rtsp_url, width, height, fps, codec_configuration,
-				rtsp_write_timer, r_error);
-		if (error != OK) {
-			return error;
+		output_sink = p_sink;
+		vtb::H264StreamFormat format;
+		format.width = static_cast<uint32_t>(width);
+		format.height = static_cast<uint32_t>(height);
+		format.fps = static_cast<uint32_t>(fps);
+		format.codec_configuration = codec_configuration.data();
+		format.codec_configuration_size = codec_configuration.size();
+		if (output_sink.configure_h264(output_sink.context, &format) != 0) {
+			r_error = "host rejected H.264 stream configuration";
+			return ERR_CANT_CONNECT;
 		}
 
 		accepting_frames = true;
@@ -862,7 +701,7 @@ public:
 		}
 		print_line("OPENVT_DMABUF_LAYOUT source=Godot_SubViewport_GL_Texture gpu_copy=glBlitFramebuffer rgba_drm_format=AB24 rgba_rga_format=RK_FORMAT_RGBA_8888 nv12_rga_format=RK_FORMAT_YCbCr_420_SP modifier=not-specified vertical_flip=disabled");
 		print_line("OPENVT_DMABUF_PIPELINE mode=two_stage rgba_slots=3 nv12_buffers=1 media_workers=1 gl_finish=enabled backpressure=blocking");
-		print_line(vformat("OPENVT_RTSP_CONFIG stream=live2d-video queue_capacity=%d transport=tcp codec=h264", 16));
+		print_line("OPENVT_ENCODED_SINK_CONFIG codec=h264 callback=synchronous storage=borrowed");
 		return OK;
 	}
 
@@ -1020,17 +859,11 @@ public:
 			media_thread.wait_to_finish();
 		}
 		finished = true;
-		String rtsp_error_message;
-		Error rtsp_error = rtsp_publisher.finish(rtsp_error_message);
 
 		MutexLock lock(queue_mutex);
 		if (worker_error != OK) {
 			r_error = worker_error_message;
 			return worker_error;
-		}
-		if (rtsp_error != OK) {
-			r_error = rtsp_error_message;
-			return rtsp_error;
 		}
 		if (encoded_frames != submitted_frames) {
 			r_error = vformat("encoded frame count mismatch: submitted=%d encoded=%d", submitted_frames,
@@ -1060,7 +893,6 @@ public:
 			media_thread.wait_to_finish();
 		}
 		print_results();
-		rtsp_publisher.shutdown();
 		mpp_encoder.shutdown();
 		if (source_framebuffer != 0) {
 			glDeleteFramebuffers(1, &source_framebuffer);
@@ -1117,8 +949,20 @@ private:
 			uint64_t mpp_end = OS::get_singleton()->get_ticks_usec();
 			if (error == OK) {
 				const uint64_t duration_ns = 1'000'000'000ULL / static_cast<uint64_t>(fps);
-				error = rtsp_publisher.publish(payload, packet_pts_ns, packet_dts_ns, duration_ns,
-						static_cast<uint64_t>(slot->frame_index + 1), keyframe, error_message);
+				vtb::EncodedVideoPacketView packet;
+				packet.data = payload->data();
+				packet.size = payload->size();
+				packet.pts_ns = packet_pts_ns;
+				packet.dts_ns = packet_dts_ns;
+				packet.duration_ns = duration_ns;
+				packet.sequence = static_cast<uint64_t>(slot->frame_index + 1);
+				if (keyframe) {
+					packet.keyframe = 1;
+				}
+				if (output_sink.publish(output_sink.context, &packet) != 0) {
+					error = FAILED;
+					error_message = "host rejected encoded video packet";
+				}
 			}
 			uint64_t publish_end = OS::get_singleton()->get_ticks_usec();
 
@@ -1279,11 +1123,7 @@ private:
 		print_stage_metrics("mpp", mpp_timer, mpp_samples);
 		print_stage_metrics("output_publish_call", publish_timer, publish_samples);
 		print_stage_metrics("media", media_timer, media_samples);
-		print_timer_metrics("rtsp_write", rtsp_write_timer);
-		const vtb::OutputStatus &status = rtsp_publisher.get_last_status();
-		print_line(vformat("OPENVT_RTSP_RESULT published=%d written=%d dropped=%d errors=%d reconnects=%d queue_depth=%d queue_capacity=%d",
-				status.published, status.written, status.dropped, status.errors, status.reconnects,
-				static_cast<uint64_t>(status.queue_depth), static_cast<uint64_t>(status.queue_capacity)));
+
 	}
 
 	int width = 0;
@@ -1308,12 +1148,11 @@ private:
 	vtb::instrumentation::TimerHandle rga_timer;
 	vtb::instrumentation::TimerHandle mpp_timer;
 	vtb::instrumentation::TimerHandle publish_timer;
-	vtb::instrumentation::TimerHandle rtsp_write_timer;
 	vtb::instrumentation::TimerHandle media_timer;
 	DmaBuffer nv12_buffer;
 	FrameSlot *slots[FRAME_SLOT_COUNT] = {};
 	MppEncoder mpp_encoder;
-	RtspPublisher rtsp_publisher;
+	vtb::EncodedVideoSink output_sink;
 	Thread media_thread;
 	BinaryMutex queue_mutex;
 	Semaphore free_slots_available;
@@ -1343,21 +1182,19 @@ OpenVTDmaBufCapture::~OpenVTDmaBufCapture() {
 }
 
 void OpenVTDmaBufCapture::_bind_methods() {
-	ClassDB::bind_method(D_METHOD("configure", "rtsp_url", "width", "height", "fps", "total_frames"),
-			&OpenVTDmaBufCapture::configure);
 	ClassDB::bind_method(D_METHOD("capture_frame", "viewport", "frame_index", "end_of_stream"),
 			&OpenVTDmaBufCapture::capture_frame);
 	ClassDB::bind_method(D_METHOD("finish"), &OpenVTDmaBufCapture::finish);
 	ClassDB::bind_method(D_METHOD("get_last_error"), &OpenVTDmaBufCapture::get_last_error);
 }
 
-Error OpenVTDmaBufCapture::configure(const String &p_rtsp_url, int p_width, int p_height, int p_fps,
+Error OpenVTDmaBufCapture::configure(const vtb::EncodedVideoSink &p_sink, int p_width, int p_height, int p_fps,
 		int p_total_frames) {
 	if (configured || pipeline != nullptr) {
 		operation_error_message = "capture is already configured";
 		return ERR_ALREADY_IN_USE;
 	}
-	if (p_rtsp_url.is_empty() || p_width <= 0 || p_height <= 0 || p_fps <= 0 || p_total_frames < 0) {
+	if (p_sink.context == nullptr || p_sink.configure_h264 == nullptr || p_sink.publish == nullptr || p_width <= 0 || p_height <= 0 || p_fps <= 0 || p_total_frames < 0) {
 		operation_error_message = "invalid DMA-BUF capture configuration";
 		return ERR_INVALID_PARAMETER;
 	}
@@ -1366,7 +1203,7 @@ Error OpenVTDmaBufCapture::configure(const String &p_rtsp_url, int p_width, int 
 		return ERR_INVALID_PARAMETER;
 	}
 
-	rtsp_url = p_rtsp_url;
+	output_sink = p_sink;
 	width = p_width;
 	height = p_height;
 	fps = p_fps;
@@ -1444,7 +1281,7 @@ void OpenVTDmaBufCapture::_initialize_pipeline_render_thread() {
 		return;
 	}
 	pipeline = memnew(OpenVTDmaBufPipeline);
-	Error init_error = pipeline->initialize(rtsp_url, width, height, fps, total_frames, error_message);
+	Error init_error = pipeline->initialize(output_sink, width, height, fps, total_frames, error_message);
 	if (init_error != OK) {
 		memdelete(pipeline);
 		pipeline = nullptr;

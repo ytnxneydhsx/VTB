@@ -12,8 +12,10 @@ option(VTB_ENABLE_ROCKCHIP_MPP_PUBLISHER
     "Build the RK3588 RGA/MPP RTSP publisher" OFF)
 option(VTB_ENABLE_RKNN_FACE
     "Build the RK3588 RKNN OpenSeeFace detector and landmark models" OFF)
+option(VTB_ENABLE_RGA_FACE
+    "Build the Rockchip RGA face image transformer" OFF)
 option(VTB_ENABLE_OPENCV_FACE_PIPELINE
-    "Build the OpenCV video source and OpenSeeFace geometry estimator" OFF)
+    "Build the OpenCV-based OpenSeeFace geometry estimator" OFF)
 option(VTB_ENABLE_EMBEDDED_GODOT
     "Build the VTB-owned LibGodot host executable" OFF)
 set(VTB_ROCKCHIP_SYSROOT "" CACHE PATH
@@ -26,6 +28,21 @@ set(VTB_LIBGODOT_LIBRARY "" CACHE FILEPATH
     "ARM64 LibGodot shared library containing the OpenVT bridge")
 set(VTB_EMBEDDED_RPATH_LINK "" CACHE STRING
     "Semicolon-separated ARM64 dependency directories for the LibGodot host link")
+
+if(VTB_ENABLE_ROCKCHIP_MPP_PUBLISHER OR VTB_ENABLE_RGA_FACE)
+    if(VTB_ROCKCHIP_SYSROOT STREQUAL "")
+        message(FATAL_ERROR
+            "VTB_ROCKCHIP_SYSROOT is required for Rockchip RGA support")
+    endif()
+    find_path(VTB_RGA_INCLUDE_DIR rga/im2d.h
+        PATHS "${VTB_ROCKCHIP_SYSROOT}/usr/include"
+        NO_DEFAULT_PATH
+        REQUIRED)
+    find_library(VTB_RGA_LIBRARY rga
+        PATHS "${VTB_ROCKCHIP_SYSROOT}/usr/lib/aarch64-linux-gnu"
+        NO_DEFAULT_PATH
+        REQUIRED)
+endif()
 
 function(vtb_configure_target target)
     target_compile_features(${target} PRIVATE cxx_std_17)
@@ -109,16 +126,8 @@ if(VTB_ENABLE_RTSP_OUTPUT)
             message(FATAL_ERROR
                 "VTB_ROCKCHIP_SYSROOT is required for the Rockchip MPP publisher")
         endif()
-        find_path(VTB_RGA_INCLUDE_DIR rga/im2d.h
-            PATHS "${VTB_ROCKCHIP_SYSROOT}/usr/include"
-            NO_DEFAULT_PATH
-            REQUIRED)
         find_path(VTB_MPP_INCLUDE_DIR rockchip/rk_mpi.h
             PATHS "${VTB_ROCKCHIP_SYSROOT}/usr/include"
-            NO_DEFAULT_PATH
-            REQUIRED)
-        find_library(VTB_RGA_LIBRARY rga
-            PATHS "${VTB_ROCKCHIP_SYSROOT}/usr/lib/aarch64-linux-gnu"
             NO_DEFAULT_PATH
             REQUIRED)
         find_library(VTB_MPP_LIBRARY rockchip_mpp
@@ -199,7 +208,6 @@ vtb_configure_target(vtb_video_core)
 add_library(vtb_capture STATIC
     src/v4l2_camera.cpp
     src/video/camera_source.cpp
-    src/video/v4l2_device_validator.cpp
 )
 add_library(vtb::capture ALIAS vtb_capture)
 target_include_directories(vtb_capture PUBLIC include)
@@ -209,66 +217,42 @@ vtb_configure_target(vtb_capture)
 add_library(vtb_face_core STATIC
     src/face/model_input.cpp
     src/face/cpu_image_transformer.cpp
+    src/face/face_types.cpp
     src/face/face_pipeline.cpp
+    src/face/face_frame_consumer.cpp
 )
 add_library(vtb::face_core ALIAS vtb_face_core)
 target_include_directories(vtb_face_core PUBLIC include)
 target_link_libraries(vtb_face_core PUBLIC vtb_video_core)
 vtb_configure_target(vtb_face_core)
 
-add_library(vtb_live2d_core STATIC
+add_library(vtb_live2d_values STATIC
     src/live2d/live2d_parameters.cpp
-    src/live2d/live2d_face_mapper.cpp
+    src/live2d/live2d_mapping_result.cpp
 )
-add_library(vtb::live2d_core ALIAS vtb_live2d_core)
-target_include_directories(vtb_live2d_core PUBLIC include)
-target_link_libraries(vtb_live2d_core PUBLIC vtb_face_core)
-vtb_configure_target(vtb_live2d_core)
+add_library(vtb::live2d_values ALIAS vtb_live2d_values)
+target_include_directories(vtb_live2d_values PUBLIC include)
+vtb_configure_target(vtb_live2d_values)
+
+add_library(vtb_live2d_mapper STATIC src/live2d/live2d_face_mapper.cpp)
+add_library(vtb::live2d_mapper ALIAS vtb_live2d_mapper)
+target_include_directories(vtb_live2d_mapper PUBLIC include)
+target_link_libraries(vtb_live2d_mapper PUBLIC vtb_face_core vtb_live2d_values)
+vtb_configure_target(vtb_live2d_mapper)
 
 add_library(vtb_render_runtime STATIC
     src/render/godot_runtime.cpp
 )
 add_library(vtb::render_runtime ALIAS vtb_render_runtime)
 target_include_directories(vtb_render_runtime PUBLIC include)
-target_link_libraries(vtb_render_runtime PUBLIC vtb_live2d_core)
+target_link_libraries(vtb_render_runtime PUBLIC vtb_live2d_values)
 vtb_configure_target(vtb_render_runtime)
 
 if(VTB_ENABLE_OPENCV_FACE_PIPELINE)
     find_package(OpenCV REQUIRED COMPONENTS
         core
-        imgproc
         calib
-        videoio
-        imgcodecs
     )
-
-    add_library(vtb_video_opencv STATIC
-        src/video/opencv_video_source.cpp
-    )
-    add_library(vtb::video_opencv ALIAS vtb_video_opencv)
-    target_include_directories(vtb_video_opencv PUBLIC include)
-    target_include_directories(vtb_video_opencv
-        SYSTEM PRIVATE ${OpenCV_INCLUDE_DIRS})
-    target_link_libraries(vtb_video_opencv
-        PUBLIC vtb_video_core
-        PRIVATE ${OpenCV_LIBS}
-    )
-    vtb_configure_target(vtb_video_opencv)
-
-    add_library(vtb_video_input STATIC
-        src/video/video_input_factory.cpp
-    )
-    add_library(vtb::video_input ALIAS vtb_video_input)
-    target_include_directories(vtb_video_input PUBLIC include)
-    target_link_libraries(vtb_video_input
-        PUBLIC
-            vtb_application_config
-            vtb_video_core
-        PRIVATE
-            vtb_capture
-            vtb_video_opencv
-    )
-    vtb_configure_target(vtb_video_input)
 
     add_library(vtb_face_geometry_opencv STATIC
         src/face/openseeface_geometry_estimator.cpp
@@ -313,44 +297,77 @@ if(VTB_ENABLE_RKNN_FACE)
         PRIVATE "${VTB_RKNN_LIBRARY}"
     )
     vtb_configure_target(vtb_face_rknn)
+
 endif()
 
-add_library(vtb_pipeline_runtime STATIC
-    src/pipeline/pipeline_runtime.cpp
+if(VTB_ENABLE_RGA_FACE)
+    add_library(vtb_face_rga STATIC
+        src/face/rga_image_transformer.cpp
+    )
+    add_library(vtb::face_rga ALIAS vtb_face_rga)
+    target_include_directories(vtb_face_rga PUBLIC include)
+    target_include_directories(vtb_face_rga
+        SYSTEM PRIVATE "${VTB_RGA_INCLUDE_DIR}")
+    target_link_libraries(vtb_face_rga
+        PUBLIC vtb_face_core
+        PRIVATE "${VTB_RGA_LIBRARY}"
+    )
+    vtb_configure_target(vtb_face_rga)
+endif()
+
+add_library(vtb_video_processing_runtime STATIC
+    src/pipeline/video_processing_runtime.cpp
 )
-add_library(vtb::pipeline_runtime ALIAS vtb_pipeline_runtime)
-target_include_directories(vtb_pipeline_runtime PUBLIC include)
-target_link_libraries(vtb_pipeline_runtime
+add_library(vtb::video_processing_runtime ALIAS vtb_video_processing_runtime)
+target_include_directories(vtb_video_processing_runtime PUBLIC include)
+target_link_libraries(vtb_video_processing_runtime
     PUBLIC
         vtb_video_core
-        vtb_face_core
         Threads::Threads
 )
-vtb_configure_target(vtb_pipeline_runtime)
+vtb_configure_target(vtb_video_processing_runtime)
 
-if(VTB_ENABLE_OPENCV_FACE_PIPELINE AND VTB_ENABLE_RKNN_FACE)
-    add_library(vtb_face_tracking_service STATIC
-        src/face/face_tracking_service.cpp
-    )
-    add_library(vtb::face_tracking_service ALIAS vtb_face_tracking_service)
-    target_include_directories(vtb_face_tracking_service PUBLIC include)
-    target_link_libraries(vtb_face_tracking_service
-        PUBLIC
-            vtb_pipeline_runtime
-            vtb_live2d_core
-            Threads::Threads
-    )
-    vtb_configure_target(vtb_face_tracking_service)
-endif()
+# Application composition remains buildable without concrete inference backends.
+add_library(vtb_live2d_tracking_session STATIC
+    apps/vtb-live2d/live2d_tracking_snapshot.cpp
+    apps/vtb-live2d/live2d_tracking_session.cpp
+)
+target_include_directories(vtb_live2d_tracking_session PUBLIC apps/vtb-live2d)
+target_link_libraries(vtb_live2d_tracking_session
+    PUBLIC vtb_live2d_mapper
+    PRIVATE vtb_video_processing_runtime Threads::Threads)
+vtb_configure_target(vtb_live2d_tracking_session)
+
+add_library(vtb_live2d_control STATIC apps/vtb-live2d/live2d_control_server.cpp)
+target_include_directories(vtb_live2d_control PUBLIC apps/vtb-live2d)
+target_link_libraries(vtb_live2d_control
+    PUBLIC vtb_application_config
+    PRIVATE vtb_live2d_tracking_session Threads::Threads)
+vtb_configure_target(vtb_live2d_control)
+
+add_library(vtb_application_video_input STATIC apps/vtb-live2d/video_input_factory.cpp)
+target_include_directories(vtb_application_video_input PUBLIC apps/vtb-live2d)
+target_link_libraries(vtb_application_video_input
+    PUBLIC vtb_application_config vtb_video_core
+    PRIVATE vtb_capture)
+vtb_configure_target(vtb_application_video_input)
+
+add_library(vtb_media_output_session STATIC apps/vtb-live2d/media_output_session.cpp)
+target_include_directories(vtb_media_output_session PUBLIC apps/vtb-live2d)
+target_link_libraries(vtb_media_output_session
+    PUBLIC vtb_output_core
+    PRIVATE vtb_instrumentation)
+vtb_configure_target(vtb_media_output_session)
 
 add_executable(vtb src/main.cpp)
 target_link_libraries(vtb PRIVATE vtb_capture)
 vtb_configure_target(vtb)
 
 if(VTB_ENABLE_EMBEDDED_GODOT)
-    if(NOT VTB_ENABLE_OPENCV_FACE_PIPELINE OR NOT VTB_ENABLE_RKNN_FACE)
+    if(NOT VTB_ENABLE_OPENCV_FACE_PIPELINE OR NOT VTB_ENABLE_RKNN_FACE OR
+       NOT VTB_ENABLE_RGA_FACE OR NOT VTB_ENABLE_RTSP_OUTPUT)
         message(FATAL_ERROR
-            "VTB_ENABLE_EMBEDDED_GODOT requires the OpenCV and RKNN face pipeline")
+            "VTB_ENABLE_EMBEDDED_GODOT requires OpenCV, RKNN, RGA face backends and RTSP output")
     endif()
     if(VTB_GODOT_SOURCE_ROOT STREQUAL "")
         message(FATAL_ERROR
@@ -378,9 +395,13 @@ if(VTB_ENABLE_EMBEDDED_GODOT)
     )
     target_link_libraries(vtb-live2d
         PRIVATE
-            vtb_face_tracking_service
+            vtb_live2d_tracking_session
+            vtb_live2d_control
+            vtb_media_output_session
+            vtb_output_rtsp
             vtb_application_config
-            vtb_video_input
+            vtb_application_video_input
+            vtb_face_rga
             vtb_face_rknn
             vtb_face_geometry_opencv
             "${VTB_LIBGODOT_LIBRARY}"

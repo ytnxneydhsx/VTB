@@ -25,6 +25,7 @@ class FacePipelineConfiguration {
 public:
     std::string detector_model;
     std::string landmark_model;
+    std::string rga_dma_heap;
     std::uint32_t redetect_interval_frames = 0;
     float minimum_tracking_confidence = 0.0F;
 };
@@ -49,11 +50,15 @@ class RenderConfiguration {
 public:
     std::string godot_project_dir;
     std::string live2d_model;
-    std::string rtsp_url;
     std::uint32_t output_width = 0;
     std::uint32_t output_height = 0;
     std::uint32_t output_fps = 0;
     std::uint32_t total_frames = 0;
+};
+
+class MediaOutputConfiguration {
+public:
+    std::string rtsp_url;
 };
 
 class VtbApplicationConfiguration {
@@ -63,6 +68,7 @@ public:
     FaceMappingConfiguration mapping;
     ControlConfiguration control;
     RenderConfiguration render;
+    MediaOutputConfiguration output;
 };
 
 class VtbApplicationConfigParser final {

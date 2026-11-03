@@ -15,11 +15,14 @@
 #include "openvt_libgodot_bridge.h"
 #include "vtb/config/config_file_reader.hpp"
 #include "vtb/config/vtb_application_config.hpp"
-#include "vtb/face/cpu_image_transformer.hpp"
-#include "vtb/face/face_tracking_service.hpp"
+#include "live2d_tracking_session.hpp"
+#include "live2d_control_server.hpp"
+#include "media_output_session.hpp"
+#include "vtb/output/rtsp_output.hpp"
 #include "vtb/face/openseeface_geometry_estimator.hpp"
+#include "vtb/face/rga_image_transformer.hpp"
 #include "vtb/face/rknn_face_models.hpp"
-#include "vtb/video/video_input_factory.hpp"
+#include "video_input_factory.hpp"
 
 namespace vtb {
 namespace {
@@ -219,6 +222,9 @@ private:
 class LibGodotInstance final {
 public:
     explicit LibGodotInstance(ApplicationArguments& arguments) {
+        if (openvt_libgodot_bridge_abi_version() != OPENVT_LIBGODOT_ABI_VERSION) {
+            throw std::runtime_error("LibGodot bridge ABI mismatch; rebuild host and library together");
+        }
         instance_ = libgodot_create_godot_instance(
             arguments.godot_argument_count(),
             arguments.godot_arguments(),
@@ -237,7 +243,7 @@ public:
     LibGodotInstance(LibGodotInstance&&) = delete;
     LibGodotInstance& operator=(LibGodotInstance&&) = delete;
 
-    void start(const RenderConfiguration& config) {
+    void start(const RenderConfiguration& config, EncodedVideoSink output_sink) {
         const int result = openvt_libgodot_start(instance_);
         if (result != 0) {
             throw std::runtime_error(
@@ -245,22 +251,25 @@ public:
         }
         OpenVTEmbeddedApplicationConfig embedded_config{};
         embedded_config.live2d_model = config.live2d_model.c_str();
-        embedded_config.rtsp_url = config.rtsp_url.c_str();
+        embedded_config.abi_version = OPENVT_LIBGODOT_ABI_VERSION;
+        embedded_config.config_size = sizeof(embedded_config);
+        embedded_config.output_sink = output_sink;
         embedded_config.output_width = config.output_width;
         embedded_config.output_height = config.output_height;
         embedded_config.output_fps = config.output_fps;
         embedded_config.total_frames = config.total_frames;
+        // Also clean up a partially initialized application if initialization throws.
+        application_cleanup_required_ = true;
         const int application_result =
-            openvt_libgodot_application_initialize(&embedded_config);
+            openvt_libgodot_application_initialize_v2(&embedded_config);
         if (application_result != 0) {
             throw_application_error(
                 "C++ Live2D application initialization failed",
                 application_result);
         }
-        application_initialized_ = true;
     }
 
-    void submit(const FaceTrackingSnapshot& snapshot) {
+    void submit(const Live2DTrackingSnapshot& snapshot) {
         const Live2DParameters& parameters = snapshot.mapping().parameters();
         OpenVTLive2DFrameInput input{};
         input.angle_x = parameters.angle_x();
@@ -278,7 +287,7 @@ public:
         input.view_offset_y = snapshot.view().offset_y();
         input.produced_timestamp_ns =
             snapshot.mapping().produced_timestamp_ns();
-        input.generation = snapshot.generation();
+        input.snapshot_generation = snapshot.snapshot_generation();
         const int result =
             openvt_libgodot_application_submit_live2d_frame(&input);
         if (result != 0) {
@@ -313,12 +322,17 @@ public:
         return openvt_libgodot_application_completed_frames();
     }
 
-    int shutdown() noexcept {
+    int finish_application() noexcept {
         int application_result = 0;
-        if (application_initialized_) {
+        if (application_cleanup_required_) {
             application_result = openvt_libgodot_application_shutdown();
-            application_initialized_ = false;
+            application_cleanup_required_ = false;
         }
+        return application_result;
+    }
+
+    int shutdown() noexcept {
+        const int application_result = finish_application();
         if (instance_ != nullptr) {
             libgodot_destroy_godot_instance(instance_);
             instance_ = nullptr;
@@ -342,12 +356,13 @@ private:
     }
 
     GDExtensionObjectPtr instance_ = nullptr;
-    bool application_initialized_ = false;
+    bool application_cleanup_required_ = false;
 };
 
 std::unique_ptr<FacePipeline> create_face_pipeline(
     const FacePipelineConfiguration& config) {
-    auto image_transformer = std::make_unique<CpuImageTransformer>();
+    auto image_transformer =
+        std::make_unique<RgaImageTransformer>(config.rga_dma_heap);
     auto detector = std::make_unique<RknnFaceDetector>(
         config.detector_model, RknnCore::core0);
     auto landmark = std::make_unique<RknnLandmarkEstimator>(
@@ -365,9 +380,8 @@ std::unique_ptr<FacePipeline> create_face_pipeline(
         std::move(geometry));
 }
 
-std::unique_ptr<FaceTrackingService> create_face_tracking_service(
+std::unique_ptr<Live2DTrackingSession> create_tracking_session(
     const FaceMappingConfiguration& mapping,
-    const ControlConfiguration& control,
     std::unique_ptr<VideoSource> video_input,
     std::unique_ptr<FacePipeline> face_pipeline) {
     Live2DMappingConfig mapping_config;
@@ -378,16 +392,10 @@ std::unique_ptr<FaceTrackingService> create_face_tracking_service(
     mapping_config.angle_y_sign = mapping.angle_y_sign;
     mapping_config.angle_z_sign = mapping.angle_z_sign;
 
-    FaceTrackingControlConfig control_config;
-    control_config.bind_address = control.bind_address;
-    control_config.port = control.port;
-    control_config.allowed_origin = control.allowed_origin;
-
-    return std::make_unique<FaceTrackingService>(
+    return std::make_unique<Live2DTrackingSession>(
         std::move(video_input),
         std::move(face_pipeline),
-        mapping_config,
-        std::move(control_config));
+        mapping_config);
 }
 
 }  // namespace
@@ -412,26 +420,36 @@ public:
             video_input_factory.create(config_.video_input);
         std::unique_ptr<FacePipeline> face_pipeline =
             create_face_pipeline(config_.face_pipeline);
-        std::unique_ptr<FaceTrackingService> face_tracking =
-            create_face_tracking_service(
+        std::unique_ptr<Live2DTrackingSession> tracking_session =
+            create_tracking_session(
                 config_.mapping,
-                config_.control,
                 std::move(video_input),
                 std::move(face_pipeline));
 
+        Live2DControlServer control_server(config_.control, *tracking_session);
+        // Construction order also protects the callback context during exception unwinding.
+        MediaOutputSession media_output(std::make_unique<RtspOutput>(config_.output.rtsp_url));
         LibGodotInstance godot(arguments_);
-        godot.start(config_.render);
-        face_tracking->start();
+        godot.start(config_.render, media_output.sink());
+        tracking_session->start();
+        control_server.start();
 
         unsigned long iterations = 0;
         auto next_frame_deadline = std::chrono::steady_clock::now();
         while (!stop_requested.load(std::memory_order_acquire)) {
-            std::optional<FaceTrackingSnapshot> snapshot =
-                face_tracking->take_latest();
+            std::optional<Live2DTrackingSnapshot> snapshot =
+                tracking_session->poll_snapshot_update();
             if (snapshot.has_value()) {
                 godot.submit(snapshot.value());
             }
-            const bool finished = godot.run_frame();
+            bool finished = false;
+            try {
+                finished = godot.run_frame();
+            } catch (...) {
+                media_output.rethrow_if_failed();
+                throw;
+            }
+            media_output.rethrow_if_failed();
             ++iterations;
             if (finished) {
                 break;
@@ -448,18 +466,21 @@ public:
             std::this_thread::sleep_until(next_frame_deadline);
         }
 
-        face_tracking->request_stop();
-        face_tracking->stop();
+        control_server.stop();
+        tracking_session->request_stop();
+        tracking_session->stop();
         const std::uint64_t completed_frames = godot.completed_frames();
         std::cout << "VTB_LIBGODOT_RESULT iterations=" << iterations
                   << " completed_frames=" << completed_frames << "\n";
-        const int shutdown_result = godot.shutdown();
+        const int shutdown_result = godot.finish_application();
+        media_output.finish();
         if (shutdown_result != 0) {
             throw std::runtime_error(
                 "C++ Live2D application shutdown failed: " +
                 std::to_string(shutdown_result) + " " +
                 openvt_libgodot_application_last_error());
         }
+        godot.shutdown();
         return 0;
     }
 

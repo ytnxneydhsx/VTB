@@ -13,7 +13,8 @@ RGBA DMA-BUF
 NV12 DMA-BUF
     ↓ MPP
 H.264 packet
-    ↓ OutputManager → RtspOutput
+    ↓ EncodedVideoSink 同步借用回调
+宿主 MediaOutputSession → OutputManager → RtspOutput
 RTSP/TCP → MediaMTX
 ```
 
@@ -32,9 +33,9 @@ Godot 直接渲染到外部颜色附件。
 - 1920×1080、30 FPS、300 帧；
 - 3 个 RGBA DMA-BUF FrameSlot，媒体线程独占 1 个 NV12 DMA-BUF；
 - Godot render thread 完成 `glBlitFramebuffer` 和 `glFinish` 后把 FrameSlot 放入有界 FIFO；
-- 一个常驻媒体线程按帧序执行 RGA、MPP 和 `OutputManager::publish()`；
+- 一个常驻媒体线程按帧序执行 RGA、MPP 和同步 `EncodedVideoSink::publish` 回调；
 - MPP 的 SPS/PPS 在输出启动前注册到 H.264 流描述，编码包携带单调时钟 PTS/DTS、帧序号和 IDR 标记；
-- `RtspOutput` 在独立输出线程中通过 RTSP/TCP 发布，有界队列容量为 16；
+- 宿主的 `RtspOutput` 在独立输出线程中通过 RTSP/TCP 发布，有界队列容量为 16；
 - 队列满时生产端阻塞形成背压；Godot 与外部 EGLImage 的纹理方向一致，GPU copy 不执行 Y 翻转；
 - 使用 `/dev/dma_heap/system-uncached`；
 - 仍保留 X11，只验证人物到硬件编码的共享缓冲链路；
@@ -55,25 +56,27 @@ Live2D H.264 使用 MPP FIXQP、QP 18，以固定量化质量替代 CBR 的目�
 ## 为什么直接接入 OutputManager
 
 原先的最短替代方案是把 Annex-B 文件路径换成 FIFO，再启动独立 publisher 进程。
-当前实现直接复用项目内的 `OutputManager + RtspOutput`，让 MPP 包的时间戳、关键帧、
+当前宿主复用项目内的 `OutputManager + RtspOutput`，让 MPP 包的时间戳、关键帧、
 重连和有界队列策略留在同一进程内，减少额外进程和 FFmpeg 再探测。该改造没有消除
 编码包到 `MediaPacket`、再到 FFmpeg `AVPacket` 的内存复制，也不保证网络断连时零丢帧。
 是否继续优化复制次数，以端到端 P95/P99、CPU、队列深度和丢帧数为依据。
 
-内置模块构建需要提供 VTB 源码、Rockchip 板端 sysroot 和 FFmpeg sysroot：
+内置模块构建需要 VTB 源码与 Rockchip 板端 sysroot：
 
 ```bash
 export OPENVT_VTB_SOURCE_ROOT=/path/to/VTB
 export OPENVT_BOARD_SYSROOT=/path/to/board-sysroot
-export OPENVT_FFMPEG_SYSROOT=/path/to/ffmpeg-sysroot
 ```
 
-该 Godot 模块只负责 Live2D 渲染帧的 DMA-BUF、RGA、MPP 和 RTSP 输出。OpenCV 与
-RKNN 已移到 `vtb-live2d` 宿主，不进入 LibGodot 模块的源码和链接列表。
+该 Godot 模块负责 Live2D 渲染帧的 DMA-BUF、RGA 和 MPP 编码；RTSP、OutputManager
+和 FFmpeg 移到宿主。同步回调后宿主拥有独立编码包副本，本次增加一次编码字节复制。
+V4L2/RKNN 以及仅用于 PnP 几何计算的 OpenCV 位于 `vtb-live2d` 宿主，不进入
+LibGodot 模块的源码和链接列表。
 
 ## 与实时人脸输入的边界
 
-`run_render_on_rk.sh` 保留为 Godot-hosted 固定动画和媒体输出对照路径。实时人脸产品
+`run_render_on_rk.sh` 为历史 Godot-hosted 对照入口，须搭配 ABI v2 之前的完整二进制。
+当前模块移除了 GDScript 的 RTSP configure 入口，旧场景会明确提示迁移。实时人脸产品
 路径使用 `experiments/godot/embedded-runtime/run_on_rk.sh` 启动 `vtb-live2d`：
 
 ```bash
@@ -81,8 +84,8 @@ OPENVT_CONFIG=/path/to/deployment/config/vtb-live2d.json \
 ./experiments/godot/embedded-runtime/run_on_rk.sh
 ```
 
-视频输入、模型推理、校准和控制口由宿主中的纯 C++ `FaceTrackingService` 管理；
-配置来自 JSON，启动前会验证 V4L2 设备和实际协商参数。
+宿主 `Live2DTrackingSession` 管理视频输入、模型和校准；`Live2DControlServer` 管理控制口；
+配置来自 JSON，启动时会验证 V4L2 设备，并要求驱动回填参数与请求完全一致。
 Godot 通过固定 C ABI 只接收最终 Live2D 参数帧。完整边界见
 [`docs/live2d-face-tracking-bridge.md`](../../../docs/live2d-face-tracking-bridge.md)。
 

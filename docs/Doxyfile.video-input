@@ -1,0 +1,76 @@
+PROJECT_NAME           = "VTB Video Input"
+PROJECT_BRIEF          = "Video source inheritance and frame ownership collaboration"
+OUTPUT_DIRECTORY       = build/docs/video-input-doxygen
+
+OUTPUT_LANGUAGE        = Chinese
+FULL_PATH_NAMES        = NO
+STRIP_FROM_PATH        = .
+
+INPUT                  = include/vtb/video \
+                         include/vtb/capture_config.hpp \
+                         include/vtb/v4l2_camera.hpp \
+                         include/vtb/pipeline/video_processing_runtime.hpp \
+                         include/vtb/face/cpu_image_transformer.hpp \
+                         include/vtb/face/face_types.hpp \
+                         include/vtb/face/face_pipeline.hpp \
+                         include/vtb/face/rga_image_transformer.hpp \
+                         include/vtb/face/rknn_face_models.hpp \
+                         include/vtb/face/face_frame_consumer.hpp \
+                         include/vtb/live2d \
+                         include/vtb/output/encoded_video_sink.hpp \
+                         apps/vtb-live2d \
+                         src/video \
+                         src/v4l2_camera.cpp \
+                         src/pipeline/video_processing_runtime.cpp \
+                         src/face/cpu_image_transformer.cpp \
+                         src/face/face_types.cpp \
+                         src/face/face_pipeline.cpp \
+                         src/face/rga_image_transformer.cpp \
+                         src/face/rknn_face_models.cpp \
+                         src/face/face_frame_consumer.cpp \
+                         src/live2d \
+                         docs/video-input-groups.dox
+FILE_PATTERNS          = *.hpp *.cpp *.dox
+RECURSIVE              = YES
+
+EXTRACT_ALL            = YES
+EXTRACT_PRIVATE        = YES
+EXTRACT_STATIC         = YES
+EXTRACT_LOCAL_CLASSES  = YES
+EXTRACT_ANON_NSPACES   = YES
+BUILTIN_STL_SUPPORT    = YES
+HIDE_UNDOC_MEMBERS     = NO
+HIDE_UNDOC_CLASSES     = NO
+
+GENERATE_HTML          = YES
+HTML_OUTPUT            = html
+GENERATE_TREEVIEW      = YES
+SEARCHENGINE           = NO
+GENERATE_LATEX         = NO
+SORT_GROUP_NAMES       = NO
+
+HAVE_DOT               = YES
+DOT_PATH               = /opt/homebrew/bin
+DOT_IMAGE_FORMAT       = svg
+INTERACTIVE_SVG        = YES
+HIDE_UNDOC_RELATIONS   = NO
+
+CLASS_GRAPH            = YES
+COLLABORATION_GRAPH    = YES
+GROUP_GRAPHS           = YES
+UML_LOOK               = YES
+UML_LIMIT_NUM_FIELDS   = 12
+TEMPLATE_RELATIONS     = YES
+DOT_GRAPH_MAX_NODES    = 40
+MAX_DOT_GRAPH_DEPTH    = 0
+
+INCLUDE_GRAPH          = NO
+INCLUDED_BY_GRAPH      = NO
+CALL_GRAPH             = NO
+CALLER_GRAPH           = NO
+DIRECTORY_GRAPH        = NO
+
+WARNINGS               = YES
+WARN_IF_UNDOCUMENTED   = NO
+WARN_IF_DOC_ERROR      = YES
+QUIET                   = NO

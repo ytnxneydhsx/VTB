@@ -4,9 +4,9 @@ Mac 与 RK3588 的直连调试、上网优先级和仓库同步脚本见 [`netwo
 
 ## C++ 程序
 
-- `src/main.cpp`：新的 VTB 主程序入口，生成 `build/vtb`。当前阶段打开 `/dev/video0`，请求并核对 `MJPG 1280×720 @ 30fps`；还没有申请帧缓冲或开始采集。
-- `include/vtb/capture_config.hpp`：请求参数和驱动协商结果。
-- `include/vtb/v4l2_camera.hpp`、`src/v4l2_camera.cpp`：V4L2 设备打开、能力检查、格式与帧率协商。
+- `src/main.cpp`：新的 VTB 主程序入口，生成 `build/vtb`。当前阶段打开 `/dev/video0`，严格请求 `MJPG 1280×720 @ 30fps`；驱动回填值不一致时直接报错。程序还没有申请帧缓冲或开始采集。
+- `include/vtb/capture_config.hpp`：视频设备请求参数。
+- `include/vtb/v4l2_camera.hpp`、`src/v4l2_camera.cpp`：V4L2 设备打开、能力检查以及格式与帧率的严格设置。
 - `examples/camera-info/main.cpp`：归档的摄像头信息示例，生成 `build/camera-info`。程序固定打开 `/dev/video0`，打印摄像头支持的格式、分辨率和帧率；它不会读取画面。
 
 在按 `AGENTS.md` 准备好的远端 ARM64 交叉编译任务目录中构建：
@@ -152,7 +152,7 @@ VTB_FACE3D_LIVE2D_UDP=127.0.0.1:11574 \
 网卡地址或端口变化时，分别设置 `VTB_MONITOR_BIND_ADDRESS` 和
 `VTB_MONITOR_PORT`。
 
-监看页的“以当前正脸校准”按钮会请求 RK 上的纯 C++ `FaceTrackingService` 清空
+监看页的“以当前正脸校准”按钮会请求 RK 上的纯 C++ `Live2DTrackingSession` 清空
 原中立姿态，再用接下来 30 个有效正脸帧计算新零点。校准期间页面
 显示进度，Live2D 头部参数先回到中立值。控制口默认只绑定
 `192.168.77.2:11575`，浏览器请求来源限制为
@@ -188,13 +188,18 @@ ssh -fN \
 ## OpenSeeFace 驱动 Live2D
 
 当前分支由 `VtbApplication` 分别创建视频输入和模型管线。纯 C++
-`FaceTrackingService` 完成 RKNN 检测、66 点关键点、OpenSeeFace 兼容 PnP/表情、
+`Live2DTrackingSession` 完成 RKNN 检测、66 点关键点、OpenSeeFace 兼容 PnP/表情、
 校准和 Live2D 参数映射；Godot 只通过固定 C ABI 接收容量为一的最终参数快照并写入
 Ayagami。产品路径不再启动 Python、JSON 或 UDP 参数桥接，浏览器校准和取景控制由
-宿主 C++ 服务提供。
+宿主 `Live2DControlServer` 提供。
+
+输出由宿主 `MediaOutputSession` 管理，Godot 通过同步编码包回调交付 H.264 数据。
+ABI v2 要求宿主与 LibGodot 成对构建；配置将 `render.rtsp_url` 移到 `output.rtsp_url`。
+模块依赖、接口语义和构建边界见 [模块边界](docs/module-boundaries.md)。
 
 产品配置统一从 `--config` 指定的 JSON 文件读取。摄像头类型、设备、FourCC、尺寸、
-帧率和缓冲区数量均为显式字段；启动时会先通过 V4L2 检查设备和实际协商结果。示例
+帧率和缓冲区数量均为显式字段；启动时会通过 V4L2 检查设备，并要求驱动回填的
+格式、尺寸和帧率与请求完全一致。示例
 见 [`config/vtb-live2d.example.json`](config/vtb-live2d.example.json)。
 
 协议、映射表、启动方式、失效恢复和当前尚未连接的实时推流边界见

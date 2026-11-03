@@ -30,6 +30,10 @@ int remember_application_error(Error p_error) {
 
 } // namespace
 
+extern "C" uint32_t openvt_libgodot_bridge_abi_version(void) {
+	return OPENVT_LIBGODOT_ABI_VERSION;
+}
+
 extern "C" int openvt_libgodot_start(void *p_instance) {
 	GodotInstance *instance = instance_from_opaque(p_instance);
 	if (instance == nullptr) {
@@ -63,25 +67,29 @@ extern "C" int openvt_libgodot_iteration(void *p_instance) {
 	return 0;
 }
 
-extern "C" int openvt_libgodot_application_initialize(
+extern "C" int openvt_libgodot_application_initialize_v2(
 		const OpenVTEmbeddedApplicationConfig *p_config) {
 	if (application != nullptr) {
 		application_error = "Embedded Live2D application is already initialized";
 		return static_cast<int>(ERR_ALREADY_IN_USE);
 	}
 	if (p_config == nullptr || p_config->live2d_model == nullptr ||
-			p_config->rtsp_url == nullptr ||
+			p_config->abi_version != OPENVT_LIBGODOT_ABI_VERSION ||
+			p_config->config_size != sizeof(OpenVTEmbeddedApplicationConfig) ||
+			p_config->output_sink.context == nullptr ||
+			p_config->output_sink.configure_h264 == nullptr ||
+			p_config->output_sink.publish == nullptr ||
 			p_config->output_width > static_cast<uint32_t>(std::numeric_limits<int>::max()) ||
 			p_config->output_height > static_cast<uint32_t>(std::numeric_limits<int>::max()) ||
 			p_config->output_fps > static_cast<uint32_t>(std::numeric_limits<int>::max()) ||
 			p_config->total_frames > static_cast<uint32_t>(std::numeric_limits<int>::max())) {
-		application_error = "Embedded application configuration is null";
+		application_error = "Embedded application configuration or bridge ABI is invalid";
 		return static_cast<int>(ERR_INVALID_PARAMETER);
 	}
 	application = std::make_unique<vtb::EmbeddedLive2DApplication>();
 	vtb::EmbeddedLive2DApplicationConfig config;
 	config.live2d_model = String::utf8(p_config->live2d_model);
-	config.rtsp_url = String::utf8(p_config->rtsp_url);
+	config.output_sink = p_config->output_sink;
 	config.output_width = static_cast<int>(p_config->output_width);
 	config.output_height = static_cast<int>(p_config->output_height);
 	config.output_fps = static_cast<int>(p_config->output_fps);
@@ -125,7 +133,7 @@ extern "C" int openvt_libgodot_application_submit_live2d_frame(
 				p_input->view_offset_x,
 				p_input->view_offset_y,
 				p_input->produced_timestamp_ns,
-				p_input->generation));
+				p_input->snapshot_generation));
 	} catch (const std::exception &error) {
 		application_error = error.what();
 		return static_cast<int>(ERR_INVALID_PARAMETER);

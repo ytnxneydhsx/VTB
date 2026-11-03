@@ -1,12 +1,11 @@
-#include "vtb/video/video_input_factory.hpp"
+#include "video_input_factory.hpp"
 
 #include <stdexcept>
 #include <utility>
 
 #include "vtb/capture_config.hpp"
 #include "vtb/v4l2_camera.hpp"
-#include "vtb/video/opencv_video_source.hpp"
-#include "vtb/video/v4l2_device_validator.hpp"
+#include "vtb/video/camera_source.hpp"
 
 namespace vtb {
 
@@ -23,17 +22,8 @@ std::unique_ptr<VideoSource> VideoInputFactory::create(
     requested.height = config.height;
     requested.fps = config.fps;
 
-    V4l2DeviceValidator validator;
-    validator.validate(requested);
-
-    OpenCvVideoSourceConfig source_config;
-    source_config.device_path = requested.device_path;
-    source_config.pixel_format = requested.pixel_format;
-    source_config.width = requested.width;
-    source_config.height = requested.height;
-    source_config.fps = requested.fps;
-    source_config.buffer_count = config.buffer_count;
-    return std::make_unique<OpenCvVideoSource>(std::move(source_config));
+    return std::make_unique<CameraSource>(
+        std::move(requested), config.buffer_count);
 }
 
 }  // namespace vtb

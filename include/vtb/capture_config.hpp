@@ -16,20 +16,4 @@ public:
     std::uint32_t fps = 30;
 };
 
-class NegotiatedCaptureConfig {
-public:
-    std::string driver;
-    std::string card;
-    std::string bus_info;
-    std::uint32_t pixel_format = 0;
-    std::uint32_t width = 0;
-    std::uint32_t height = 0;
-    std::uint32_t bytes_per_line = 0;
-    std::uint32_t size_image = 0;
-    std::uint32_t frame_interval_numerator = 0;
-    std::uint32_t frame_interval_denominator = 0;
-
-    double fps() const;
-};
-
 }  // namespace vtb

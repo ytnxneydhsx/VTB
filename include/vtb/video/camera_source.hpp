@@ -25,10 +25,7 @@ public:
     void request_stop() noexcept override;
     void close() noexcept override;
 
-    const NegotiatedCaptureConfig& negotiated_config() const noexcept;
-
 private:
-    NegotiatedCaptureConfig negotiated_config_;
     std::shared_ptr<V4l2BufferPool> buffer_pool_;
 };
 

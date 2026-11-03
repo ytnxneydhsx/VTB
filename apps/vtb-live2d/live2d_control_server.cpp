@@ -1,4 +1,5 @@
-#include "vtb/face/face_tracking_service.hpp"
+#include "live2d_control_server.hpp"
+#include "live2d_tracking_session.hpp"
 
 #include <arpa/inet.h>
 #include <netinet/in.h>
@@ -13,163 +14,35 @@
 #include <cstdlib>
 #include <cstring>
 #include <memory>
-#include <mutex>
-#include <optional>
 #include <sstream>
 #include <stdexcept>
 #include <string>
 #include <thread>
-#include <time.h>
 #include <utility>
 
-#include "vtb/pipeline/pipeline_runtime.hpp"
 
 namespace vtb {
-namespace {
 
-constexpr float kViewZoomMinimum = 0.5F;
-constexpr float kViewZoomMaximum = 6.0F;
-constexpr float kViewOffsetMinimum = -2.0F;
-constexpr float kViewOffsetMaximum = 2.0F;
-
-std::uint64_t monotonic_now_ns() {
-    timespec timestamp{};
-    if (clock_gettime(CLOCK_MONOTONIC, &timestamp) != 0) {
-        throw std::runtime_error("clock_gettime(CLOCK_MONOTONIC) failed");
-    }
-    return static_cast<std::uint64_t>(timestamp.tv_sec) * 1000000000ULL +
-        static_cast<std::uint64_t>(timestamp.tv_nsec);
-}
-
-class FaceParameterMailbox final {
+class Live2DControlServer::Impl final {
 public:
-    explicit FaceParameterMailbox(Live2DMappingConfig config)
-        : mapper_(config), calibration_required_(config.calibration_frames) {}
-    ~FaceParameterMailbox() = default;
-
-    FaceParameterMailbox(const FaceParameterMailbox&) = delete;
-    FaceParameterMailbox& operator=(const FaceParameterMailbox&) = delete;
-    FaceParameterMailbox(FaceParameterMailbox&&) = delete;
-    FaceParameterMailbox& operator=(FaceParameterMailbox&&) = delete;
-
-    void publish(const std::optional<FaceTrackingResult>& result) {
-        const std::uint64_t requested_reset =
-            reset_generation_.load(std::memory_order_acquire);
-        if (requested_reset != applied_reset_generation_) {
-            mapper_.reset_calibration();
-            applied_reset_generation_ = requested_reset;
-            reset_pending_.store(false, std::memory_order_release);
-        }
-        const FaceTrackingResult* face = nullptr;
-        if (result.has_value()) {
-            face = &result.value();
-        }
-        Live2DMappingResult mapped = mapper_.update(face, monotonic_now_ns());
-        std::lock_guard<std::mutex> lock(mutex_);
-        latest_ = std::move(mapped);
-        ++generation_;
-    }
-
-    std::optional<FaceTrackingSnapshot> read() const {
-        std::lock_guard<std::mutex> lock(mutex_);
-        if (!latest_.has_value()) {
-            return std::nullopt;
-        }
-        return FaceTrackingSnapshot(generation_, latest_.value(), view_);
-    }
-
-    void request_calibration_reset() noexcept {
-        reset_pending_.store(true, std::memory_order_release);
-        reset_generation_.fetch_add(1, std::memory_order_release);
-    }
-
-    bool set_view(const FaceTrackingViewState& view) noexcept {
-        if (!std::isfinite(view.zoom()) || !std::isfinite(view.offset_x()) ||
-            !std::isfinite(view.offset_y()) ||
-            view.zoom() < kViewZoomMinimum || view.zoom() > kViewZoomMaximum ||
-            view.offset_x() < kViewOffsetMinimum ||
-            view.offset_x() > kViewOffsetMaximum ||
-            view.offset_y() < kViewOffsetMinimum ||
-            view.offset_y() > kViewOffsetMaximum) {
-            return false;
-        }
-        std::lock_guard<std::mutex> lock(mutex_);
-        view_ = view;
-        ++generation_;
-        return true;
-    }
-
-    std::string health_json() const {
-        std::lock_guard<std::mutex> lock(mutex_);
-        bool calibrated = false;
-        bool tracking_valid = false;
-        std::size_t calibration_progress = 0;
-        float confidence = 0.0F;
-        if (latest_.has_value()) {
-            calibrated = latest_->calibrated();
-            tracking_valid = latest_->tracking_valid();
-            calibration_progress = latest_->calibration_progress();
-            confidence = latest_->confidence();
-        }
-        if (reset_pending_.load(std::memory_order_acquire)) {
-            calibrated = false;
-            calibration_progress = 0;
-        }
-        std::ostringstream body;
-        body << "{\"state\":\"running\",\"calibrated\":";
-        if (calibrated) {
-            body << "true";
-        } else {
-            body << "false";
-        }
-        body << ",\"tracking_valid\":";
-        if (tracking_valid) {
-            body << "true";
-        } else {
-            body << "false";
-        }
-        body << ",\"progress\":" << calibration_progress;
-        body << ",\"required\":" << calibration_required_;
-        body << ",\"confidence\":" << confidence;
-        body << ",\"view\":{\"zoom\":" << view_.zoom();
-        body << ",\"offset_x\":" << view_.offset_x();
-        body << ",\"offset_y\":" << view_.offset_y() << "}}";
-        return body.str();
-    }
-
-private:
-    mutable std::mutex mutex_;
-    Live2DFaceMapper mapper_;
-    std::size_t calibration_required_ = 0;
-    std::optional<Live2DMappingResult> latest_;
-    std::atomic<std::uint64_t> reset_generation_{0};
-    std::atomic<bool> reset_pending_{false};
-    std::uint64_t applied_reset_generation_ = 0;
-    std::uint64_t generation_ = 0;
-    FaceTrackingViewState view_;
-};
-
-class Live2DControlServer final {
-public:
-    Live2DControlServer(
-        FaceTrackingControlConfig config,
-        std::shared_ptr<FaceParameterMailbox> mailbox)
-        : config_(std::move(config)), mailbox_(std::move(mailbox)) {
-        if (config_.bind_address.empty() || config_.port < 1 ||
-            config_.port > 65535 || !mailbox_) {
+    Impl(
+        ControlConfiguration config,
+        Live2DTrackingSession& session)
+        : config_(std::move(config)), session_(session) {
+        if (config_.bind_address.empty() || config_.port < 1) {
             throw std::invalid_argument(
                 "Live2D control server configuration is invalid");
         }
     }
 
-    ~Live2DControlServer() {
+    ~Impl() {
         stop();
     }
 
-    Live2DControlServer(const Live2DControlServer&) = delete;
-    Live2DControlServer& operator=(const Live2DControlServer&) = delete;
-    Live2DControlServer(Live2DControlServer&&) = delete;
-    Live2DControlServer& operator=(Live2DControlServer&&) = delete;
+    Impl(const Impl&) = delete;
+    Impl& operator=(const Impl&) = delete;
+    Impl(Impl&&) = delete;
+    Impl& operator=(Impl&&) = delete;
 
     void start() {
         if (worker_.joinable()) {
@@ -231,6 +104,30 @@ public:
     }
 
 private:
+    std::string health_json() const {
+        const Live2DTrackingStatus status = session_.status();
+        std::ostringstream body;
+        body << "{\"state\":\"running\",\"calibrated\":";
+        if (status.calibrated) {
+            body << "true";
+        } else {
+            body << "false";
+        }
+        body << ",\"tracking_valid\":";
+        if (status.tracking_valid) {
+            body << "true";
+        } else {
+            body << "false";
+        }
+        body << ",\"progress\":" << status.calibration_progress;
+        body << ",\"required\":" << status.calibration_required;
+        body << ",\"confidence\":" << status.confidence;
+        body << ",\"view\":{\"zoom\":" << status.view.zoom();
+        body << ",\"offset_x\":" << status.view.offset_x();
+        body << ",\"offset_y\":" << status.view.offset_y() << "}}";
+        return body.str();
+    }
+
     static std::string header_value(
         const std::string& request,
         const std::string& name) {
@@ -380,7 +277,7 @@ private:
             const std::string first_line = request.substr(0, first_line_end);
             if (first_line == "GET /health HTTP/1.1") {
                 send_response(
-                    client, request, 200, "OK", mailbox_->health_json());
+                    client, request, 200, "OK", health_json());
                 return;
             }
             if (first_line == "OPTIONS /recalibrate HTTP/1.1" ||
@@ -414,9 +311,9 @@ private:
                 return;
             }
             if (first_line == "POST /recalibrate HTTP/1.1") {
-                mailbox_->request_calibration_reset();
+                session_.request_calibration_reset();
                 send_response(
-                    client, request, 202, "Accepted", mailbox_->health_json());
+                    client, request, 202, "Accepted", health_json());
                 return;
             }
             if (first_line == "POST /view HTTP/1.1") {
@@ -427,7 +324,7 @@ private:
                 if (!parse_json_number(body, "zoom", zoom) ||
                     !parse_json_number(body, "offset_x", offset_x) ||
                     !parse_json_number(body, "offset_y", offset_y) ||
-                    !mailbox_->set_view(FaceTrackingViewState(
+                    !session_.set_view(Live2DTrackingViewState(
                         static_cast<float>(zoom),
                         static_cast<float>(offset_x),
                         static_cast<float>(offset_y)))) {
@@ -440,7 +337,7 @@ private:
                     return;
                 }
                 send_response(
-                    client, request, 200, "OK", mailbox_->health_json());
+                    client, request, 200, "OK", health_json());
                 return;
             }
             send_response(
@@ -484,169 +381,18 @@ private:
         }
     }
 
-    FaceTrackingControlConfig config_;
-    std::shared_ptr<FaceParameterMailbox> mailbox_;
+    ControlConfiguration config_;
+    Live2DTrackingSession& session_;
     std::atomic<int> listen_socket_{-1};
     std::atomic<bool> stop_requested_{false};
     std::thread worker_;
 };
 
-}  // namespace
-
-FaceTrackingViewState::FaceTrackingViewState(
-    float zoom,
-    float offset_x,
-    float offset_y)
-    : zoom_(zoom), offset_x_(offset_x), offset_y_(offset_y) {}
-
-float FaceTrackingViewState::zoom() const noexcept {
-    return zoom_;
-}
-
-float FaceTrackingViewState::offset_x() const noexcept {
-    return offset_x_;
-}
-
-float FaceTrackingViewState::offset_y() const noexcept {
-    return offset_y_;
-}
-
-FaceTrackingSnapshot::FaceTrackingSnapshot(
-    std::uint64_t generation,
-    Live2DMappingResult mapping,
-    FaceTrackingViewState view)
-    : generation_(generation),
-      mapping_(std::move(mapping)),
-      view_(std::move(view)) {}
-
-std::uint64_t FaceTrackingSnapshot::generation() const noexcept {
-    return generation_;
-}
-
-const Live2DMappingResult& FaceTrackingSnapshot::mapping() const noexcept {
-    return mapping_;
-}
-
-const FaceTrackingViewState& FaceTrackingSnapshot::view() const noexcept {
-    return view_;
-}
-
-class FaceTrackingService::Impl final {
-public:
-    Impl(
-        std::unique_ptr<VideoSource> video_input,
-        std::unique_ptr<FacePipeline> face_pipeline,
-        Live2DMappingConfig mapping_config,
-        FaceTrackingControlConfig control_config)
-        : mailbox_(std::make_shared<FaceParameterMailbox>(mapping_config)),
-          runtime_(std::make_unique<PipelineRuntime>(
-              std::move(video_input),
-              std::move(face_pipeline),
-              [mailbox = mailbox_](
-                  const std::optional<FaceTrackingResult>& result) {
-                  mailbox->publish(result);
-              })),
-          control_server_(std::make_unique<Live2DControlServer>(
-              std::move(control_config), mailbox_)) {}
-
-    ~Impl() {
-        shutdown_noexcept();
-    }
-
-    Impl(const Impl&) = delete;
-    Impl& operator=(const Impl&) = delete;
-    Impl(Impl&&) = delete;
-    Impl& operator=(Impl&&) = delete;
-
-    void start() {
-        if (started_) {
-            return;
-        }
-        runtime_->start();
-        try {
-            control_server_->start();
-        } catch (...) {
-            runtime_->stop();
-            throw;
-        }
-        started_ = true;
-    }
-
-    void request_stop() noexcept {
-        control_server_->request_stop();
-        runtime_->request_stop();
-    }
-
-    void stop() {
-        control_server_->stop();
-        runtime_->stop();
-        runtime_->rethrow_if_failed();
-        started_ = false;
-    }
-
-    void rethrow_if_failed() const {
-        runtime_->rethrow_if_failed();
-    }
-
-    std::optional<FaceTrackingSnapshot> take_latest() {
-        runtime_->rethrow_if_failed();
-        std::optional<FaceTrackingSnapshot> snapshot = mailbox_->read();
-        if (!snapshot.has_value() ||
-            snapshot->generation() == delivered_generation_) {
-            return std::nullopt;
-        }
-        delivered_generation_ = snapshot->generation();
-        return snapshot;
-    }
-
-private:
-    void shutdown_noexcept() noexcept {
-        try {
-            request_stop();
-            runtime_->stop();
-        } catch (...) {
-        }
-        started_ = false;
-    }
-
-    std::shared_ptr<FaceParameterMailbox> mailbox_;
-    std::unique_ptr<PipelineRuntime> runtime_;
-    std::unique_ptr<Live2DControlServer> control_server_;
-    std::uint64_t delivered_generation_ = 0;
-    bool started_ = false;
-};
-
-FaceTrackingService::FaceTrackingService(
-    std::unique_ptr<VideoSource> video_input,
-    std::unique_ptr<FacePipeline> face_pipeline,
-    Live2DMappingConfig mapping_config,
-    FaceTrackingControlConfig control_config)
-    : impl_(std::make_unique<Impl>(
-          std::move(video_input),
-          std::move(face_pipeline),
-          mapping_config,
-          std::move(control_config))) {}
-
-FaceTrackingService::~FaceTrackingService() = default;
-
-void FaceTrackingService::start() {
-    impl_->start();
-}
-
-void FaceTrackingService::request_stop() noexcept {
-    impl_->request_stop();
-}
-
-void FaceTrackingService::stop() {
-    impl_->stop();
-}
-
-void FaceTrackingService::rethrow_if_failed() const {
-    impl_->rethrow_if_failed();
-}
-
-std::optional<FaceTrackingSnapshot> FaceTrackingService::take_latest() {
-    return impl_->take_latest();
-}
+Live2DControlServer::Live2DControlServer(ControlConfiguration config, Live2DTrackingSession& session)
+    : impl_(std::make_unique<Impl>(std::move(config), session)) {}
+Live2DControlServer::~Live2DControlServer() = default;
+void Live2DControlServer::start() { impl_->start(); }
+void Live2DControlServer::request_stop() noexcept { impl_->request_stop(); }
+void Live2DControlServer::stop() noexcept { impl_->stop(); }
 
 }  // namespace vtb

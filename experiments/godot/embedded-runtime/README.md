@@ -7,8 +7,8 @@ DMA-BUF capture, RGA/MPP encoding, RTSP output, and shutdown order.
 The product bootstrap project contains one empty scene and no GDScript. C++
 creates the `SubViewport`, loads Ayagami, registers its three blend modes,
 applies the latest face parameters, and captures the completed viewport after
-each explicit LibGodot iteration. The previous Godot-hosted scene remains a
-rollback and comparison path.
+each explicit LibGodot iteration. The previous Godot-hosted scene remains a historical comparison path and requires
+its pre-ABI-v2 binary. Current modules direct users to the C++ host explicitly.
 
 ## Build boundary
 
@@ -24,9 +24,12 @@ x11=yes wayland=no vulkan=no opengl3=yes use_static_cpp=no
 `disable_path_overrides=no` is required because the host deliberately passes a
 separate resource root with `--path`. The host CMake target is enabled with
 `VTB_ENABLE_EMBEDDED_GODOT=ON`, `VTB_ENABLE_OPENCV_FACE_PIPELINE=ON`,
-`VTB_ENABLE_RKNN_FACE=ON`, `VTB_GODOT_SOURCE_ROOT`, and
+`VTB_ENABLE_RKNN_FACE=ON`, `VTB_ENABLE_RGA_FACE=ON`,
+`VTB_ENABLE_RTSP_OUTPUT=ON`, `VTB_GODOT_SOURCE_ROOT`, and
 `VTB_LIBGODOT_LIBRARY`. `VTB_EMBEDDED_RPATH_LINK` contains the pinned OpenCV,
 FFmpeg, Rockchip, and RKNN ARM64 library directories used while linking the host.
+OpenCV supplies only the PnP geometry implementation; camera capture uses the
+project's direct V4L2 MMAP/DQBUF path and does not link OpenCV videoio.
 The resulting executable has an `$ORIGIN` runtime search path.
 
 The Godot module is installed from
@@ -34,11 +37,21 @@ The Godot module is installed from
 
 - `OPENVT_VTB_SOURCE_ROOT`
 - `OPENVT_BOARD_SYSROOT`
-- `OPENVT_FFMPEG_SYSROOT`
 
-OpenCV and RKNN are host executable dependencies. They are absent from the
-LibGodot module source list and link list. The module compiles only the
+OpenCV core/calib, RKNN, FFmpeg and OutputManager are host executable dependencies. They are absent
+from the LibGodot module source list and link list. The module compiles only the
 `Live2DParameters` value object; `Live2DFaceMapper` remains on the host side.
+
+The application owns `Live2DTrackingSession`, `Live2DControlServer` and
+`MediaOutputSession`. The module receives parameters and returns borrowed encoded
+bytes through `EncodedVideoSink`. The host copies them before enqueueing, keeping
+all payload ownership local to each binary. This adds one encoded-packet copy.
+
+Bridge ABI v2 has a versioned initialize symbol plus version/size checks. Rebuild
+and deploy the host and LibGodot together. Move `render.rtsp_url` to
+`output.rtsp_url` in the JSON configuration; the parser rejects the old field with
+migration instructions. Source and verification details are in
+[`module-boundaries.md`](../../../docs/module-boundaries.md).
 
 ## Deployment layout
 
