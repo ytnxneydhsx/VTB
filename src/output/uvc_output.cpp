@@ -235,7 +235,7 @@ void UvcOutput::start(const std::vector<StreamDescriptor>& descriptors) {
     }
 }
 
-void UvcOutput::write(const MediaPacket& packet) {
+void UvcOutput::write(MediaPacket packet) {
     if (stop_requested_.load()) {
         throw std::runtime_error("UVC output stop requested");
     }

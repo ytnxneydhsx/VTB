@@ -41,7 +41,9 @@
    MediaMTX   V4L2 Out  ALSA PCM
 ```
 
-`publish()` 只校验、取得共享缓冲区引用并入队。网络或设备写入只在对应出口的工作线程中执行。
+`publish()` 只校验、按出口取得共享缓冲区引用并入队。分叉时每个出口获得一份
+`shared_ptr` 引用；进入某个出口后，`MediaPacket` 从队列移动到工作线程，再移动到
+具体后端。网络或设备写入只在对应出口的工作线程中执行。
 
 ## 媒体契约
 
@@ -49,7 +51,19 @@
 
 视频描述至少包含编码或像素格式、宽、高和帧率；音频描述至少包含采样格式、采样率和声道数。编码器配置数据属于描述符。格式发生变化时使用新的流 ID 和递增版本注册描述符，再重新绑定并启动受影响出口；同一流 ID 不会被原地覆盖。
 
-数据负载为不可变共享缓冲区。首版允许上游将结果复制一次进入共享缓冲区；多个出口共享该缓冲区。DMA-BUF 或 MPP Buffer 共享在测量证明复制是瓶颈后单独接入。
+数据负载为不可变共享缓冲区。上游允许将结果复制一次进入共享缓冲区；多个出口共享
+同一份字节数据。移动 `MediaPacket` 只转移该引用和元数据，不复制 payload。
+
+当前 Live2D 硬件编码路径中，MPP packet 由媒体线程的 RAII 租约持有，并通过
+`EncodedVideoPacketView` 同步借给 `MediaOutputSession`。会话在回调返回前完成唯一一次
+MPP packet 到共享 payload 的字节复制；回调返回后才释放 MPP packet。这个边界使编码器
+缓冲区寿命与异步输出队列解耦，也删除了编码模块内部的临时 `vector`。
+
+RTSP 分支使用只读 `AVBufferRef` 包装共享 payload 的地址，释放回调持有从
+`MediaPacket` 移入的 `shared_ptr`。因此 `MediaPacket` 到 `AVPacket` 不再复制字节；
+FFmpeg 最后释放 `AVBufferRef` 时才释放该分支的 payload 引用。UVC 当前仍复制到 V4L2
+MMAP buffer，DMA-BUF 输出属于后续依赖驱动能力的阶段。
+
 
 ## 出口与格式匹配
 

@@ -311,6 +311,44 @@ private:
 	rga_buffer_t destination_buffer{};
 };
 
+class MppPacketLease final {
+public:
+	MppPacketLease() = default;
+	explicit MppPacketLease(MppPacket p_packet) : packet(p_packet) {}
+	~MppPacketLease() { reset(); }
+
+	MppPacketLease(const MppPacketLease &) = delete;
+	MppPacketLease &operator=(const MppPacketLease &) = delete;
+
+	MppPacketLease(MppPacketLease &&p_other) noexcept : packet(p_other.packet) {
+		p_other.packet = nullptr;
+	}
+
+	MppPacketLease &operator=(MppPacketLease &&p_other) noexcept {
+		if (this != &p_other) {
+			reset();
+			packet = p_other.packet;
+			p_other.packet = nullptr;
+		}
+		return *this;
+	}
+
+	const uint8_t *data() const {
+		return static_cast<const uint8_t *>(mpp_packet_get_pos(packet));
+	}
+
+	size_t size() const { return mpp_packet_get_length(packet); }
+
+private:
+	void reset() noexcept {
+		if (packet != nullptr) {
+			mpp_packet_deinit(&packet);
+		}
+	}
+
+	MppPacket packet = nullptr;
+};
+
 class MppEncoder {
 public:
 	static constexpr RK_S32 FIXED_QP = 18;
@@ -444,8 +482,9 @@ public:
 	}
 
 	Error encode_frame(uint64_t p_pts_ns, bool p_end_of_stream,
-			std::shared_ptr<const std::vector<uint8_t>> &r_payload,
+			MppPacketLease &r_packet,
 			uint64_t &r_pts_ns, uint64_t &r_dts_ns, bool &r_keyframe, String &r_error) {
+		r_packet = MppPacketLease();
 		mpp_frame_set_pts(frame, static_cast<RK_S64>(p_pts_ns));
 		RK_U32 eos_value = 0;
 		if (p_end_of_stream) {
@@ -465,18 +504,16 @@ public:
 			r_error = "encode_get_packet failed: " + itos(result);
 			return FAILED;
 		}
+		MppPacketLease packet_lease(packet);
 
-		void *position = mpp_packet_get_pos(packet);
-		size_t length = mpp_packet_get_length(packet);
-		if (position == nullptr || length == 0) {
-			mpp_packet_deinit(&packet);
+		const uint8_t *first = packet_lease.data();
+		size_t length = packet_lease.size();
+		if (first == nullptr || length == 0) {
 			r_error = "MPP returned an empty packet";
 			return ERR_INVALID_DATA;
 		}
 
-		const uint8_t *first = static_cast<const uint8_t *>(position);
-		auto payload = std::make_shared<std::vector<uint8_t>>(first, first + length);
-		r_keyframe = contains_idr(*payload);
+		r_keyframe = contains_idr(first, length);
 		RK_S64 packet_pts = mpp_packet_get_pts(packet);
 		RK_S64 packet_dts = mpp_packet_get_dts(packet);
 		r_pts_ns = p_pts_ns;
@@ -487,10 +524,8 @@ public:
 		if (packet_dts >= 0) {
 			r_dts_ns = static_cast<uint64_t>(packet_dts);
 		}
-		r_payload = std::move(payload);
-		mpp_packet_deinit(&packet);
-
 		encoded_bytes += length;
+		r_packet = std::move(packet_lease);
 		return OK;
 	}
 
@@ -524,16 +559,19 @@ private:
 		return OK;
 	}
 
-	static bool contains_idr(const std::vector<uint8_t> &p_bytes) {
-		for (size_t index = 0; index + 4 < p_bytes.size(); index++) {
-			size_t nal_index = 0;
+	static bool contains_idr(const uint8_t *p_bytes, size_t p_size) {
+		if (p_bytes == nullptr) {
+			return false;
+		}
+		for (size_t index = 0; index + 3 < p_size; index++) {
+			size_t nal_index = p_size;
 			if (p_bytes[index] == 0 && p_bytes[index + 1] == 0 && p_bytes[index + 2] == 1) {
 				nal_index = index + 3;
-			} else if (index + 5 < p_bytes.size() && p_bytes[index] == 0 &&
+			} else if (index + 4 < p_size && p_bytes[index] == 0 &&
 					p_bytes[index + 1] == 0 && p_bytes[index + 2] == 0 && p_bytes[index + 3] == 1) {
 				nal_index = index + 4;
 			}
-			if (nal_index != 0 && (p_bytes[nal_index] & 0x1fU) == 5U) {
+			if (nal_index < p_size && (p_bytes[nal_index] & 0x1fU) == 5U) {
 				return true;
 			}
 		}
@@ -938,20 +976,20 @@ private:
 			String error_message;
 			Error error = slot->get_rga_converter().convert(error_message);
 			uint64_t rga_end = OS::get_singleton()->get_ticks_usec();
-			std::shared_ptr<const std::vector<uint8_t>> payload;
+			MppPacketLease encoded_packet;
 			uint64_t packet_pts_ns = 0;
 			uint64_t packet_dts_ns = 0;
 			bool keyframe = false;
 			if (error == OK) {
-				error = mpp_encoder.encode_frame(slot->ready_ns, slot->end_of_stream, payload,
+				error = mpp_encoder.encode_frame(slot->ready_ns, slot->end_of_stream, encoded_packet,
 						packet_pts_ns, packet_dts_ns, keyframe, error_message);
 			}
 			uint64_t mpp_end = OS::get_singleton()->get_ticks_usec();
 			if (error == OK) {
 				const uint64_t duration_ns = 1'000'000'000ULL / static_cast<uint64_t>(fps);
 				vtb::EncodedVideoPacketView packet;
-				packet.data = payload->data();
-				packet.size = payload->size();
+				packet.data = encoded_packet.data();
+				packet.size = encoded_packet.size();
 				packet.pts_ns = packet_pts_ns;
 				packet.dts_ns = packet_dts_ns;
 				packet.duration_ns = duration_ns;

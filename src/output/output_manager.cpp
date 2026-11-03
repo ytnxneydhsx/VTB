@@ -108,19 +108,20 @@ public:
                     if (!packet.has_value()) {
                         break;
                     }
+                    const std::string failed_stream = packet->stream_id();
                     try {
-                        output->write(*packet);
+                        output->write(std::move(*packet));
                         std::lock_guard<std::mutex> lock(mutex);
                         ++written;
                         last_success_ns = monotonic_now_ns();
                         retries = 0;
                     } catch (const std::exception& error) {
-                        record_error(error.what(), packet->stream_id());
+                        record_error(error.what(), failed_stream);
                         output_started = false;
                         output->stop();
                         break;
                     } catch (...) {
-                        record_error("unknown exception from output write", packet->stream_id());
+                        record_error("unknown exception from output write", failed_stream);
                         output_started = false;
                         output->stop();
                         break;
@@ -177,7 +178,7 @@ public:
         if (stop_requested || queue.empty()) {
             return std::nullopt;
         }
-        MediaPacket packet = queue.front();
+        MediaPacket packet = std::move(queue.front());
         queue.pop_front();
         queue_changed.notify_all();
         return std::optional<MediaPacket>(std::move(packet));
@@ -206,7 +207,7 @@ public:
         }
     }
 
-    bool enqueue(const MediaPacket& source) {
+    bool enqueue(MediaPacket source) {
         std::lock_guard<std::mutex> lock(mutex);
         if (stop_requested) {
             return false;
@@ -255,12 +256,12 @@ public:
             }
         }
 
-        MediaPacket packet = source;
         if (pending_discontinuity.erase(source.stream_id()) != 0 &&
             !source.discontinuity()) {
-            packet = source.with_discontinuity();
+            queue.push_back(std::move(source).with_discontinuity());
+        } else {
+            queue.push_back(std::move(source));
         }
-        queue.push_back(std::move(packet));
         queue_changed.notify_one();
         return true;
     }
@@ -274,7 +275,7 @@ public:
             }
             if (it->keyframe()) {
                 if (!it->discontinuity()) {
-                    *it = it->with_discontinuity();
+                    *it = std::move(*it).with_discontinuity();
                 }
                 pending_discontinuity.erase(stream_id);
                 found_keyframe = true;
@@ -493,7 +494,7 @@ void OutputManager::remove(const std::string& output_id) {
     impl_->outputs.erase(output_id);
 }
 
-std::size_t OutputManager::publish(const MediaPacket& packet) {
+std::size_t OutputManager::publish(MediaPacket packet) {
     std::vector<std::shared_ptr<OutputEntry>> outputs;
     {
         std::lock_guard<std::mutex> lock(impl_->mutex);
@@ -507,8 +508,14 @@ std::size_t OutputManager::publish(const MediaPacket& packet) {
         }
     }
     std::size_t queued = 0;
-    for (const auto& output : outputs) {
-        if (output->enqueue(packet)) {
+    for (std::size_t index = 0; index < outputs.size(); ++index) {
+        bool accepted = false;
+        if (index + 1 == outputs.size()) {
+            accepted = outputs[index]->enqueue(std::move(packet));
+        } else {
+            accepted = outputs[index]->enqueue(packet);
+        }
+        if (accepted) {
             ++queued;
         }
     }

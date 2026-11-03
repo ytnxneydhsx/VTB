@@ -706,15 +706,16 @@ public:
         output_->start(descriptors);
     }
 
-    void write(const vtb::MediaPacket& packet) override {
-        trace_store_.mark_rtsp_start(packet.sequence(), steady_now_ns());
+    void write(vtb::MediaPacket packet) override {
+        const std::uint64_t sequence = packet.sequence();
+        trace_store_.mark_rtsp_start(sequence, steady_now_ns());
         try {
-            output_->write(packet);
+            output_->write(std::move(packet));
         } catch (...) {
-            trace_store_.mark_rtsp_end(packet.sequence(), steady_now_ns());
+            trace_store_.mark_rtsp_end(sequence, steady_now_ns());
             throw;
         }
-        trace_store_.mark_rtsp_end(packet.sequence(), steady_now_ns());
+        trace_store_.mark_rtsp_end(sequence, steady_now_ns());
     }
 
     void request_stop() noexcept override { output_->request_stop(); }
@@ -1325,12 +1326,12 @@ int publish(const PublisherOptions& options) {
         const auto mpp_end = std::chrono::steady_clock::now();
         trace_store.mark_mpp_done(timing.frame_id, steady_now_ns());
 
-        const vtb::MediaPacket packet(
+        vtb::MediaPacket packet(
             descriptor.id(), std::move(payload), packet_pts_ns, packet_dts_ns,
             duration_ns, timing.frame_id, keyframe, false);
         trace_store.mark_output_enqueue_start(timing.frame_id,
                                               steady_now_ns());
-        manager.publish(packet);
+        manager.publish(std::move(packet));
         const auto publish_end = std::chrono::steady_clock::now();
         trace_store.mark_output_published(timing.frame_id, steady_now_ns());
 

@@ -39,9 +39,9 @@ public:
         output_->start(descriptors);
     }
 
-    void write(const MediaPacket& packet) override {
+    void write(MediaPacket packet) override {
         auto timer = write_timer_.scope();
-        output_->write(packet);
+        output_->write(std::move(packet));
     }
 
     void request_stop() noexcept override { output_->request_stop(); }
@@ -201,10 +201,10 @@ private:
         // The producer owns view.data only until this callback returns.
         auto payload = std::make_shared<const std::vector<std::uint8_t>>(
             view.data, view.data + static_cast<std::size_t>(view.size));
-        const MediaPacket packet(kStreamId, std::move(payload), view.pts_ns, view.dts_ns,
+        MediaPacket packet(kStreamId, std::move(payload), view.pts_ns, view.dts_ns,
             view.duration_ns, view.sequence, view.keyframe != 0, false);
         // Zero enqueues is allowed during reconnect/keyframe wait/backpressure.
-        manager_.publish(packet);
+        manager_.publish(std::move(packet));
     }
 
     instrumentation::TimerRegistry timers_;

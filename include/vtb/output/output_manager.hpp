@@ -64,7 +64,8 @@ public:
     void start(const std::string& output_id);
     void stop(const std::string& output_id);
     void remove(const std::string& output_id);
-    std::size_t publish(const MediaPacket& packet);
+    // Shares the immutable payload across bound outputs, then moves within each branch.
+    std::size_t publish(MediaPacket packet);
     std::vector<OutputStatus> status() const;
 
 private:

@@ -45,7 +45,7 @@ public:
         changed_.notify_all();
     }
 
-    void write(const MediaPacket& packet) override {
+    void write(MediaPacket packet) override {
         if (fail_writes_) {
             throw std::runtime_error("injected write failure");
         }

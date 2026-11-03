@@ -5,6 +5,7 @@
 #include <climits>
 #include <cstdint>
 #include <limits>
+#include <memory>
 #include <mutex>
 #include <new>
 #include <stdexcept>
@@ -16,6 +17,7 @@ extern "C" {
 #include <libavcodec/codec_par.h>
 #include <libavcodec/packet.h>
 #include <libavformat/avformat.h>
+#include <libavutil/buffer.h>
 #include <libavutil/channel_layout.h>
 #include <libavutil/error.h>
 #include <libavutil/mathematics.h>
@@ -47,6 +49,13 @@ std::string ffmpeg_error(int error) {
 
 [[noreturn]] void throw_ffmpeg_error(const std::string& operation, int error) {
     throw std::runtime_error(operation + ": " + ffmpeg_error(error));
+}
+
+using SharedMediaPayload =
+    std::shared_ptr<const std::vector<std::uint8_t>>;
+
+void release_shared_media_payload(void* opaque, std::uint8_t*) noexcept {
+    delete static_cast<SharedMediaPayload*>(opaque);
 }
 
 AVCodecID video_codec_id(const std::string& format) {
@@ -293,7 +302,7 @@ void RtspOutput::start(const std::vector<StreamDescriptor>& descriptors) {
     }
 }
 
-void RtspOutput::write(const MediaPacket& packet) {
+void RtspOutput::write(MediaPacket packet) {
     if (context_ == nullptr || !header_written_) {
         throw std::logic_error("RTSP output is not started");
     }
@@ -307,8 +316,8 @@ void RtspOutput::write(const MediaPacket& packet) {
     if (cancelled_.load(std::memory_order_acquire)) {
         throw std::runtime_error("RTSP write cancelled");
     }
-    const auto& payload = *packet.payload();
-    if (payload.empty() || payload.size() > static_cast<std::size_t>(INT_MAX)) {
+    const std::size_t payload_size = packet.payload()->size();
+    if (payload_size == 0 || payload_size > static_cast<std::size_t>(INT_MAX)) {
         throw std::invalid_argument("RTSP packet payload size is invalid");
     }
     if (packet.pts_ns() > static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max()) ||
@@ -321,12 +330,22 @@ void RtspOutput::write(const MediaPacket& packet) {
     if (av_packet == nullptr) {
         throw std::bad_alloc();
     }
-    int result = av_new_packet(av_packet, static_cast<int>(payload.size()));
-    if (result < 0) {
+
+    auto payload_holder =
+        std::make_unique<SharedMediaPayload>(packet.take_payload());
+    std::uint8_t* payload_data =
+        const_cast<std::uint8_t*>((*payload_holder)->data());
+    AVBufferRef* buffer = av_buffer_create(
+        payload_data, payload_size, &release_shared_media_payload,
+        payload_holder.get(), AV_BUFFER_FLAG_READONLY);
+    if (buffer == nullptr) {
         av_packet_free(&av_packet);
-        throw_ffmpeg_error("av_new_packet", result);
+        throw std::bad_alloc();
     }
-    std::copy(payload.begin(), payload.end(), av_packet->data);
+    payload_holder.release();
+    av_packet->buf = buffer;
+    av_packet->data = buffer->data;
+    av_packet->size = static_cast<int>(payload_size);
     av_packet->stream_index = stream_index->second;
     av_packet->pts = static_cast<std::int64_t>(packet.pts_ns());
     av_packet->dts = static_cast<std::int64_t>(packet.dts_ns());
@@ -337,7 +356,7 @@ void RtspOutput::write(const MediaPacket& packet) {
     av_packet_rescale_ts(av_packet, AVRational{1, 1000000000},
                          context_->streams[stream_index->second]->time_base);
     set_operation_deadline();
-    result = av_interleaved_write_frame(context_, av_packet);
+    const int result = av_interleaved_write_frame(context_, av_packet);
     av_packet_free(&av_packet);
     if (result < 0) {
         throw_ffmpeg_error("av_interleaved_write_frame", result);

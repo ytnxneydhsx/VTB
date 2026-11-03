@@ -179,7 +179,7 @@ void Uac2Output::start(const std::vector<StreamDescriptor>& descriptors) {
     snd_pcm_hw_params_free(hardware);
 }
 
-void Uac2Output::write(const MediaPacket& packet) {
+void Uac2Output::write(MediaPacket packet) {
     if (stop_requested_.load()) {
         throw std::runtime_error("UAC2 output stop requested");
     }

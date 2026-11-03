@@ -359,12 +359,12 @@ int publish(const PublisherOptions& options) {
         auto payload = std::make_shared<const std::vector<std::uint8_t>>(
             packet->data, packet->data + packet->size);
         const bool keyframe = (packet->flags & AV_PKT_FLAG_KEY) != 0;
-        const vtb::MediaPacket media_packet(
+        vtb::MediaPacket media_packet(
             descriptor.id(), std::move(payload),
             monotonic_origin + pts_offset_ns,
             monotonic_origin + dts_offset_ns,
             duration_ns, sequence, keyframe, false);
-        manager.publish(media_packet);
+        manager.publish(std::move(media_packet));
         ++sequence;
         av_packet_unref(packet.get());
 

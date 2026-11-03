@@ -71,6 +71,8 @@ public:
 
     const std::string& stream_id() const noexcept;
     const std::shared_ptr<const std::vector<std::uint8_t>>& payload() const noexcept;
+    // Transfers this packet's payload handle to an external lifetime owner.
+    std::shared_ptr<const std::vector<std::uint8_t>> take_payload() noexcept;
     std::uint64_t pts_ns() const noexcept;
     std::uint64_t dts_ns() const noexcept;
     std::uint64_t duration_ns() const noexcept;
@@ -78,7 +80,8 @@ public:
     bool keyframe() const noexcept;
     bool discontinuity() const noexcept;
 
-    MediaPacket with_discontinuity() const;
+    MediaPacket with_discontinuity() const &;
+    MediaPacket with_discontinuity() &&;
 
 private:
     std::string stream_id_;

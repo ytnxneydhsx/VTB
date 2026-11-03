@@ -29,8 +29,10 @@ public:
 
 // ABI values only: no STL ownership or exceptions cross the shared library.
 // configure_h264 runs once, before the single media worker starts calling publish.
-// Callbacks consume/copy all borrowed data before returning. Zero means accepted
-// according to the sink's queue/drop policy, not necessarily written downstream.
+// Callbacks consume all borrowed data before returning. The host copies packet bytes
+// once into its immutable shared payload; downstream queues only share or move it.
+// Zero means accepted according to the sink's queue/drop policy, not necessarily
+// written downstream.
 // The host owns context and keeps it alive until the producer has joined its worker.
 // This layout is versioned together with the OpenVT LibGodot bridge ABI.
 class EncodedVideoSink {

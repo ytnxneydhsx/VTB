@@ -29,7 +29,7 @@ public:
 
     bool supports(const StreamDescriptor& descriptor) const override;
     void start(const std::vector<StreamDescriptor>& descriptors) override;
-    void write(const MediaPacket& packet) override;
+    void write(MediaPacket packet) override;
     void request_stop() noexcept override;
     void stop() noexcept override;
     std::string name() const override;

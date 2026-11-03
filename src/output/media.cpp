@@ -108,6 +108,9 @@ const std::string& MediaPacket::stream_id() const noexcept { return stream_id_; 
 const std::shared_ptr<const std::vector<std::uint8_t>>& MediaPacket::payload() const noexcept {
     return payload_;
 }
+std::shared_ptr<const std::vector<std::uint8_t>> MediaPacket::take_payload() noexcept {
+    return std::move(payload_);
+}
 std::uint64_t MediaPacket::pts_ns() const noexcept { return pts_ns_; }
 std::uint64_t MediaPacket::dts_ns() const noexcept { return dts_ns_; }
 std::uint64_t MediaPacket::duration_ns() const noexcept { return duration_ns_; }
@@ -115,9 +118,14 @@ std::uint64_t MediaPacket::sequence() const noexcept { return sequence_; }
 bool MediaPacket::keyframe() const noexcept { return keyframe_; }
 bool MediaPacket::discontinuity() const noexcept { return discontinuity_; }
 
-MediaPacket MediaPacket::with_discontinuity() const {
+MediaPacket MediaPacket::with_discontinuity() const & {
     return MediaPacket(stream_id_, payload_, pts_ns_, dts_ns_, duration_ns_,
                        sequence_, keyframe_, true);
+}
+
+MediaPacket MediaPacket::with_discontinuity() && {
+    return MediaPacket(std::move(stream_id_), std::move(payload_), pts_ns_, dts_ns_,
+                       duration_ns_, sequence_, keyframe_, true);
 }
 
 }  // namespace vtb
