@@ -24,7 +24,9 @@ bool LatestFrameSlot::publish(DecodedFrameLease frame) {
 
 std::optional<DecodedFrameLease> LatestFrameSlot::wait_and_take() {
     std::unique_lock<std::mutex> lock(mutex_);
-    condition_.wait(lock, [this]() { return finished_ || frame_.has_value(); });
+    while (!finished_ && !frame_.has_value()) {
+        condition_.wait(lock);
+    }
     if (!frame_) {
         return std::nullopt;
     }
