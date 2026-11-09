@@ -3,7 +3,7 @@
 #include <stdint.h>
 #include "vtb/output/encoded_video_sink.hpp"
 
-inline constexpr uint32_t OPENVT_LIBGODOT_ABI_VERSION = 2;
+inline constexpr uint32_t OPENVT_LIBGODOT_ABI_VERSION = 3;
 
 #if defined(_WIN32)
 #define OPENVT_LIBGODOT_API __declspec(dllexport)
@@ -40,6 +40,8 @@ public:
 	uint32_t output_height;
 	uint32_t output_fps;
 	uint32_t total_frames;
+	const char *metrics_jsonl_path;
+	uint32_t metrics_report_interval_ms;
 };
 
 extern "C" {
@@ -49,7 +51,7 @@ OPENVT_LIBGODOT_API uint32_t openvt_libgodot_bridge_abi_version(void);
 OPENVT_LIBGODOT_API int openvt_libgodot_start(void *p_instance);
 OPENVT_LIBGODOT_API int openvt_libgodot_is_started(void *p_instance);
 OPENVT_LIBGODOT_API int openvt_libgodot_iteration(void *p_instance);
-OPENVT_LIBGODOT_API int openvt_libgodot_application_initialize_v2(
+OPENVT_LIBGODOT_API int openvt_libgodot_application_initialize_v3(
 		const OpenVTEmbeddedApplicationConfig *p_config);
 OPENVT_LIBGODOT_API int openvt_libgodot_application_submit_live2d_frame(
 		const OpenVTLive2DFrameInput *p_input);

@@ -1,5 +1,6 @@
 #pragma once
 
+#include <functional>
 #include <memory>
 #include <optional>
 
@@ -12,10 +13,14 @@ namespace vtb {
 
 class Live2DTrackingSession {
 public:
+    using ResultObserver =
+        std::function<void(const std::optional<FaceTrackingResult>&)>;
+
     Live2DTrackingSession(
         std::unique_ptr<VideoSource> video_input,
         std::unique_ptr<FacePipeline> face_pipeline,
-        Live2DMappingConfig mapping_config);
+        Live2DMappingConfig mapping_config,
+        ResultObserver result_observer = {});
     ~Live2DTrackingSession();
 
     Live2DTrackingSession(const Live2DTrackingSession&) = delete;

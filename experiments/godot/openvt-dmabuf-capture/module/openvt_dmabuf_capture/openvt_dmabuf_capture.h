@@ -20,7 +20,14 @@ public:
 	OpenVTDmaBufCapture(OpenVTDmaBufCapture &&) = delete;
 	OpenVTDmaBufCapture &operator=(OpenVTDmaBufCapture &&) = delete;
 
-	Error configure(const vtb::EncodedVideoSink &p_sink, int p_width, int p_height, int p_fps, int p_total_frames);
+	Error configure(
+			const vtb::EncodedVideoSink &p_sink,
+			int p_width,
+			int p_height,
+			int p_fps,
+			int p_total_frames,
+			const String &p_metrics_jsonl_path,
+			int p_metrics_report_interval_ms);
 	Error capture_frame(RID p_viewport, int p_frame_index, bool p_end_of_stream);
 	Error finish();
 	String get_last_error() const;
@@ -39,6 +46,8 @@ private:
 	int height = 0;
 	int fps = 0;
 	int total_frames = 0;
+	int metrics_report_interval_ms = 0;
+	String metrics_jsonl_path;
 	bool configured = false;
 	bool finished = false;
 

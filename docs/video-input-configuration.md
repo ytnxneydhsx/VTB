@@ -32,7 +32,7 @@
 ## 配置段
 
 完整示例见 [`config/vtb-live2d.example.json`](../config/vtb-live2d.example.json)。
-当前必须提供以下六段：
+当前必须提供以下六段，并可选提供人脸诊断输出和性能统计配置：
 
 - `video_input`：输入类型、设备、FourCC、分辨率、帧率和缓冲区数量。
 - `face_pipeline`：RKNN 模型路径、RGA DMA heap 路径和跟踪策略。
@@ -40,6 +40,9 @@
 - `control`：HTTP 控制口。
 - `render`：Godot 工程、Live2D 模型、输出画面尺寸、帧率和帧数上限。
 - `output`：宿主输出协议配置，当前为 `rtsp_url`。
+- `face_diagnostic_output`：可选的人脸中间结果画面；缺失或 `enabled=false` 时不分配
+  诊断 DMA-BUF、不创建第二个 MPP 编码器，也不连接第二路 RTSP。
+- `instrumentation`：可选的周期 JSONL 指标目录和报告间隔；缺失时关闭持久化。
 
 2026-11-03 起，将原 `render.rtsp_url` 移到 `output.rtsp_url`；保留旧字段会收到明确的
 迁移错误。其他字段保持原义，板端配置需在下一次授权部署时同步迁移。
@@ -56,6 +59,24 @@
 `/dev/dma_heap/system-uncached`。路径由 JSON 提供；`RgaImageTransformer` 不在代码中
 猜测或固定设备节点。启动时无法打开该 heap、摄像头缓冲区无法导出 DMA-BUF，或
 RGA 不支持请求的格式、stride、ROI 与缩放比例时，模型管线会明确报错并停止。
+
+`face_diagnostic_output` 启用时必须提供 `rtsp_url`、`maximum_fps`、`bitrate` 和
+`gop`。诊断画面尺寸与 `video_input` 一致，要求宽高为偶数；`maximum_fps` 不得超过
+输入帧率。推理线程只复制包含人脸框、66 点和姿态/表情数值的
+`FaceTrackingResult`，后台线程把最新结果绘制到独立 NV12 DMA-BUF，再交给第二个
+MPP 编码器。旧结果被新结果替换，不会反向阻塞摄像头和 RKNN 消费线程。
+
+`instrumentation.metrics_directory` 启用项目自有的指标持久化。目录会在启动时创建，
+`report_interval_ms` 接受 1000～3600000 ms。媒体与输出统计分别追加到：
+
+```text
+<metrics_directory>/vtb-live2d-media.metrics.jsonl
+<metrics_directory>/vtb-live2d-output.metrics.jsonl
+<metrics_directory>/vtb-face3d-output.metrics.jsonl
+```
+
+每次启动保留历史行；当前不自动轮转。格式和查看命令见
+[`instrumentation.md`](instrumentation.md)。
 
 ## 摄像头验证
 

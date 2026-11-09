@@ -12,7 +12,9 @@
 #include "platform/linuxbsd/platform_egl.h"
 #include "platform/linuxbsd/platform_gl.h"
 #include "servers/rendering/rendering_server.h"
+#include "vtb/instrumentation/metrics_jsonl_reporter.hpp"
 #include "vtb/instrumentation/timer.hpp"
+#include "vtb/time/monotonic_clock.hpp"
 
 #include <drm/drm_fourcc.h>
 #include <linux/dma-heap.h>
@@ -62,12 +64,6 @@ using GlEglImageTargetTexture2DProc = void (*)(GLenum, void *);
 
 String errno_message(const String &p_prefix) {
 	return p_prefix + ": " + String::utf8(std::strerror(errno));
-}
-
-uint64_t monotonic_now_ns() {
-	const auto now = std::chrono::steady_clock::now().time_since_epoch();
-	return static_cast<uint64_t>(
-			std::chrono::duration_cast<std::chrono::nanoseconds>(now).count());
 }
 
 class UniqueFd {
@@ -660,7 +656,14 @@ public:
 	OpenVTDmaBufPipeline(OpenVTDmaBufPipeline &&) = delete;
 	OpenVTDmaBufPipeline &operator=(OpenVTDmaBufPipeline &&) = delete;
 
-	Error initialize(const vtb::EncodedVideoSink &p_sink, int p_width, int p_height, int p_fps, int p_total_frames,
+	Error initialize(
+			const vtb::EncodedVideoSink &p_sink,
+			int p_width,
+			int p_height,
+			int p_fps,
+			int p_total_frames,
+			const String &p_metrics_jsonl_path,
+			int p_metrics_report_interval_ms,
 			String &r_error) {
 		width = p_width;
 		height = p_height;
@@ -704,6 +707,20 @@ public:
 		error = mpp_encoder.codec_configuration(codec_configuration, r_error);
 		if (error != OK) {
 			return error;
+		}
+		if (!p_metrics_jsonl_path.is_empty()) {
+			try {
+				const CharString metrics_path_utf8 = p_metrics_jsonl_path.utf8();
+				metrics_reporter = std::make_unique<vtb::instrumentation::MetricsJsonlReporter>(
+						timers,
+						"vtb-live2d.media",
+						std::string(metrics_path_utf8.get_data()),
+						std::chrono::milliseconds(p_metrics_report_interval_ms));
+				metrics_reporter->start();
+			} catch (const std::exception &error) {
+				r_error = "metrics JSONL reporter initialization failed: " + String::utf8(error.what());
+				return ERR_CANT_CREATE;
+			}
 		}
 		output_sink = p_sink;
 		vtb::H264StreamFormat format;
@@ -842,6 +859,14 @@ public:
 			return FAILED;
 		}
 		uint64_t copy_end = OS::get_singleton()->get_ticks_usec();
+		uint64_t ready_ns = 0;
+		try {
+			ready_ns = vtb::MonotonicClock::now_ns();
+		} catch (const std::exception &error) {
+			release_reserved_slot(p_slot_index);
+			r_error = "CLOCK_MONOTONIC timestamp failed: " + String::utf8(error.what());
+			return FAILED;
+		}
 
 		int ready_depth = 0;
 		{
@@ -855,7 +880,7 @@ public:
 			slot->frame_index = p_frame_index;
 			slot->end_of_stream = p_end_of_stream;
 			slot->ready_usec = copy_end;
-			slot->ready_ns = monotonic_now_ns();
+			slot->ready_ns = ready_ns;
 			slot->state = FrameSlot::State::READY;
 			ready_slot_indices.push_back(p_slot_index);
 			ready_depth = static_cast<int>(ready_slot_indices.size());
@@ -896,6 +921,7 @@ public:
 		if (media_thread.is_started()) {
 			media_thread.wait_to_finish();
 		}
+		finish_metrics();
 		finished = true;
 
 		MutexLock lock(queue_mutex);
@@ -930,6 +956,7 @@ public:
 			ready_slots_available.post();
 			media_thread.wait_to_finish();
 		}
+		finish_metrics();
 		print_results();
 		mpp_encoder.shutdown();
 		if (source_framebuffer != 0) {
@@ -946,6 +973,24 @@ public:
 	}
 
 private:
+	void finish_metrics() noexcept {
+		if (!metrics_reporter || metrics_finished) {
+			return;
+		}
+		metrics_reporter->stop();
+		metrics_finished = true;
+		String result = "VTB_METRICS_RESULT source=" + String::utf8(metrics_reporter->source().c_str()) +
+				" path=" + String::utf8(metrics_reporter->output_path().c_str()) +
+				" records=" + itos(static_cast<int64_t>(metrics_reporter->record_count())) +
+				" failed=";
+		if (metrics_reporter->failed()) {
+			result += "1 error=" + String::utf8(metrics_reporter->last_error().c_str());
+		} else {
+			result += "0";
+		}
+		print_line(result);
+	}
+
 	static void media_thread_entry(void *p_userdata) {
 		OpenVTDmaBufPipeline *pipeline = static_cast<OpenVTDmaBufPipeline *>(p_userdata);
 		pipeline->media_thread_main();
@@ -1177,6 +1222,7 @@ private:
 	bool stop_requested = false;
 	bool end_of_stream_encoded = false;
 	bool results_printed = false;
+	bool metrics_finished = false;
 	static constexpr size_t METRIC_WINDOW_CAPACITY = 4096;
 	GLuint source_framebuffer = 0;
 	vtb::instrumentation::TimerRegistry timers;
@@ -1191,6 +1237,7 @@ private:
 	FrameSlot *slots[FRAME_SLOT_COUNT] = {};
 	MppEncoder mpp_encoder;
 	vtb::EncodedVideoSink output_sink;
+	std::unique_ptr<vtb::instrumentation::MetricsJsonlReporter> metrics_reporter;
 	Thread media_thread;
 	BinaryMutex queue_mutex;
 	Semaphore free_slots_available;
@@ -1226,13 +1273,20 @@ void OpenVTDmaBufCapture::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("get_last_error"), &OpenVTDmaBufCapture::get_last_error);
 }
 
-Error OpenVTDmaBufCapture::configure(const vtb::EncodedVideoSink &p_sink, int p_width, int p_height, int p_fps,
-		int p_total_frames) {
+Error OpenVTDmaBufCapture::configure(
+		const vtb::EncodedVideoSink &p_sink,
+		int p_width,
+		int p_height,
+		int p_fps,
+		int p_total_frames,
+		const String &p_metrics_jsonl_path,
+		int p_metrics_report_interval_ms) {
 	if (configured || pipeline != nullptr) {
 		operation_error_message = "capture is already configured";
 		return ERR_ALREADY_IN_USE;
 	}
-	if (p_sink.context == nullptr || p_sink.configure_h264 == nullptr || p_sink.publish == nullptr || p_width <= 0 || p_height <= 0 || p_fps <= 0 || p_total_frames < 0) {
+	if (p_sink.context == nullptr || p_sink.configure_h264 == nullptr || p_sink.publish == nullptr || p_width <= 0 || p_height <= 0 || p_fps <= 0 || p_total_frames < 0 ||
+			(!p_metrics_jsonl_path.is_empty() && p_metrics_report_interval_ms < 1000)) {
 		operation_error_message = "invalid DMA-BUF capture configuration";
 		return ERR_INVALID_PARAMETER;
 	}
@@ -1246,6 +1300,8 @@ Error OpenVTDmaBufCapture::configure(const vtb::EncodedVideoSink &p_sink, int p_
 	height = p_height;
 	fps = p_fps;
 	total_frames = p_total_frames;
+	metrics_jsonl_path = p_metrics_jsonl_path;
+	metrics_report_interval_ms = p_metrics_report_interval_ms;
 	configured = true;
 	finished = false;
 	operation_error_message = String();
@@ -1319,7 +1375,15 @@ void OpenVTDmaBufCapture::_initialize_pipeline_render_thread() {
 		return;
 	}
 	pipeline = memnew(OpenVTDmaBufPipeline);
-	Error init_error = pipeline->initialize(output_sink, width, height, fps, total_frames, error_message);
+	Error init_error = pipeline->initialize(
+			output_sink,
+			width,
+			height,
+			fps,
+			total_frames,
+			metrics_jsonl_path,
+			metrics_report_interval_ms,
+			error_message);
 	if (init_error != OK) {
 		memdelete(pipeline);
 		pipeline = nullptr;

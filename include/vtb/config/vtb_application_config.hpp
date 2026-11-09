@@ -61,6 +61,25 @@ public:
     std::string rtsp_url;
 };
 
+class FaceDiagnosticOutputConfiguration {
+public:
+    bool enabled = false;
+    std::string rtsp_url;
+    std::uint32_t maximum_fps = 30;
+    std::uint32_t bitrate = 1200000;
+    std::uint32_t gop = 30;
+};
+
+class InstrumentationConfiguration {
+public:
+    std::string metrics_directory;
+    std::uint32_t report_interval_ms = 60000;
+
+    bool metrics_persistence_enabled() const noexcept {
+        return !metrics_directory.empty();
+    }
+};
+
 class VtbApplicationConfiguration {
 public:
     VideoInputConfiguration video_input;
@@ -69,6 +88,8 @@ public:
     ControlConfiguration control;
     RenderConfiguration render;
     MediaOutputConfiguration output;
+    FaceDiagnosticOutputConfiguration face_diagnostic_output;
+    InstrumentationConfiguration instrumentation;
 };
 
 class VtbApplicationConfigParser final {

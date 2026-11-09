@@ -3,12 +3,11 @@
 #include <atomic>
 #include <cmath>
 #include <mutex>
-#include <stdexcept>
-#include <time.h>
 #include <utility>
 
 #include "vtb/face/face_frame_consumer.hpp"
 #include "vtb/pipeline/video_processing_runtime.hpp"
+#include "vtb/time/monotonic_clock.hpp"
 
 namespace vtb {
 namespace {
@@ -17,15 +16,6 @@ constexpr float kViewZoomMinimum = 0.5F;
 constexpr float kViewZoomMaximum = 6.0F;
 constexpr float kViewOffsetMinimum = -2.0F;
 constexpr float kViewOffsetMaximum = 2.0F;
-
-std::uint64_t monotonic_now_ns() {
-    timespec timestamp{};
-    if (clock_gettime(CLOCK_MONOTONIC, &timestamp) != 0) {
-        throw std::runtime_error("clock_gettime(CLOCK_MONOTONIC) failed");
-    }
-    return static_cast<std::uint64_t>(timestamp.tv_sec) * 1000000000ULL +
-        static_cast<std::uint64_t>(timestamp.tv_nsec);
-}
 
 class Live2DTrackingState final {
 public:
@@ -50,7 +40,8 @@ public:
         if (result.has_value()) {
             face = &result.value();
         }
-        Live2DMappingResult mapped = mapper_.update(face, monotonic_now_ns());
+        Live2DMappingResult mapped =
+            mapper_.update(face, MonotonicClock::now_ns());
         std::lock_guard<std::mutex> lock(mutex_);
         latest_ = std::move(mapped);
         ++snapshot_generation_;
@@ -122,15 +113,19 @@ public:
     Impl(
         std::unique_ptr<VideoSource> video_input,
         std::unique_ptr<FacePipeline> face_pipeline,
-        Live2DMappingConfig mapping_config)
+        Live2DMappingConfig mapping_config,
+        ResultObserver result_observer)
         : state_(mapping_config),
           runtime_(std::make_unique<VideoProcessingRuntime>(
               std::move(video_input),
               std::make_unique<FaceFrameConsumer>(
                   std::move(face_pipeline),
-                  [this](
+                  [this, observer = std::move(result_observer)](
                       const std::optional<FaceTrackingResult>& result) {
                       state_.publish(result);
+                      if (observer) {
+                          observer(result);
+                      }
                   }))) {}
 
     ~Impl() {
@@ -198,11 +193,13 @@ private:
 Live2DTrackingSession::Live2DTrackingSession(
     std::unique_ptr<VideoSource> video_input,
     std::unique_ptr<FacePipeline> face_pipeline,
-    Live2DMappingConfig mapping_config)
+    Live2DMappingConfig mapping_config,
+    ResultObserver result_observer)
     : impl_(std::make_unique<Impl>(
           std::move(video_input),
           std::move(face_pipeline),
-          mapping_config)) {}
+          mapping_config,
+          std::move(result_observer))) {}
 
 Live2DTrackingSession::~Live2DTrackingSession() = default;
 

@@ -23,7 +23,12 @@ env_openvt.Append(CXXFLAGS=["-fexceptions"])
 
 env_openvt.add_source_files(env.modules_sources, "openvt_dmabuf_capture.cpp")
 env_openvt.add_source_files(env.modules_sources, "register_types.cpp")
+env_openvt.add_source_files(env.modules_sources, vtb_source_root + "/src/instrumentation/metrics_jsonl_reporter.cpp")
 env_openvt.add_source_files(env.modules_sources, vtb_source_root + "/src/instrumentation/timer.cpp")
+env_openvt.add_source_files(
+    env.modules_sources,
+    vtb_source_root + "/src/live2d/live2d_parameter_interpolator.cpp",
+)
 env_openvt.add_source_files(env.modules_sources, vtb_source_root + "/src/live2d/live2d_parameters.cpp")
 env_openvt.add_source_files(
     env.modules_sources,

@@ -2,6 +2,7 @@
 
 #include <chrono>
 #include <cstdint>
+#include <filesystem>
 #include <iostream>
 #include <memory>
 #include <optional>
@@ -12,20 +13,31 @@
 #include <vector>
 
 #include "core/extension/libgodot.h"
+#include "face_diagnostic_session.hpp"
+#include "live2d_control_server.hpp"
+#include "live2d_tracking_session.hpp"
+#include "media_output_session.hpp"
 #include "openvt_libgodot_bridge.h"
 #include "vtb/config/config_file_reader.hpp"
 #include "vtb/config/vtb_application_config.hpp"
-#include "live2d_tracking_session.hpp"
-#include "live2d_control_server.hpp"
-#include "media_output_session.hpp"
-#include "vtb/output/rtsp_output.hpp"
 #include "vtb/face/openseeface_geometry_estimator.hpp"
 #include "vtb/face/rga_image_transformer.hpp"
 #include "vtb/face/rknn_face_models.hpp"
+#include "vtb/output/rtsp_output.hpp"
+#include "vtb/time/monotonic_clock.hpp"
 #include "video_input_factory.hpp"
 
 namespace vtb {
 namespace {
+
+std::string metrics_path(
+    const InstrumentationConfiguration& config,
+    const char* filename) {
+    if (!config.metrics_persistence_enabled()) {
+        return {};
+    }
+    return (std::filesystem::path(config.metrics_directory) / filename).string();
+}
 
 void initialize_host_extension(void*, GDExtensionInitializationLevel) {}
 
@@ -243,7 +255,11 @@ public:
     LibGodotInstance(LibGodotInstance&&) = delete;
     LibGodotInstance& operator=(LibGodotInstance&&) = delete;
 
-    void start(const RenderConfiguration& config, EncodedVideoSink output_sink) {
+    void start(
+        const RenderConfiguration& config,
+        EncodedVideoSink output_sink,
+        const std::string& metrics_jsonl_path,
+        std::chrono::milliseconds metrics_report_interval) {
         const int result = openvt_libgodot_start(instance_);
         if (result != 0) {
             throw std::runtime_error(
@@ -258,10 +274,13 @@ public:
         embedded_config.output_height = config.output_height;
         embedded_config.output_fps = config.output_fps;
         embedded_config.total_frames = config.total_frames;
+        embedded_config.metrics_jsonl_path = metrics_jsonl_path.c_str();
+        embedded_config.metrics_report_interval_ms =
+            static_cast<std::uint32_t>(metrics_report_interval.count());
         // Also clean up a partially initialized application if initialization throws.
         application_cleanup_required_ = true;
         const int application_result =
-            openvt_libgodot_application_initialize_v2(&embedded_config);
+            openvt_libgodot_application_initialize_v3(&embedded_config);
         if (application_result != 0) {
             throw_application_error(
                 "C++ Live2D application initialization failed",
@@ -298,7 +317,8 @@ public:
 
     bool run_frame() {
         const int prepare_result =
-            openvt_libgodot_application_prepare_frame(monotonic_now_ns());
+            openvt_libgodot_application_prepare_frame(
+                MonotonicClock::now_ns());
         if (prepare_result != 0) {
             throw_application_error(
                 "C++ Live2D frame preparation failed", prepare_result);
@@ -341,12 +361,6 @@ public:
     }
 
 private:
-    static std::uint64_t monotonic_now_ns() noexcept {
-        const auto now = std::chrono::steady_clock::now().time_since_epoch();
-        return static_cast<std::uint64_t>(
-            std::chrono::duration_cast<std::chrono::nanoseconds>(now).count());
-    }
-
     [[noreturn]] static void throw_application_error(
         const std::string& message,
         int error_code) {
@@ -383,7 +397,8 @@ std::unique_ptr<FacePipeline> create_face_pipeline(
 std::unique_ptr<Live2DTrackingSession> create_tracking_session(
     const FaceMappingConfiguration& mapping,
     std::unique_ptr<VideoSource> video_input,
-    std::unique_ptr<FacePipeline> face_pipeline) {
+    std::unique_ptr<FacePipeline> face_pipeline,
+    Live2DTrackingSession::ResultObserver result_observer) {
     Live2DMappingConfig mapping_config;
     mapping_config.calibration_frames =
         static_cast<std::size_t>(mapping.calibration_frames);
@@ -395,7 +410,8 @@ std::unique_ptr<Live2DTrackingSession> create_tracking_session(
     return std::make_unique<Live2DTrackingSession>(
         std::move(video_input),
         std::move(face_pipeline),
-        mapping_config);
+        mapping_config,
+        std::move(result_observer));
 }
 
 }  // namespace
@@ -420,17 +436,69 @@ public:
             video_input_factory.create(config_.video_input);
         std::unique_ptr<FacePipeline> face_pipeline =
             create_face_pipeline(config_.face_pipeline);
+        std::unique_ptr<MediaOutputSession> face_diagnostic_output;
+        std::unique_ptr<FaceDiagnosticSession> face_diagnostic;
+        Live2DTrackingSession::ResultObserver result_observer;
+        const std::chrono::milliseconds metrics_report_interval(
+            config_.instrumentation.report_interval_ms);
+        if (config_.face_diagnostic_output.enabled) {
+            const std::string diagnostic_metrics_path = metrics_path(
+                config_.instrumentation,
+                "vtb-face3d-output.metrics.jsonl");
+            face_diagnostic_output = std::make_unique<MediaOutputSession>(
+                std::make_unique<RtspOutput>(
+                    config_.face_diagnostic_output.rtsp_url),
+                diagnostic_metrics_path,
+                metrics_report_interval,
+                "face3d-output",
+                "face3d-video",
+                "vtb-face3d.output",
+                "face3d.output_write");
+            face_diagnostic = std::make_unique<FaceDiagnosticSession>(
+                config_.face_diagnostic_output,
+                config_.video_input.width,
+                config_.video_input.height,
+                config_.face_pipeline.rga_dma_heap,
+                face_diagnostic_output->sink());
+            FaceDiagnosticSession* const diagnostic = face_diagnostic.get();
+            result_observer = [diagnostic](
+                                  const std::optional<FaceTrackingResult>&
+                                      result) {
+                diagnostic->publish(result);
+            };
+        }
         std::unique_ptr<Live2DTrackingSession> tracking_session =
             create_tracking_session(
                 config_.mapping,
                 std::move(video_input),
-                std::move(face_pipeline));
+                std::move(face_pipeline),
+                std::move(result_observer));
 
         Live2DControlServer control_server(config_.control, *tracking_session);
+        const std::string output_metrics_path = metrics_path(
+            config_.instrumentation,
+            "vtb-live2d-output.metrics.jsonl");
+        const std::string media_metrics_path = metrics_path(
+            config_.instrumentation,
+            "vtb-live2d-media.metrics.jsonl");
         // Construction order also protects the callback context during exception unwinding.
-        MediaOutputSession media_output(std::make_unique<RtspOutput>(config_.output.rtsp_url));
+        MediaOutputSession media_output(
+            std::make_unique<RtspOutput>(config_.output.rtsp_url),
+            output_metrics_path,
+            metrics_report_interval,
+            "live2d-output",
+            "live2d-video",
+            "vtb-live2d.output",
+            "live2d.output_write");
         LibGodotInstance godot(arguments_);
-        godot.start(config_.render, media_output.sink());
+        godot.start(
+            config_.render,
+            media_output.sink(),
+            media_metrics_path,
+            metrics_report_interval);
+        if (face_diagnostic) {
+            face_diagnostic->start();
+        }
         tracking_session->start();
         control_server.start();
 
@@ -450,6 +518,10 @@ public:
                 throw;
             }
             media_output.rethrow_if_failed();
+            if (face_diagnostic) {
+                face_diagnostic->rethrow_if_failed();
+                face_diagnostic_output->rethrow_if_failed();
+            }
             ++iterations;
             if (finished) {
                 break;
@@ -469,6 +541,11 @@ public:
         control_server.stop();
         tracking_session->request_stop();
         tracking_session->stop();
+        if (face_diagnostic) {
+            face_diagnostic->request_stop();
+            face_diagnostic->stop();
+            face_diagnostic_output->finish();
+        }
         const std::uint64_t completed_frames = godot.completed_frames();
         std::cout << "VTB_LIBGODOT_RESULT iterations=" << iterations
                   << " completed_frames=" << completed_frames << "\n";

@@ -230,6 +230,57 @@ MediaOutputConfiguration parse_output(const Json& root) {
     return config;
 }
 
+FaceDiagnosticOutputConfiguration parse_face_diagnostic_output(
+    const Json& root) {
+    FaceDiagnosticOutputConfiguration config;
+    const auto iterator = root.find("face_diagnostic_output");
+    if (iterator == root.end()) {
+        return config;
+    }
+    if (!iterator->is_object()) {
+        throw std::invalid_argument(
+            "root.face_diagnostic_output must be an object");
+    }
+    config.enabled = required_value<bool>(
+        *iterator, "enabled", "face_diagnostic_output");
+    if (!config.enabled) {
+        return config;
+    }
+    config.rtsp_url = required_nonempty_string(
+        *iterator, "rtsp_url", "face_diagnostic_output");
+    config.maximum_fps = required_uint32(
+        *iterator, "maximum_fps", "face_diagnostic_output", 1, 60);
+    config.bitrate = required_uint32(
+        *iterator,
+        "bitrate",
+        "face_diagnostic_output",
+        64000,
+        100000000);
+    config.gop = required_uint32(
+        *iterator, "gop", "face_diagnostic_output", 1, 600);
+    return config;
+}
+
+InstrumentationConfiguration parse_instrumentation(const Json& root) {
+    InstrumentationConfiguration config;
+    const auto iterator = root.find("instrumentation");
+    if (iterator == root.end()) {
+        return config;
+    }
+    if (!iterator->is_object()) {
+        throw std::invalid_argument("root.instrumentation must be an object");
+    }
+    config.metrics_directory = required_nonempty_string(
+        *iterator, "metrics_directory", "instrumentation");
+    config.report_interval_ms = required_uint32(
+        *iterator,
+        "report_interval_ms",
+        "instrumentation",
+        1000,
+        3600000);
+    return config;
+}
+
 }  // namespace
 
 VtbApplicationConfiguration VtbApplicationConfigParser::parse(
@@ -257,6 +308,22 @@ VtbApplicationConfiguration VtbApplicationConfigParser::parse(
     config.control = parse_control(root);
     config.render = parse_render(root);
     config.output = parse_output(root);
+    config.face_diagnostic_output = parse_face_diagnostic_output(root);
+    config.instrumentation = parse_instrumentation(root);
+    if (config.face_diagnostic_output.enabled) {
+        if (config.video_input.width % 2U != 0U ||
+            config.video_input.height % 2U != 0U) {
+            throw std::invalid_argument(
+                "video input dimensions must be even when face diagnostic "
+                "output is enabled");
+        }
+        if (config.face_diagnostic_output.maximum_fps >
+            config.video_input.fps) {
+            throw std::invalid_argument(
+                "face_diagnostic_output.maximum_fps must not exceed "
+                "video_input.fps");
+        }
+    }
     return config;
 }
 

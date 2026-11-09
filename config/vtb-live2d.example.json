@@ -32,10 +32,21 @@
     "live2d_model": "/home/huangnv/open-vt-model/阿芙洛狄忒模型文件/fense_vts/fense.model3.json",
     "output_width": 1920,
     "output_height": 1080,
-    "output_fps": 30,
+    "output_fps": 60,
     "total_frames": 0
   },
   "output": {
     "rtsp_url": "rtsp://127.0.0.1:8554/live2d"
+  },
+  "face_diagnostic_output": {
+    "enabled": true,
+    "rtsp_url": "rtsp://127.0.0.1:8554/face3d",
+    "maximum_fps": 30,
+    "bitrate": 1200000,
+    "gop": 30
+  },
+  "instrumentation": {
+    "metrics_directory": "/home/huangnv/VTB/runtime/cpp-host-libgodot-20261030-01/metrics",
+    "report_interval_ms": 5000
   }
 }

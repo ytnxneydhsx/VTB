@@ -47,7 +47,8 @@ The application owns `Live2DTrackingSession`, `Live2DControlServer` and
 bytes through `EncodedVideoSink`. The host copies them before enqueueing, keeping
 all payload ownership local to each binary. This adds one encoded-packet copy.
 
-Bridge ABI v2 has a versioned initialize symbol plus version/size checks. Rebuild
+Bridge ABI v3 adds the media metrics JSONL path and report interval to the versioned
+initialize contract, with version/size checks. Rebuild
 and deploy the host and LibGodot together. Move `render.rtsp_url` to
 `output.rtsp_url` in the JSON configuration; the parser rejects the old field with
 migration instructions. Source and verification details are in
@@ -91,7 +92,14 @@ OPENVT_CONFIG=/home/huangnv/VTB/runtime/cpp-host-libgodot-20261030-01/config/vtb
 Set `render.total_frames` to `0` in the JSON file for continuous operation. The
 C++ host uses `steady_clock` as the process monotonic frame clock and paces
 iterations at `render.output_fps`; `--fixed-fps` only supplies the matching
-Godot simulation step.
+Godot simulation step. The example configuration uses 60 FPS output while the
+camera and face inference remain at 30 Hz. The LibGodot application buffers the
+two newest timestamped parameter snapshots and samples them once per render
+frame. It activates interpolation only when the snapshot interval is
+meaningfully longer than the render interval, so a 30 Hz / 30 FPS configuration
+keeps the direct latest-value behavior. This buffered interpolation adds about
+one tracking interval (roughly 33 ms at 30 Hz) and does not change snapshot
+freshness, immediate view controls or stale-tracking fallback.
 
 ## Known first-version boundaries
 

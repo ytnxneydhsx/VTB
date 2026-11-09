@@ -57,6 +57,7 @@
 | `FaceFrameConsumer` | 把通用帧租约交给 `FacePipeline` 并发布人脸结果 |
 | `LatestFrameSlot` | 在采集线程和模型线程之间保存最新一帧，替换时自动释放旧帧 |
 | `VideoProcessingRuntime` | 组合视频源和消费者，管理线程、停止、latest-only 和错误传播 |
+| `FaceDiagnosticSession` | 只复制最新人脸值结果，异步绘制诊断 NV12 并独立 MPP 编码 |
 
 人脸模块的 `face_types.hpp` 保存检测、关键点、姿态、表情和跟踪结果值类型；
 `face_pipeline.hpp`、`face_frame_consumer.hpp` 保存单帧算法流程和同步消费适配。
@@ -147,9 +148,19 @@ FaceDetector / LandmarkEstimator
 
 当前产品路径使用 `RgaImageTransformer`。它直接导入 V4L2 帧的 DMA-BUF，并由一次
 同步 RGA 操作完成 ROI 裁剪、缩放和 BT.601 limited YUV 到 RGB888 转换。输出缓冲区
-从 JSON 指定的 DMA heap 分配并复用。输出同时保留 DMA-BUF fd 和 CPU 映射地址；
-当前 `rknn_inputs_set()` 仍通过 CPU 地址接收数据，因此这一步还没有形成 RGA 到 RKNN
-的完整零拷贝。后续只有在实际测量证明输入复制是瓶颈后，才需要改为 RKNN 内存导入。
+从 JSON 指定的 DMA heap 分配并复用。`RgaImageTransformer` 通过 `ModelInputView` 同时
+交付 DMA-BUF fd、CPU 映射地址、缓冲区大小和行步长，不包含 RKNN 头文件，也不创建或
+配置 RKNN context。`RknnModel` 收到 DMA-BUF 输入后，在自己的 context 内复制 fd、建立
+独立映射，并调用 `rknn_create_mem_from_fd()` 和 `rknn_set_io_mem()`；后续帧直接执行
+`rknn_run()`。CPU 对照输入仍使用 `rknn_inputs_set()`。
+
+`RknnModel` 查询输入属性后，通过 `ModelInputSpec` 声明最小缓冲区大小；RGA 只依据通用
+输入规格分配缓冲区。检测和关键点 context 分别创建自己的 `rknn_tensor_mem` 包装，
+当前串行管线允许两者复用同一块 RGA 输出 DMA-BUF。该实现消除了应用层从 RGA 输出到
+RKNN 输入的 CPU 像素复制。`pass_through = 0` 保留 Runtime 的输入格式与归一化转换，
+因此这里的零拷贝范围限定为外部模型输入缓冲交接。该路径已使用项目固定的
+Buildroot/Godot GCC 13.2.0、RKNN 2.5.0 sysroot 和 RGA sysroot 完成 ARM64 交叉编译；
+RK3588 上的输入属性、结果一致性和性能仍需单独验证。
 
 两个 RKNN 模型都在 `RknnModel` 初始化时根据固定的输出属性预分配 FP32 缓冲区。
 `rknn_outputs_get()` 使用 `is_prealloc = 1` 直接写入这些缓冲区，检测和关键点后处理
@@ -165,8 +176,8 @@ RKNN Runtime 在内部把模型原生输出转换为 FP32，因此不等同于 N
 选择 RGA 实现。RGA 失败时不会自动切换到 CPU，避免运行性能和内存路径发生未声明的
 变化。RGA 路径解决 CPU 预处理开销和整帧 CPU 读取问题；它不会改变检测与关键点
 模型的调用顺序，也不会自行降低 RKNN 推理耗时。验证指标应分别记录两种实现的
-`prepare()` 耗时、模型输入差异、`rknn_inputs_set()` 到 `rknn_run()` 的耗时以及
-完整消费帧耗时。
+`prepare()` 耗时、模型输入差异、DMA-BUF 绑定初始化耗时、`rknn_run()` 耗时以及完整
+消费帧耗时；基线构建继续记录 `rknn_inputs_set()` 耗时用于比较。
 
 第一版预处理把源图 ROI 直接缩放到模型尺寸，不加入未记录的 letterbox 或 padding。
 `ModelInputView` 保存本次预处理使用的源图 ROI。检测框、关键点和更新后的人脸框统一使用
@@ -214,8 +225,15 @@ FaceTrackingResult
 Live2DFaceMapper                              Debug/Observability
         |                                             |
         v                                             v
-Godot/Live2D                              延迟、丢帧和缓冲池统计
+Godot/Live2D                         latest-only 黑底框和66点 /face3d
 ```
+
+诊断输出采用值结果旁路，没有把摄像头帧扩展成通用多订阅总线。更简单的同步方案会在
+`FaceFrameConsumer::consume()` 内完成绘制和编码，直接增加 V4L2 帧租约持有时间；完整
+异步帧总线又需要为每个订阅者定义帧所有权、排空和背压策略。当前需求只需查看检测框与
+66 点，因此复制小型 `FaceTrackingResult`、容量一覆盖和独立 NV12 DMA-BUF 可以在不
+改变主推理路径的前提下提供观测画面。验证时分别记录诊断发布、编码和替换计数，并确认
+启用前后主链推理 FPS、`LatestFrameSlot` 替换数和 Live2D 60 FPS 输出没有显著退化。
 
 稳定跟踪时可以使用上一帧更新后的人脸框，跳过检测模型：
 
@@ -474,6 +492,8 @@ FaceTrackingResult
   66 点关键点后处理。
 - `ConfigurationFileReader` 与 `VtbApplicationConfigParser` 分别负责读取配置文件和
   生成分段的强类型配置。
+- `MonotonicClock` 统一摄像头、跟踪、宿主/LibGodot、MPP PTS/DTS 与持久化记录的
+  `CLOCK_MONOTONIC` 纳秒时间点；Godot ticks 只计算模块内局部时长。
 - `V4l2Camera` 在执行 `VIDIOC_S_FMT` 和 `VIDIOC_S_PARM` 后立即将驱动回填的
   FourCC、尺寸和帧率与请求值严格比较，不接受驱动回退，也不生成第二套配置对象。
 - `CameraSource` 作为当前 Live2D 直接 V4L2 摄像头入口，使用 MMAP、
@@ -483,13 +503,15 @@ FaceTrackingResult
 - `Live2DFaceMapper` 的中立姿态校准、十个 Ayagami 参数映射和按单调时钟平滑。
 - 应用层 `Live2DTrackingSession` 组合视频运行时、算法和映射状态；独立的
   `Live2DControlServer` 只调用状态查询、取景修改和校准重置。
-- `VtbApplication` 通过 ABI v2 提交参数快照；Godot 返回编码包视图，由宿主
+- `VtbApplication` 通过 ABI v3 提交参数快照和媒体指标持久化配置；Godot 返回编码包视图，由宿主
   `MediaOutputSession` 拷贝并交给 `OutputManager`。协议配置位于 `output` 段。
+- 可选 `FaceDiagnosticSession` 从同一次人脸推理结果生成黑底框和 66 点画面，使用
+  独立 NV12 DMA-BUF、MPP 编码器与 `/face3d` 输出。该分支只保留最新结果，关闭配置时
+  不创建任何诊断硬件资源。
 
-MPP 摄像头 MJPEG 解码和 RGA 到 RKNN 的直接内存导入仍属于后续按测量引入的硬件
-优化。当前 C++ Live2D 主路径直接采集 YUYV/NV12/NV21，由 RGA 生成模型输入；
-`rknn_inputs_set()` 继续从 RGA 输出缓冲区的 CPU 映射地址接收数据，因此仍不能标记为
-RGA 到 RKNN 端到端零拷贝。
+MPP 摄像头 MJPEG 解码仍属于后续按测量引入的硬件优化。当前 C++ Live2D 主路径直接
+采集 YUYV/NV12/NV21，由 RGA 生成带 DMA-BUF fd 的模型输入；RKNN 在各自 context 中
+导入该 fd。该代码路径已经完成组件边界改造，RK3588 实机验证完成前只记录为开发证据。
 
 - RKNN 和 RGA 分别通过 `VTB_ENABLE_RKNN_FACE`、`VTB_ENABLE_RGA_FACE` 启用；应用负责把输入、预处理、
   模型和后续姿态计算组合进同一进程。
@@ -511,5 +533,5 @@ Buildroot/Godot ARM64 GCC 13.2.0 构建。2026-10-30 的拆分前路径已在 RK
 摄像头真人画面也完成 30/30 校准，置信度为 0.904445；重新标定、视图控制以及
 H.264 WebRTC 浏览器播放均已验证。浏览器连续播放 121.6 秒时共显示 3651 帧、
 丢弃 11 帧且无媒体错误。当前仍未完成 C++/Python 数值精度对照、长时间稳定性和
-带关联时间戳的摄像头到浏览器端到端延迟测量。此前宿主/LibGodot 边界拆分的编译记录不覆盖 2026-11-03 的 ABI v2；
+带关联时间戳的摄像头到浏览器端到端延迟测量。此前宿主/LibGodot 边界拆分的编译记录不覆盖 2026-11-03 的 ABI v3；
 本轮验证边界见 [模块边界](module-boundaries.md)，尚未进行 RK3588 板端回归。

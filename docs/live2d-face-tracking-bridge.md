@@ -13,6 +13,8 @@ V4L2 CameraSource (MMAP / DQBUF / QBUF)
   → RKNN detector (NPU core 0)
   → RKNN 66-point landmark model (NPU core 1)
   → OpenSeeFace-compatible C++ PnP / expression features
+  → optional latest-only FaceDiagnosticSession → NV12 DMA-BUF → MPP H.264
+      → host MediaOutputSession → OutputManager → /face3d RTSP
   → C++ Live2DFaceMapper
   → Live2DTrackingSession capacity-one parameter snapshot
   → openvt_libgodot_application_submit_live2d_frame()
@@ -33,7 +35,8 @@ Godot/Ayagami、DMA-BUF、RGA 和 MPP 保留原有资源链；输出协议移到
   `DQBUF/QBUF` 帧租约，当前输出 YUYV/NV12/NV21 原始帧。
 - `VideoProcessingRuntime`：只组合 `VideoSource`、`LatestFrameSlot` 和
   `VideoFrameConsumer`，管理采集/消费线程、latest-only 覆盖、停止和异常传播。
-- `FaceFrameConsumer`：把统一帧消费接口适配到 `FacePipeline` 并发布人脸结果。
+- `FaceFrameConsumer`：把统一帧消费接口适配到 `FacePipeline` 并发布人脸结果；结果
+  可由 Live2D mapper 与可选诊断观察者同时读取。
 - `RknnFaceDetector` / `RknnLandmarkEstimator`：加载 `.rknn` 模型并固定到两个 NPU core。
 - `OpenSeeFaceGeometryEstimator`：保留 70 点模板、14 点 PnP、Euler 角、66 点反投影和
   Remedian 表情特征语义。
@@ -41,6 +44,8 @@ Godot/Ayagami、DMA-BUF、RGA 和 MPP 保留原有资源链；输出协议移到
 - `Live2DTrackingSession`：应用层组合类，创建 `FaceFrameConsumer`，管理参数快照和校准。
 - `Live2DControlServer`：独立的 HTTP 控制组件，借用寿命更长的会话，序列化状态和转发命令。
 - `MediaOutputSession`：宿主编码包接收器，复制回调中的借用字节，管理输出启动、排空和停止。
+- `FaceDiagnosticSession`：只复制最新 `FaceTrackingResult`，后台绘制黑底人脸框和
+  66 点 NV12 画面，并通过独立 MPP 编码器交付 `/face3d` 编码包。
 - `VtbApplication`：分别创建视频输入与模型管线，读取最新参数快照并提交给 Godot。
 - `Live2DParameters`：独立的十参数值对象；Godot 只编译这个数据类型，不编译
   `Live2DFaceMapper`。
@@ -99,6 +104,13 @@ YUYV/NV12/NV21 原始格式。
 绑定地址、端口和浏览器来源由 JSON 的 `control` 段提供。控制口没有认证或加密，
 只适用于受信的直连本地网段。
 
+## 人脸诊断输出
+
+`face_diagnostic_output.enabled=true` 时，`vtb-live2d` 同时发布 `/face3d` 和
+`/live2d`。诊断分支接收已经完成推理的值对象，不重新打开摄像头、不重复执行 RKNN，
+也不保存 `DecodedFrameLease`。后台编码跟不上时只覆盖尚未消费的旧结果；
+`maximum_fps` 只限定诊断输出，Live2D 渲染帧率仍由 `render.output_fps` 控制。
+
 ## 构建依赖
 
 主程序的 CMake 构建需要 OpenCV core/calib 与 RKNN sysroot。OpenCV 只用于
@@ -117,8 +129,15 @@ RKNN 和 FFmpeg 由宿主链接。产品构建启用 `VTB_ENABLE_EMBEDDED_GODOT`
 `VTB_ENABLE_OPENCV_FACE_PIPELINE`、`VTB_ENABLE_RKNN_FACE`、`VTB_ENABLE_RGA_FACE`、
 `VTB_ENABLE_RTSP_OUTPUT`。两个推理后端关闭时，通用会话与消费适配仍可独立编译。
 
-ABI v2 使用 `openvt_libgodot_application_initialize_v2()`、版本查询和配置尺寸校验。
+ABI v3 使用 `openvt_libgodot_application_initialize_v3()`、版本查询和配置尺寸校验，
+并把媒体指标 JSONL 路径和报告周期从宿主传入 LibGodot。
 宿主和 LibGodot 必须成对构建、成对部署。回调契约与关闭顺序见 [模块边界](module-boundaries.md)。
+
+当前 60 FPS 输出路径保留 30 Hz 摄像头和人脸推理。LibGodot 主线程在应用参数前，
+使用全局单调时钟时间戳对最近两个 `Live2DParameters` 快照进行线性插值；当快照周期
+没有明显长于渲染周期时直接采用最新值，因此原有 30 Hz 跟踪 / 30 FPS 输出语义不变。
+插值采用一个源快照周期的缓冲，30 Hz 输入约增加 33 ms 参数延迟。取景控制立即生效，
+新鲜度仍按最新真实快照的产生时间计算，插值帧不会续期，超时后继续执行平滑回默认值。
 
 2026-10-30 的拆分前路径已在 RK3588 完成实机验证。摄像头路径连续处理 300 个渲染帧，
 MPP 编码和 RTSP 写出均为 300，丢弃和错误均为 0，渲染吞吐为 29.788 FPS。
@@ -136,7 +155,7 @@ MPP 编码和 RTSP 写出均为 300，丢弃和错误均为 0，渲染吞吐为 
 该数值不包含摄像头曝光、编码、网络和浏览器解码，不能当作端到端延迟。取证完成后
 用 `SIGTERM` 停止持续运行，退出码 143 来自本次主动清理。
 
-历史构建记录不覆盖 ABI v2；本轮以 [模块边界](module-boundaries.md) 的验证范围为准，尚未在
+历史构建记录不覆盖 ABI v3；本轮以 [模块边界](module-boundaries.md) 的验证范围为准，尚未在
 RK3588 上运行。仍需完成新边界的板端回归、C++/Python 数值精度对照、长时间
 稳定性和摄像头到浏览器的关联时间戳端到端延迟测量。
 

@@ -140,8 +140,11 @@ VTB_FACE3D_LIVE2D_UDP=127.0.0.1:11574 \
 ```
 
 新的 Live2D 产品链路不会读取这个 UDP 参数流；`vtb-live2d` 宿主独立打开输入、
-执行 RKNN 推理并向 Godot 提交最终参数，然后生成 `/live2d` 流。不要让旧诊断进程
-和 C++ Live2D 进程同时独占同一个摄像头节点。
+执行一次 RKNN 推理并向 Godot 提交最终参数。JSON 中启用
+`face_diagnostic_output` 后，同一个 C++ 进程还会把最新的 `FaceTrackingResult`
+绘制成黑底人脸框和 66 点诊断画面，通过独立 MPP 编码器发布 `/face3d`；右侧
+Godot 输出继续发布 `/live2d`。诊断分支不持有摄像头帧租约，积压时只保留最新结果。
+旧 Python 诊断进程仍不能与 C++ 产品进程同时独占同一个摄像头节点。
 在 Mac 上启动左侧人脸检测、右侧 Live2D 的双流监看页：
 
 ```bash

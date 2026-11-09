@@ -67,7 +67,7 @@ extern "C" int openvt_libgodot_iteration(void *p_instance) {
 	return 0;
 }
 
-extern "C" int openvt_libgodot_application_initialize_v2(
+extern "C" int openvt_libgodot_application_initialize_v3(
 		const OpenVTEmbeddedApplicationConfig *p_config) {
 	if (application != nullptr) {
 		application_error = "Embedded Live2D application is already initialized";
@@ -79,10 +79,12 @@ extern "C" int openvt_libgodot_application_initialize_v2(
 			p_config->output_sink.context == nullptr ||
 			p_config->output_sink.configure_h264 == nullptr ||
 			p_config->output_sink.publish == nullptr ||
+			p_config->metrics_jsonl_path == nullptr ||
 			p_config->output_width > static_cast<uint32_t>(std::numeric_limits<int>::max()) ||
 			p_config->output_height > static_cast<uint32_t>(std::numeric_limits<int>::max()) ||
 			p_config->output_fps > static_cast<uint32_t>(std::numeric_limits<int>::max()) ||
-			p_config->total_frames > static_cast<uint32_t>(std::numeric_limits<int>::max())) {
+			p_config->total_frames > static_cast<uint32_t>(std::numeric_limits<int>::max()) ||
+			p_config->metrics_report_interval_ms > static_cast<uint32_t>(std::numeric_limits<int>::max())) {
 		application_error = "Embedded application configuration or bridge ABI is invalid";
 		return static_cast<int>(ERR_INVALID_PARAMETER);
 	}
@@ -94,6 +96,8 @@ extern "C" int openvt_libgodot_application_initialize_v2(
 	config.output_height = static_cast<int>(p_config->output_height);
 	config.output_fps = static_cast<int>(p_config->output_fps);
 	config.total_frames = static_cast<int>(p_config->total_frames);
+	config.metrics_jsonl_path = String::utf8(p_config->metrics_jsonl_path);
+	config.metrics_report_interval_ms = static_cast<int>(p_config->metrics_report_interval_ms);
 	const Error error = application->initialize(config);
 	if (error != OK) {
 		const int result = remember_application_error(error);

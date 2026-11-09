@@ -49,13 +49,18 @@ Error EmbeddedLive2DApplication::initialize(
 			p_config.output_width < 2 || p_config.output_width > 8192 ||
 			p_config.output_height < 2 || p_config.output_height > 8192 ||
 			p_config.output_fps < 1 || p_config.output_fps > 240 ||
-			p_config.total_frames < 0) {
+			p_config.total_frames < 0 ||
+			(!p_config.metrics_jsonl_path.is_empty() &&
+					p_config.metrics_report_interval_ms < 1000)) {
 		return fail(ERR_INVALID_PARAMETER, "Embedded application configuration is invalid");
 	}
 	output_width_ = p_config.output_width;
 	output_height_ = p_config.output_height;
 	output_fps_ = p_config.output_fps;
+	output_frame_interval_ns_ = 1000000000ULL / static_cast<uint64_t>(output_fps_);
 	total_frames_ = p_config.total_frames;
+	metrics_jsonl_path_ = p_config.metrics_jsonl_path;
+	metrics_report_interval_ms_ = p_config.metrics_report_interval_ms;
 	live2d_model_ = p_config.live2d_model;
 	output_sink_ = p_config.output_sink;
 	if (output_width_ % 2 != 0 || output_height_ % 2 != 0) {
@@ -97,7 +102,8 @@ Error EmbeddedLive2DApplication::configure_render_session() {
 Error EmbeddedLive2DApplication::configure_output() {
 	capture_.instantiate();
 	const Error error = capture_->configure(
-			output_sink_, output_width_, output_height_, output_fps_, total_frames_);
+			output_sink_, output_width_, output_height_, output_fps_, total_frames_,
+			metrics_jsonl_path_, metrics_report_interval_ms_);
 	if (error != OK) {
 		return fail(error, "DMA-BUF output configuration failed: " + capture_->get_last_error());
 	}
@@ -152,18 +158,28 @@ Error EmbeddedLive2DApplication::apply_pending_parameters(uint64_t p_monotonic_t
 		// View-only snapshots carry the same production time; they cannot renew freshness
 		// or replace already-decaying parameters with the old pre-decay value.
 		if (pending_produced_timestamp_ns_ > last_produced_timestamp_ns_) {
-			last_produced_timestamp_ns_ = pending_produced_timestamp_ns_;
-			if (p_monotonic_timestamp_ns >= last_produced_timestamp_ns_ &&
-					p_monotonic_timestamp_ns - last_produced_timestamp_ns_ <= maximum_parameter_age_ns_) {
-				last_parameters_ = pending_parameters_;
+			bool previous_sample_was_stale = false;
+			if (last_produced_timestamp_ns_ == 0 ||
+					p_monotonic_timestamp_ns < last_produced_timestamp_ns_ ||
+					p_monotonic_timestamp_ns - last_produced_timestamp_ns_ >
+							maximum_parameter_age_ns_) {
+				previous_sample_was_stale = true;
 			}
+			if (previous_sample_was_stale) {
+				parameter_interpolator_.reset();
+			}
+			last_produced_timestamp_ns_ = pending_produced_timestamp_ns_;
+			parameter_interpolator_.push(
+					pending_parameters_, pending_produced_timestamp_ns_);
 		}
 	}
 	if (last_produced_timestamp_ns_ == 0 || p_monotonic_timestamp_ns < last_produced_timestamp_ns_ ||
 			p_monotonic_timestamp_ns - last_produced_timestamp_ns_ > maximum_parameter_age_ns_) {
 		return apply_fallback_parameters(p_monotonic_timestamp_ns);
 	}
-	// No new snapshot: submit the held value without advancing its freshness deadline.
+	// Sampling does not advance the source freshness deadline.
+	last_parameters_ = parameter_interpolator_.sample(
+			p_monotonic_timestamp_ns, output_frame_interval_ns_);
 	last_parameter_update_timestamp_ns_ = p_monotonic_timestamp_ns;
 	const Error error = render_session_->submit_parameters(last_parameters_);
 	if (error != OK) {
@@ -236,6 +252,7 @@ Error EmbeddedLive2DApplication::shutdown() {
 		render_session_->shutdown();
 		render_session_.reset();
 	}
+	parameter_interpolator_.reset();
 	initialized_ = false;
 	output_finished_ = true;
 	return result;

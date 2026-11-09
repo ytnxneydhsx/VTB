@@ -6,6 +6,7 @@
 #include "core/error/error_list.h"
 #include "core/object/ref_counted.h"
 #include "core/string/ustring.h"
+#include "vtb/live2d/live2d_parameter_interpolator.hpp"
 #include "vtb/live2d/live2d_parameters.hpp"
 #include "vtb/output/encoded_video_sink.hpp"
 
@@ -23,6 +24,8 @@ public:
 	int output_height = 0;
 	int output_fps = 0;
 	int total_frames = 0;
+	String metrics_jsonl_path;
+	int metrics_report_interval_ms = 0;
 };
 
 class EmbeddedLive2DApplication final {
@@ -61,6 +64,7 @@ private:
 	std::unique_ptr<Live2DRenderSession> render_session_;
 	Ref<OpenVTDmaBufCapture> capture_;
 	String last_error_;
+	Live2DParameterInterpolator parameter_interpolator_;
 	Live2DParameters last_parameters_;
 	Live2DParameters pending_parameters_;
 	uint64_t last_parameter_update_timestamp_ns_ = 0;
@@ -76,9 +80,12 @@ private:
 	int output_height_ = 1080;
 	int output_fps_ = 30;
 	int total_frames_ = 0;
+	int metrics_report_interval_ms_ = 0;
 	String live2d_model_;
+	String metrics_jsonl_path_;
 	EncodedVideoSink output_sink_;
 	uint64_t maximum_parameter_age_ns_ = 150000000ULL;
+	uint64_t output_frame_interval_ns_ = 33333333ULL;
 	bool has_pending_parameters_ = false;
 	bool initialized_ = false;
 	bool output_finished_ = false;

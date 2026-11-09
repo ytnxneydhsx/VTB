@@ -1,6 +1,8 @@
 #pragma once
 
+#include <chrono>
 #include <memory>
+#include <string>
 
 #include "vtb/output/encoded_video_sink.hpp"
 #include "vtb/output/output.hpp"
@@ -11,7 +13,14 @@ namespace vtb {
 // destruction; its callbacks borrow this stable-address object's context.
 class MediaOutputSession final {
 public:
-    explicit MediaOutputSession(std::unique_ptr<Output> output);
+    MediaOutputSession(
+        std::unique_ptr<Output> output,
+        std::string metrics_path,
+        std::chrono::milliseconds metrics_report_interval,
+        std::string output_id,
+        std::string stream_id,
+        std::string metrics_source,
+        std::string write_timer_name);
     ~MediaOutputSession();
     MediaOutputSession(const MediaOutputSession&) = delete;
     MediaOutputSession& operator=(const MediaOutputSession&) = delete;

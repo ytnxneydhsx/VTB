@@ -44,6 +44,21 @@ if(VTB_ENABLE_ROCKCHIP_MPP_PUBLISHER OR VTB_ENABLE_RGA_FACE)
         REQUIRED)
 endif()
 
+if(VTB_ENABLE_ROCKCHIP_MPP_PUBLISHER OR VTB_ENABLE_EMBEDDED_GODOT)
+    if(VTB_ROCKCHIP_SYSROOT STREQUAL "")
+        message(FATAL_ERROR
+            "VTB_ROCKCHIP_SYSROOT is required for Rockchip MPP support")
+    endif()
+    find_path(VTB_MPP_INCLUDE_DIR rockchip/rk_mpi.h
+        PATHS "${VTB_ROCKCHIP_SYSROOT}/usr/include"
+        NO_DEFAULT_PATH
+        REQUIRED)
+    find_library(VTB_MPP_LIBRARY rockchip_mpp
+        PATHS "${VTB_ROCKCHIP_SYSROOT}/usr/lib/aarch64-linux-gnu"
+        NO_DEFAULT_PATH
+        REQUIRED)
+endif()
+
 function(vtb_configure_target target)
     target_compile_features(${target} PRIVATE cxx_std_17)
     target_compile_options(${target} PRIVATE -Wall -Wextra -Wpedantic)
@@ -124,19 +139,6 @@ if(VTB_ENABLE_RTSP_OUTPUT)
     vtb_configure_target(vtb-media-output-publisher)
 
     if(VTB_ENABLE_ROCKCHIP_MPP_PUBLISHER)
-        if(VTB_ROCKCHIP_SYSROOT STREQUAL "")
-            message(FATAL_ERROR
-                "VTB_ROCKCHIP_SYSROOT is required for the Rockchip MPP publisher")
-        endif()
-        find_path(VTB_MPP_INCLUDE_DIR rockchip/rk_mpi.h
-            PATHS "${VTB_ROCKCHIP_SYSROOT}/usr/include"
-            NO_DEFAULT_PATH
-            REQUIRED)
-        find_library(VTB_MPP_LIBRARY rockchip_mpp
-            PATHS "${VTB_ROCKCHIP_SYSROOT}/usr/lib/aarch64-linux-gnu"
-            NO_DEFAULT_PATH
-            REQUIRED)
-
         add_executable(vtb-mpp-output-publisher
             examples/mpp-output-publisher/main.cpp
         )
@@ -387,6 +389,23 @@ if(VTB_ENABLE_EMBEDDED_GODOT)
         message(FATAL_ERROR "VTB_LIBGODOT_LIBRARY does not exist")
     endif()
 
+    add_library(vtb_face_diagnostic_output STATIC
+        apps/vtb-live2d/face_diagnostic_session.cpp
+    )
+    target_include_directories(vtb_face_diagnostic_output
+        PUBLIC apps/vtb-live2d)
+    target_include_directories(vtb_face_diagnostic_output
+        SYSTEM PRIVATE "${VTB_MPP_INCLUDE_DIR}")
+    target_link_libraries(vtb_face_diagnostic_output
+        PUBLIC
+            vtb_application_config
+            vtb_face_core
+        PRIVATE
+            Threads::Threads
+            "${VTB_MPP_LIBRARY}"
+    )
+    vtb_configure_target(vtb_face_diagnostic_output)
+
     add_executable(vtb-live2d
         apps/vtb-live2d/main.cpp
         apps/vtb-live2d/vtb_application.cpp
@@ -407,6 +426,7 @@ if(VTB_ENABLE_EMBEDDED_GODOT)
             vtb_face_rga
             vtb_face_rknn
             vtb_face_geometry_opencv
+            vtb_face_diagnostic_output
             "${VTB_LIBGODOT_LIBRARY}"
     )
     target_link_options(vtb-live2d PRIVATE -Wl,--allow-shlib-undefined)
