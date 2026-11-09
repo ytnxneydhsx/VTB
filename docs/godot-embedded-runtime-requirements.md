@@ -3,8 +3,11 @@
 状态：第一版实现完成，实机验收记录见 `godot-embedded-runtime-validation-2026-10-30.md`
 日期：2026-10-30；2026-11-03 增补当前模块边界。
 
-历史实机验收不覆盖 ABI v2。当前实现的模块职责与验证范围以
+历史实机验收不覆盖 ABI v3。当前实现的模块职责与验证范围以
 [模块边界](module-boundaries.md) 为准，下文保留尚未接入产品的接口设计。
+2026-11-03 的 Headless EGL 后续阶段由
+[ADR 0002](adr/0002-use-headless-egl-for-product-runtime.md) 管理；下文关于 X11 的
+第一版范围描述保留为历史边界。
 适用目标：RK3588 ARM64 单进程 Live2D 产品链路
 
 ## 1. 文档目的
@@ -47,7 +50,7 @@ VTB C++ main()
   → LibGodotInstance::start()
   → C++ 创建 SceneTree、SubViewport 和 Ayagami 模型
   → C++ 每帧向 Godot 提交已完成的 Live2D 参数并驱动 iteration
-  → Godot RenderingServer / Mali-G610 完成离屏绘制
+  → Headless EGL/GBM / Mali-G610 驱动 Godot RenderingServer 完成离屏绘制
   → C++ 取得已完成帧的 GPU 纹理
   → RGBA DMA-BUF → RGA → MPP → EncodedVideoSink
   → 宿主 MediaOutputSession → OutputManager → RTSP
@@ -121,7 +124,7 @@ Motion、Expression、Physics、纹理和 OpenGL ES 渲染。当前 Ayagami + Go
 - 完整的启动、运行、停止、错误传播、指标和资源回收；
 - 保留当前 Godot-hosted 路径作为开发期回退基线。
 
-### 4.2 第一版不包含
+### 4.2 最初版本不包含
 
 - 多个 Godot Runtime 实例；
 - Runtime 停止后在同一进程内再次初始化；
@@ -133,9 +136,9 @@ Motion、Expression、Physics、纹理和 OpenGL ES 渲染。当前 Ayagami + Go
 - UVC/UAC2 Gadget 产品验收；
 - Windows、macOS 或 x86_64 产品运行支持。
 
-Headless EGL 继续由 `docs/headless-live2d-uvc-implementation-plan.md` 单独管理。第一版
-嵌入改造必须沿用当前已经验证的 X11/EGL + Mali-G610 路径，避免同时改变生命周期和
-显示后端。
+Headless EGL 由 `docs/headless-live2d-uvc-implementation-plan.md` 单独管理。最初版本
+沿用已经验证的 X11/EGL + Mali-G610 路径，避免同时改变生命周期和显示后端；
+ADR 0002 在生命周期迁移完成后启动独立的显示后端迁移阶段。
 
 ## 5. 设计原则
 
@@ -297,7 +300,7 @@ Runtime 配置至少包含：
 | 模型路径 | 当前 `model3.json` 入口 |
 | 输出宽高 | 第一版固定验收 1920×1080 |
 | 输出 FPS | 第一版固定验收 30 FPS |
-| 显示驱动 | 第一版使用当前 X11/EGL 路径 |
+| 显示驱动 | 最初版本使用 X11/EGL；ADR 0002 后默认使用 `headless_egl` |
 | 渲染驱动 | `opengl3_es` |
 | Mali 用户态库路径 | 当前板端匹配的 Rockchip `libmali` |
 | 是否启用性能统计 | 控制分段计时和周期报告 |
@@ -796,7 +799,8 @@ Godot 4.7.1 源码检查、ARM64 探针和 RK3588 完整链路验证已经确认
 7. 启动、iteration、输出或关闭错误向 C++ `main()` 传播并决定进程退出码；
 8. `SIGINT` 和 `SIGTERM` 的 handler 只设置原子停止标志，资源释放在主线程执行；
 9. Godot、GPU copy、RGA、MPP 或输出错误会终止当前产品链路；
-10. Headless EGL/GBM 保持为独立后续迁移，不与本次生命周期迁移叠加。
+10. Headless EGL/GBM 在生命周期迁移完成后作为独立阶段接入，不改变本节记录的
+    第一版生命周期结论。
 
 LibGodot 启动失败属于进程级致命错误。Godot 当前清理路径没有为同一进程内反复创建
 Runtime 提供足够保证，因此第一版不支持原地重启。

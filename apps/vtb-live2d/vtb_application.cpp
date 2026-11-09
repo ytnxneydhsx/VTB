@@ -158,7 +158,7 @@ public:
         }
         godot_arguments_.emplace_back("--path");
         godot_arguments_.push_back(render.godot_project_dir);
-        append_default_argument("--display-driver", "x11");
+        append_default_argument("--display-driver", "headless_egl");
         append_default_argument("--rendering-driver", "opengl3_es");
         append_default_flag("--single-window");
         append_default_flag("--disable-crash-handler");

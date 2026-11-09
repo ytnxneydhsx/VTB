@@ -10,7 +10,7 @@ for required_path in \
 	"$deploy_dir/bin/vtb-live2d" \
 	"$deploy_dir/bin/libgodot.linuxbsd.template_release.arm64.so" \
 	"$config_path" \
-	/home/huangnv/.Xauthority \
+	/dev/dri/renderD128 \
 	/dev/dma_heap/system-uncached \
 	/dev/rga \
 	/dev/mpp_service; do
@@ -21,11 +21,10 @@ for required_path in \
 done
 
 exec sudo -n env \
-	DISPLAY=:0 \
-	XAUTHORITY=/home/huangnv/.Xauthority \
-	MALI_DEFAULT_WINSYS=x11 \
+	-u DISPLAY \
+	-u XAUTHORITY \
+	-u MALI_DEFAULT_WINSYS \
 	LD_LIBRARY_PATH="$deploy_dir/bin:$opencv_dir:$mali_root/mali:$mali_root:/usr/lib/aarch64-linux-gnu" \
 	"$deploy_dir/bin/vtb-live2d" \
 	--config "$config_path" \
-	--resolution 1x1 \
-	--position 1200,0
+	--resolution 1x1

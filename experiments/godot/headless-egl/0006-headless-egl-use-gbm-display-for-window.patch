@@ -1,0 +1,12 @@
+diff --git a/platform/linuxbsd/headless_egl/display_server_headless_egl.cpp b/platform/linuxbsd/headless_egl/display_server_headless_egl.cpp
+--- a/platform/linuxbsd/headless_egl/display_server_headless_egl.cpp
++++ b/platform/linuxbsd/headless_egl/display_server_headless_egl.cpp
+@@ -171,7 +171,7 @@ DisplayServerHeadlessEGL::DisplayServerHeadlessEGL(const String &p_rendering_driv
+ 		error = gl_manager->open_display(gbm);
+ 	}
+ 	if (error == OK) {
+-		error = gl_manager->window_create(DisplayServerEnums::MAIN_WINDOW_ID, nullptr, nullptr, window_size.x, window_size.y);
++		error = gl_manager->window_create(DisplayServerEnums::MAIN_WINDOW_ID, gbm, nullptr, window_size.x, window_size.y);
+ 	}
+ 	if (error != OK) {
+ 		memdelete(gl_manager);

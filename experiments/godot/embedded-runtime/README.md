@@ -18,8 +18,17 @@ compiler. The LibGodot SCons configuration used for the validated build is:
 ```text
 platform=linuxbsd arch=arm64 target=template_release
 library_type=shared_library production=yes disable_path_overrides=no
-x11=yes wayland=no vulkan=no opengl3=yes use_static_cpp=no
+x11=no wayland=no vulkan=no opengl3=yes use_static_cpp=no
 ```
+
+Apply the pinned Headless EGL patch series before building LibGodot:
+
+```bash
+./experiments/godot/headless-egl/apply-to-godot.sh /absolute/path/to/godot
+```
+
+The patch boundary and verification requirements are documented in
+[`headless-egl/README.md`](../headless-egl/README.md).
 
 `disable_path_overrides=no` is required because the host deliberately passes a
 separate resource root with `--path`. The host CMake target is enabled with
@@ -81,7 +90,9 @@ Copy `extension_list.cfg` and `global_script_class_cache.cfg` into the deployed
 project's `.godot/` directory. The product project must not contain
 `blend_registry.gd`; `Live2DRenderSession` owns blend registration.
 
-On the RK3588, start MediaMTX first and then run:
+On the RK3588, start MediaMTX first and then run. The launcher requires
+`/dev/dri/renderD128` and clears the X11 display environment before starting
+the process:
 
 ```bash
 OPENVT_EMBEDDED_DEPLOY_DIR=/home/huangnv/VTB/runtime/cpp-host-libgodot-20261030-01 \
@@ -103,7 +114,9 @@ freshness, immediate view controls or stale-tracking fallback.
 
 ## Known first-version boundaries
 
-- X11/EGL and Mali-G610 remain the display path.
+- Headless EGL/GBM uses Mali-G610 without creating an X11 display or window.
+- The current `glBlitFramebuffer()` capture stage remains in place; direct
+  RenderTarget-to-DMA-BUF output is a separate optimization stage.
 - Audio falls back to Godot's dummy driver; audio input and A/V synchronization
   are outside this migration.
 - Empty-index meshes in the current model still produce the pre-existing

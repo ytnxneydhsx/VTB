@@ -44,6 +44,14 @@ BOARD_SYSROOT     当前RK的头文件和MPP/RGA库快照
 KHRONOS_HEADERS   EGL/GLES Khronos头文件根目录
 ```
 
+同一目录还提供独立的 `headless-egl-gbm-probe` 构建目标，用于只验证
+`/dev/dri` render node、GBM、EGL Pbuffer 和 OpenGL ES context 能否创建。它
+不执行 RGA/MPP 链路，也不替代当前 LibGodot 产品验收：
+
+```bash
+cmake --build <probe-build-directory> --target headless-egl-gbm-probe
+```
+
 ## 完成标准
 
 - 日志中的GL renderer为Mali-G610；

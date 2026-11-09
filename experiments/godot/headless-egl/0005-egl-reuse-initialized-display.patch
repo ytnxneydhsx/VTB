@@ -1,0 +1,64 @@
+diff --git a/drivers/egl/egl_manager.h b/drivers/egl/egl_manager.h
+--- a/drivers/egl/egl_manager.h
++++ b/drivers/egl/egl_manager.h
+@@ -68,6 +68,8 @@ private:
+ 
+ 	LocalVector<GLDisplay> displays;
+ 	LocalVector<GLWindow> windows;
++	void *preinitialized_native_display = nullptr;
++	EGLDisplay preinitialized_egl_display = EGL_NO_DISPLAY;
+ 
+ 	GLWindow *current_window = nullptr;
+ 
+diff --git a/drivers/egl/egl_manager.cpp b/drivers/egl/egl_manager.cpp
+--- a/drivers/egl/egl_manager.cpp
++++ b/drivers/egl/egl_manager.cpp
+@@ -132,14 +132,20 @@ int EGLManager::_get_gldisplay_id(void *p_display) {
+ 	GLDisplay new_gldisplay;
+ 	new_gldisplay.display = p_display;
+ 
+-	new_gldisplay.egl_display = _get_platform_display(new_gldisplay.display);
++	if (new_gldisplay.display == preinitialized_native_display && preinitialized_egl_display != EGL_NO_DISPLAY) {
++		new_gldisplay.egl_display = preinitialized_egl_display;
++		preinitialized_native_display = nullptr;
++		preinitialized_egl_display = EGL_NO_DISPLAY;
++	} else {
++		new_gldisplay.egl_display = _get_platform_display(new_gldisplay.display);
+ 
+-	ERR_FAIL_COND_V(eglGetError() != EGL_SUCCESS, -1);
++		ERR_FAIL_COND_V(eglGetError() != EGL_SUCCESS, -1);
+ 
+-	ERR_FAIL_COND_V_MSG(new_gldisplay.egl_display == EGL_NO_DISPLAY, -1, "Can't create an EGL display.");
++		ERR_FAIL_COND_V_MSG(new_gldisplay.egl_display == EGL_NO_DISPLAY, -1, "Can't create an EGL display.");
+ 
+-	if (!eglInitialize(new_gldisplay.egl_display, nullptr, nullptr)) {
+-		ERR_FAIL_V_MSG(-1, "Can't initialize an EGL display.");
++		if (!eglInitialize(new_gldisplay.egl_display, nullptr, nullptr)) {
++			ERR_FAIL_V_MSG(-1, "Can't initialize an EGL display.");
++		}
+ 	}
+ 
+ 	if (!eglBindAPI(_get_platform_api_enum())) {
+@@ -531,7 +537,8 @@ Error EGLManager::initialize(void *p_native_display) {
+ 
+ 	ERR_FAIL_COND_V_MSG(!GLAD_EGL_VERSION_1_4, ERR_UNAVAILABLE, vformat("EGL version is too old! %d.%d < 1.4", major, minor));
+ 
+-	eglTerminate(tmp_display);
++	preinitialized_native_display = p_native_display;
++	preinitialized_egl_display = tmp_display;
+ #endif
+ 
+ #ifdef EGL_ANDROID_blob_cache
+@@ -597,6 +604,12 @@ EGLManager::~EGLManager() {
+ 		eglTerminate(displays[i].egl_display);
+ 		displays[i].egl_display = EGL_NO_DISPLAY;
+ 	}
++
++	if (preinitialized_egl_display != EGL_NO_DISPLAY) {
++		eglTerminate(preinitialized_egl_display);
++		preinitialized_native_display = nullptr;
++		preinitialized_egl_display = EGL_NO_DISPLAY;
++	}
+ }
+ 
+ #endif // EGL_ENABLED

@@ -1,5 +1,9 @@
 # RK3588 无桌面 Live2D UVC 视频流实施计划
 
+状态：Headless EGL 第一阶段已接入当前 LibGodot 产品源码，远端 ARM64 构建与
+RK3588 实机验收待完成。当前阶段保留 `glBlitFramebuffer()`，直接 DMA-BUF 渲染
+仍按独立阶段实施。
+
 ## 1. 目标
 
 最终设备在没有 HDMI、显示器、桌面环境和可见窗口的情况下完成：
@@ -571,12 +575,16 @@ GPU hang：0
 
 ## 10. 下一步
 
-当前保留 X11 的本地文件第一版已经完成。移除 X11 的下一项任务是阶段 1：
+最小 ARM64 GBM/Pbuffer 探针和 Godot Headless EGL 补丁已经在前期分支通过板端
+验证。当前产品接入后的下一项任务是重新构建 LibGodot 与宿主，并在当前产品链路
+完成以下验收：
 
 ```text
-编写最小 ARM64 Headless EGL 探针
-在没有 DISPLAY、没有 Xorg 的条件下
-验证 Surfaceless、Pbuffer 或 GBM 是否能驱动 Mali-G610
+核对 ARM64 和 DT_NEEDED
+在未设置 DISPLAY 的情况下启动当前 LibGodot 宿主
+先验证单路输出，再验证双路输出和 60 FPS 配置
+记录帧计数、视觉结果、进程 maps、资源释放和性能指标
 ```
 
-只有这个探针成功后，才开始修改 Godot。这样可以避免在底层 `libmali` 不支持目标模式时，先投入大量 Godot 源码改造。
+当前阶段继续保留 `glBlitFramebuffer()`，避免显示后端迁移和外部 RenderTarget
+所有权迁移同时进入一次验收。

@@ -1,0 +1,671 @@
+diff --git a/drivers/egl/egl_manager.h b/drivers/egl/egl_manager.h
+index 2e7cf48..4312f28 100644
+--- a/drivers/egl/egl_manager.h
++++ b/drivers/egl/egl_manager.h
+@@ -74,11 +74,14 @@ private:
+ 	// On EGL the default swap interval is 1 and thus vsync is on by default.
+ 	bool use_vsync = true;
+ 
++	virtual EGLDisplay _get_platform_display(void *p_display);
+ 	virtual const char *_get_platform_extension_name() const = 0;
+ 	virtual EGLenum _get_platform_extension_enum() const = 0;
+ 	virtual EGLenum _get_platform_api_enum() const = 0;
+ 	virtual Vector<EGLAttrib> _get_platform_display_attributes() const = 0;
+ 	virtual Vector<EGLint> _get_platform_context_attribs() const = 0;
++	virtual EGLint _get_platform_surface_type() const;
++	virtual EGLSurface _create_surface(EGLDisplay p_display, EGLConfig p_config, void *p_native_window, int p_width, int p_height, const Vector<EGLAttrib> &p_attributes);
+ 
+ #ifdef EGL_ANDROID_blob_cache
+ 	static String shader_cache_dir;
+@@ -113,6 +116,11 @@ public:
+ 	Error initialize(void *p_native_display = nullptr);
+ 
+ 	EGLManager();
++	EGLManager(const EGLManager &) = delete;
++	EGLManager &operator=(const EGLManager &) = delete;
++	EGLManager(EGLManager &&) = delete;
++	EGLManager &operator=(EGLManager &&) = delete;
++
+ 	virtual ~EGLManager();
+ };
+ 
+diff --git a/drivers/egl/egl_manager.cpp b/drivers/egl/egl_manager.cpp
+index 48d9d30..f916d62 100644
+--- a/drivers/egl/egl_manager.cpp
++++ b/drivers/egl/egl_manager.cpp
+@@ -71,6 +71,53 @@ extern "C" EGLAPI EGLDisplay EGLAPIENTRY eglGetPlatformDisplayEXT(EGLenum platfo
+ #endif
+ #endif
+ 
++EGLDisplay EGLManager::_get_platform_display(void *p_display) {
++	if (GLAD_EGL_VERSION_1_5) {
++		Vector<EGLAttrib> attribs = _get_platform_display_attributes();
++		const EGLAttrib *attrib_data = nullptr;
++		if (!attribs.is_empty()) {
++			attrib_data = attribs.ptr();
++		}
++		return eglGetPlatformDisplay(_get_platform_extension_enum(), p_display, attrib_data);
++	}
++
++	if (GLAD_EGL_EXT_platform_base) {
++#ifdef EGL_EXT_platform_base
++		Vector<EGLint> attribs;
++		for (const EGLAttrib &attrib : _get_platform_display_attributes()) {
++			attribs.push_back((EGLint)attrib);
++		}
++		const EGLint *attrib_data = nullptr;
++		if (!attribs.is_empty()) {
++			attrib_data = attribs.ptr();
++		}
++		return eglGetPlatformDisplayEXT(_get_platform_extension_enum(), p_display, attrib_data);
++#endif
++	}
++
++	EGLNativeDisplayType *native_display_type = (EGLNativeDisplayType *)p_display;
++	ERR_FAIL_NULL_V(native_display_type, EGL_NO_DISPLAY);
++	return eglGetDisplay(*native_display_type);
++}
++
++EGLint EGLManager::_get_platform_surface_type() const {
++	return EGL_WINDOW_BIT;
++}
++
++EGLSurface EGLManager::_create_surface(EGLDisplay p_display, EGLConfig p_config, void *p_native_window, int p_width, int p_height, const Vector<EGLAttrib> &p_attributes) {
++	if (GLAD_EGL_VERSION_1_5) {
++		const EGLAttrib *attribute_data = nullptr;
++		if (!p_attributes.is_empty()) {
++			attribute_data = p_attributes.ptr();
++		}
++		return eglCreatePlatformWindowSurface(p_display, p_config, p_native_window, attribute_data);
++	}
++
++	EGLNativeWindowType *native_window_type = (EGLNativeWindowType *)p_native_window;
++	ERR_FAIL_NULL_V(native_window_type, EGL_NO_SURFACE);
++	return eglCreateWindowSurface(p_display, p_config, *native_window_type, nullptr);
++}
++
+ // Creates and caches a GLDisplay. Returns -1 on error.
+ int EGLManager::_get_gldisplay_id(void *p_display) {
+ 	// Look for a cached GLDisplay.
+@@ -85,25 +123,7 @@ int EGLManager::_get_gldisplay_id(void *p_display) {
+ 	GLDisplay new_gldisplay;
+ 	new_gldisplay.display = p_display;
+ 
+-	if (GLAD_EGL_VERSION_1_5) {
+-		Vector<EGLAttrib> attribs = _get_platform_display_attributes();
+-		new_gldisplay.egl_display = eglGetPlatformDisplay(_get_platform_extension_enum(), new_gldisplay.display, (attribs.size() > 0) ? attribs.ptr() : nullptr);
+-	} else if (GLAD_EGL_EXT_platform_base) {
+-#ifdef EGL_EXT_platform_base
+-		// eglGetPlatformDisplayEXT wants its attributes as EGLint, so we'll truncate
+-		// what we already have. It's a bit naughty but I'm really not sure what else
+-		// we could do here.
+-		Vector<EGLint> attribs;
+-		for (const EGLAttrib &attrib : _get_platform_display_attributes()) {
+-			attribs.push_back((EGLint)attrib);
+-		}
+-
+-		new_gldisplay.egl_display = eglGetPlatformDisplayEXT(_get_platform_extension_enum(), new_gldisplay.display, (attribs.size() > 0) ? attribs.ptr() : nullptr);
+-#endif // EGL_EXT_platform_base
+-	} else {
+-		NativeDisplayType *native_display_type = (NativeDisplayType *)new_gldisplay.display;
+-		new_gldisplay.egl_display = eglGetDisplay(*native_display_type);
+-	}
++	new_gldisplay.egl_display = _get_platform_display(new_gldisplay.display);
+ 
+ 	ERR_FAIL_COND_V(eglGetError() != EGL_SUCCESS, -1);
+ 
+@@ -189,4 +209,6 @@ Error EGLManager::_gldisplay_create_context(GLDisplay &p_gldisplay) {
+ 	EGLint attribs[] = {
++		EGL_SURFACE_TYPE,
++		_get_platform_surface_type(),
+ 		EGL_RED_SIZE,
+ 		1,
+ 		EGL_BLUE_SIZE,
+@@ -201,6 +224,8 @@ Error EGLManager::_gldisplay_create_context(GLDisplay &p_gldisplay) {
+ 	};
+ 
+ 	EGLint attribs_layered[] = {
++		EGL_SURFACE_TYPE,
++		_get_platform_surface_type(),
+ 		EGL_RED_SIZE,
+ 		8,
+ 		EGL_GREEN_SIZE,
+@@ -288,14 +318,9 @@ Error EGLManager::window_create(DisplayServerEnums::WindowID p_window_id, void *
+ 	if (!egl_attribs.is_empty()) {
+ 		egl_attribs.push_back(EGL_NONE);
+ 	}
+ #endif
+ 
+-	if (GLAD_EGL_VERSION_1_5) {
+-		glwindow.egl_surface = eglCreatePlatformWindowSurface(gldisplay.egl_display, gldisplay.egl_config, p_native_window, egl_attribs.ptr());
+-	} else {
+-		EGLNativeWindowType *native_window_type = (EGLNativeWindowType *)p_native_window;
+-		glwindow.egl_surface = eglCreateWindowSurface(gldisplay.egl_display, gldisplay.egl_config, *native_window_type, nullptr);
+-	}
++	glwindow.egl_surface = _create_surface(gldisplay.egl_display, gldisplay.egl_config, p_native_window, p_width, p_height, egl_attribs);
+ 
+ 	if (glwindow.egl_surface == EGL_NO_SURFACE) {
+ 		return ERR_CANT_CREATE;
+@@ -325,6 +321,10 @@ Error EGLManager::window_create(DisplayServerEnums::WindowID p_window_id, void *
+ void EGLManager::window_destroy(DisplayServerEnums::WindowID p_window_id) {
+ 	ERR_FAIL_INDEX(p_window_id, (int)windows.size());
+ 
++	if (current_window == &windows[p_window_id]) {
++		release_current();
++	}
++
+ 	GLWindow &glwindow = windows[p_window_id];
+ 
+ 	if (!glwindow.initialized) {
+@@ -338,7 +338,7 @@ void EGLManager::window_destroy(DisplayServerEnums::WindowID p_window_id) {
+ 
+ 	if (glwindow.egl_surface != EGL_NO_SURFACE) {
+ 		eglDestroySurface(gldisplay.egl_display, glwindow.egl_surface);
+-		glwindow.egl_surface = nullptr;
++		glwindow.egl_surface = EGL_NO_SURFACE;
+ 	}
+ }
+ 
+@@ -350,6 +350,7 @@ void EGLManager::release_current() {
+ 	GLDisplay &current_display = displays[current_window->gldisplay_id];
+ 
+ 	eglMakeCurrent(current_display.egl_display, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
++	current_window = nullptr;
+ }
+ 
+ void EGLManager::swap_buffers() {
+@@ -455,26 +456,12 @@ Error EGLManager::initialize(void *p_native_display) {
+ 
+ 	EGLDisplay tmp_display = EGL_NO_DISPLAY;
+ 
+-	if (GLAD_EGL_EXT_platform_base) {
+-#ifdef EGL_EXT_platform_base
+-		// eglGetPlatformDisplayEXT wants its attributes as EGLint.
+-		Vector<EGLint> attribs;
+-		for (const EGLAttrib &attrib : _get_platform_display_attributes()) {
+-			attribs.push_back((EGLint)attrib);
+-		}
+-		tmp_display = eglGetPlatformDisplayEXT(_get_platform_extension_enum(), p_native_display, attribs.ptr());
+-#endif // EGL_EXT_platform_base
+-	} else {
+-		WARN_PRINT("EGL: EGL_EXT_platform_base not found during init, using default platform.");
+-		EGLNativeDisplayType *native_display_type = (EGLNativeDisplayType *)p_native_display;
+-		tmp_display = eglGetDisplay(*native_display_type);
+-	}
++	tmp_display = _get_platform_display(p_native_display);
+ 
+ 	if (tmp_display == EGL_NO_DISPLAY) {
+-		eglTerminate(tmp_display);
+ 		ERR_FAIL_V_MSG(ERR_UNAVAILABLE, "Can't get a valid initial EGL display.");
+ 	}
+ 
+-	eglInitialize(tmp_display, nullptr, nullptr);
++	ERR_FAIL_COND_V_MSG(!eglInitialize(tmp_display, nullptr, nullptr), ERR_UNAVAILABLE, "Can't initialize the initial EGL display.");
+ 
+ 	int version = gladLoaderLoadEGL(tmp_display);
+@@ -523,8 +504,8 @@ Error EGLManager::initialize(void *p_native_display) {
+ 
+ 	// If the above method fails, we don't support client extensions, so there's nothing to check.
+ 	if (eglGetError() == EGL_SUCCESS) {
+ 		const char *platform = _get_platform_extension_name();
+-		if (!client_extensions_string.split(" ").has(platform)) {
++		if (platform != nullptr && !client_extensions_string.split(" ").has(platform)) {
+ 			ERR_FAIL_V_MSG(ERR_UNAVAILABLE, vformat("EGL platform extension \"%s\" not found.", platform));
+ 		}
+ 	}
+@@ -535,8 +516,21 @@ EGLManager::EGLManager() {
+ }
+ 
+ EGLManager::~EGLManager() {
++	release_current();
++
++	for (unsigned int i = 0; i < windows.size(); i++) {
++		if (windows[i].initialized) {
++			window_destroy(i);
++		}
++	}
++
+ 	for (unsigned int i = 0; i < displays.size(); i++) {
++		if (displays[i].egl_context != EGL_NO_CONTEXT) {
++			eglDestroyContext(displays[i].egl_display, displays[i].egl_context);
++			displays[i].egl_context = EGL_NO_CONTEXT;
++		}
+ 		eglTerminate(displays[i].egl_display);
++		displays[i].egl_display = EGL_NO_DISPLAY;
+ 	}
+ }
+ 
+diff --git a/platform/linuxbsd/SCsub b/platform/linuxbsd/SCsub
+index 74b27a2..5be7e62 100644
+--- a/platform/linuxbsd/SCsub
++++ b/platform/linuxbsd/SCsub
+@@ -21,5 +21,8 @@ if env["use_sowrap"]:
+     common_linuxbsd.append("xkbcommon-so_wrap.c")
+ 
++if env["opengl3"]:
++    common_linuxbsd += SConscript("headless_egl/SCsub")
++
+ if env["x11"]:
+     common_linuxbsd += SConscript("x11/SCsub")
+ 
+diff --git a/platform/linuxbsd/os_linuxbsd.cpp b/platform/linuxbsd/os_linuxbsd.cpp
+index e27d05c..f526e18 100644
+--- a/platform/linuxbsd/os_linuxbsd.cpp
++++ b/platform/linuxbsd/os_linuxbsd.cpp
+@@ -44,6 +44,10 @@
+ #include "drivers/sdl/joypad_sdl.h"
+ #endif
+ 
++#ifdef GLES3_ENABLED
++#include "headless_egl/display_server_headless_egl.h"
++#endif
++
+ #ifdef X11_ENABLED
+ #include "x11/detect_prime_x11.h"
+ #include "x11/display_server_x11.h"
+@@ -1304,6 +1308,10 @@ OS_LinuxBSD::OS_LinuxBSD() {
+ 	AudioDriverManager::add_driver(&driver_alsa);
+ #endif
+ 
++#ifdef GLES3_ENABLED
++	DisplayServerHeadlessEGL::register_headless_egl_driver();
++#endif
++
+ #ifdef X11_ENABLED
+ 	DisplayServerX11::register_x11_driver();
+ #endif
+diff --git a/platform/linuxbsd/headless_egl/SCsub b/platform/linuxbsd/headless_egl/SCsub
+new file mode 100644
+index 0000000..6a3701c
+--- /dev/null
++++ b/platform/linuxbsd/headless_egl/SCsub
+@@ -0,0 +1,24 @@
++#!/usr/bin/env python
++import os
++from misc.utility.scons_hints import *
++
++Import("env")
++
++File = env.File
++
++board_sysroot = os.environ.get("OPENVT_BOARD_SYSROOT")
++if not board_sysroot:
++    raise RuntimeError("OPENVT_BOARD_SYSROOT is required for Headless EGL GBM")
++
++mali_root = os.path.join(
++    board_sysroot,
++    "opt/rockchip/libmali-g13p0-x11-gbm-1.9-1/usr/lib/aarch64-linux-gnu",
++)
++env.Append(LIBPATH=[mali_root, os.path.join(mali_root, "mali")])
++env.Append(LIBS=["gbm", "mali"])
++
++source_files = [
++    File("display_server_headless_egl.cpp"),
++]
++
++Return("source_files")
+diff --git a/platform/linuxbsd/headless_egl/gl_manager_headless_egl.h b/platform/linuxbsd/headless_egl/gl_manager_headless_egl.h
+new file mode 100644
+index 0000000..5551869
+--- /dev/null
++++ b/platform/linuxbsd/headless_egl/gl_manager_headless_egl.h
+@@ -0,0 +1,56 @@
++/**************************************************************************/
++/*  gl_manager_headless_egl.h                                             */
++/**************************************************************************/
++/*                         This file is part of:                          */
++/*                             GODOT ENGINE                               */
++/*                        https://godotengine.org                         */
++/**************************************************************************/
++/* Copyright (c) 2014-present Godot Engine contributors (see AUTHORS.md). */
++/* Copyright (c) 2007-2014 Juan Linietsky, Ariel Manzur.                  */
++/*                                                                        */
++/* Permission is hereby granted, free of charge, to any person obtaining  */
++/* a copy of this software and associated documentation files (the        */
++/* "Software"), to deal in the Software without restriction, including    */
++/* without limitation the rights to use, copy, modify, merge, publish,    */
++/* distribute, sublicense, and/or sell copies of the Software, and to     */
++/* permit persons to whom the Software is furnished to do so, subject to  */
++/* the following conditions:                                              */
++/*                                                                        */
++/* The above copyright notice and this permission notice shall be         */
++/* included in all copies or substantial portions of the Software.        */
++/*                                                                        */
++/* THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,        */
++/* EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF     */
++/* MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. */
++/* IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY   */
++/* CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT,   */
++/* TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE      */
++/* SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.                 */
++/**************************************************************************/
++
++#pragma once
++
++#ifdef GLES3_ENABLED
++
++#include "drivers/egl/egl_manager.h"
++
++class GLManagerHeadlessEGL : public EGLManager {
++private:
++	const char *_get_platform_extension_name() const override;
++	EGLenum _get_platform_extension_enum() const override;
++	EGLenum _get_platform_api_enum() const override;
++	Vector<EGLAttrib> _get_platform_display_attributes() const override;
++	Vector<EGLint> _get_platform_context_attribs() const override;
++	EGLint _get_platform_surface_type() const override;
++	EGLSurface _create_surface(EGLDisplay p_display, EGLConfig p_config, void *p_native_window, int p_width, int p_height, const Vector<EGLAttrib> &p_attributes) override;
++
++public:
++	GLManagerHeadlessEGL() = default;
++	GLManagerHeadlessEGL(const GLManagerHeadlessEGL &) = delete;
++	GLManagerHeadlessEGL &operator=(const GLManagerHeadlessEGL &) = delete;
++	GLManagerHeadlessEGL(GLManagerHeadlessEGL &&) = delete;
++	GLManagerHeadlessEGL &operator=(GLManagerHeadlessEGL &&) = delete;
++	~GLManagerHeadlessEGL() override = default;
++};
++
++#endif // GLES3_ENABLED
+diff --git a/platform/linuxbsd/headless_egl/display_server_headless_egl.h b/platform/linuxbsd/headless_egl/display_server_headless_egl.h
+new file mode 100644
+index 0000000..e748e93
+--- /dev/null
++++ b/platform/linuxbsd/headless_egl/display_server_headless_egl.h
+@@ -0,0 +1,89 @@
++/**************************************************************************/
++/*  display_server_headless_egl.h                                         */
++/**************************************************************************/
++/*                         This file is part of:                          */
++/*                             GODOT ENGINE                               */
++/*                        https://godotengine.org                         */
++/**************************************************************************/
++/* Copyright (c) 2014-present Godot Engine contributors (see AUTHORS.md). */
++/* Copyright (c) 2007-2014 Juan Linietsky, Ariel Manzur.                  */
++/*                                                                        */
++/* Permission is hereby granted, free of charge, to any person obtaining  */
++/* a copy of this software and associated documentation files (the        */
++/* "Software"), to deal in the Software without restriction, including    */
++/* without limitation the rights to use, copy, modify, merge, publish,    */
++/* distribute, sublicense, and/or sell copies of the Software, and to     */
++/* permit persons to whom the Software is furnished to do so, subject to  */
++/* the following conditions:                                              */
++/*                                                                        */
++/* The above copyright notice and this permission notice shall be         */
++/* included in all copies or substantial portions of the Software.        */
++/*                                                                        */
++/* THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,        */
++/* EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF     */
++/* MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. */
++/* IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY   */
++/* CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT,   */
++/* TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE      */
++/* SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.                 */
++/**************************************************************************/
++
++#pragma once
++
++#ifdef GLES3_ENABLED
++
++#include "gl_manager_headless_egl.h"
++#include "servers/display/display_server_headless.h"
++
++struct gbm_device;
++
++class DisplayServerHeadlessEGL : public DisplayServerHeadless {
++	GDSOFTCLASS(DisplayServerHeadlessEGL, DisplayServerHeadless);
++
++private:
++	GLManagerHeadlessEGL *gl_manager = nullptr;
++	int drm_fd = -1;
++	gbm_device *gbm = nullptr;
++	Size2i window_size;
++	DisplayServerEnums::VSyncMode vsync_mode = DisplayServerEnums::VSYNC_DISABLED;
++
++	static DisplayServer *create_func(const String &p_rendering_driver, DisplayServerEnums::WindowMode p_mode, DisplayServerEnums::VSyncMode p_vsync_mode, uint32_t p_flags, const Vector2i *p_position, const Vector2i &p_resolution, int p_screen, DisplayServerEnums::Context p_context, int64_t p_parent_window, Error &r_error);
++	static Vector<String> get_rendering_drivers_func();
++
++public:
++	String get_name() const override { return "headless_egl"; }
++
++	int get_screen_count() const override { return 1; }
++	int get_primary_screen() const override { return 0; }
++	Size2i screen_get_size(int p_screen = DisplayServerEnums::SCREEN_OF_MAIN_WINDOW) const override { return window_size; }
++	Rect2i screen_get_usable_rect(int p_screen = DisplayServerEnums::SCREEN_OF_MAIN_WINDOW) const override { return Rect2i(Point2i(), window_size); }
++
++	Vector<DisplayServerEnums::WindowID> get_window_list() const override;
++	int window_get_current_screen(DisplayServerEnums::WindowID p_window = DisplayServerEnums::MAIN_WINDOW_ID) const override { return 0; }
++	void window_set_size(const Size2i p_size, DisplayServerEnums::WindowID p_window = DisplayServerEnums::MAIN_WINDOW_ID) override;
++	Size2i window_get_size(DisplayServerEnums::WindowID p_window = DisplayServerEnums::MAIN_WINDOW_ID) const override { return window_size; }
++	Size2i window_get_size_with_decorations(DisplayServerEnums::WindowID p_window = DisplayServerEnums::MAIN_WINDOW_ID) const override { return window_size; }
++	DisplayServerEnums::WindowMode window_get_mode(DisplayServerEnums::WindowID p_window = DisplayServerEnums::MAIN_WINDOW_ID) const override { return DisplayServerEnums::WINDOW_MODE_WINDOWED; }
++
++	void window_set_vsync_mode(DisplayServerEnums::VSyncMode p_vsync_mode, DisplayServerEnums::WindowID p_window = DisplayServerEnums::MAIN_WINDOW_ID) override;
++	DisplayServerEnums::VSyncMode window_get_vsync_mode(DisplayServerEnums::WindowID p_window) const override { return vsync_mode; }
++
++	bool window_can_draw(DisplayServerEnums::WindowID p_window = DisplayServerEnums::MAIN_WINDOW_ID) const override { return p_window == DisplayServerEnums::MAIN_WINDOW_ID; }
++	bool can_any_window_draw() const override { return true; }
++
++	int64_t window_get_native_handle(DisplayServerEnums::HandleType p_handle_type, DisplayServerEnums::WindowID p_window = DisplayServerEnums::MAIN_WINDOW_ID) const override;
++
++	void release_rendering_thread() override;
++	void swap_buffers() override;
++
++	static void register_headless_egl_driver();
++
++	DisplayServerHeadlessEGL(const String &p_rendering_driver, const Vector2i &p_resolution, DisplayServerEnums::VSyncMode p_vsync_mode, Error &r_error);
++	DisplayServerHeadlessEGL(const DisplayServerHeadlessEGL &) = delete;
++	DisplayServerHeadlessEGL &operator=(const DisplayServerHeadlessEGL &) = delete;
++	DisplayServerHeadlessEGL(DisplayServerHeadlessEGL &&) = delete;
++	DisplayServerHeadlessEGL &operator=(DisplayServerHeadlessEGL &&) = delete;
++	~DisplayServerHeadlessEGL() override;
++};
++
++#endif // GLES3_ENABLED
+diff --git a/platform/linuxbsd/headless_egl/display_server_headless_egl.cpp b/platform/linuxbsd/headless_egl/display_server_headless_egl.cpp
+new file mode 100644
+index 0000000..3c32d42
+--- /dev/null
++++ b/platform/linuxbsd/headless_egl/display_server_headless_egl.cpp
+@@ -0,0 +1,202 @@
++/**************************************************************************/
++/*  display_server_headless_egl.cpp                                       */
++/**************************************************************************/
++/*                         This file is part of:                          */
++/*                             GODOT ENGINE                               */
++/*                        https://godotengine.org                         */
++/**************************************************************************/
++/* Copyright (c) 2014-present Godot Engine contributors (see AUTHORS.md). */
++/* Copyright (c) 2007-2014 Juan Linietsky, Ariel Manzur.                  */
++/*                                                                        */
++/* Permission is hereby granted, free of charge, to any person obtaining  */
++/* a copy of this software and associated documentation files (the        */
++/* "Software"), to deal in the Software without restriction, including    */
++/* without limitation the rights to use, copy, modify, merge, publish,    */
++/* distribute, sublicense, and/or sell copies of the Software, and to     */
++/* permit persons to whom the Software is furnished to do so, subject to  */
++/* the following conditions:                                              */
++/*                                                                        */
++/* The above copyright notice and this permission notice shall be         */
++/* included in all copies or substantial portions of the Software.        */
++/*                                                                        */
++/* THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,        */
++/* EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF     */
++/* MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. */
++/* IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY   */
++/* CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT,   */
++/* TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE      */
++/* SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.                 */
++/**************************************************************************/
++
++#include "display_server_headless_egl.h"
++
++#ifdef GLES3_ENABLED
++
++#include "drivers/gles3/rasterizer_gles3.h"
++
++#include <fcntl.h>
++#include <unistd.h>
++
++extern "C" gbm_device *gbm_create_device(int p_fd);
++extern "C" void gbm_device_destroy(gbm_device *p_device);
++
++const char *GLManagerHeadlessEGL::_get_platform_extension_name() const {
++	return "EGL_KHR_platform_gbm";
++}
++
++EGLenum GLManagerHeadlessEGL::_get_platform_extension_enum() const {
++	return 0x31D7;
++}
++
++EGLenum GLManagerHeadlessEGL::_get_platform_api_enum() const {
++	return EGL_OPENGL_ES_API;
++}
++
++Vector<EGLAttrib> GLManagerHeadlessEGL::_get_platform_display_attributes() const {
++	return Vector<EGLAttrib>();
++}
++
++Vector<EGLint> GLManagerHeadlessEGL::_get_platform_context_attribs() const {
++	Vector<EGLint> attributes;
++	attributes.push_back(EGL_CONTEXT_CLIENT_VERSION);
++	attributes.push_back(3);
++	attributes.push_back(EGL_NONE);
++	return attributes;
++}
++
++EGLint GLManagerHeadlessEGL::_get_platform_surface_type() const {
++	return EGL_PBUFFER_BIT;
++}
++
++EGLSurface GLManagerHeadlessEGL::_create_surface(EGLDisplay p_display, EGLConfig p_config, void *p_native_window, int p_width, int p_height, const Vector<EGLAttrib> &p_attributes) {
++	EGLint attributes[] = {
++		EGL_WIDTH,
++		p_width,
++		EGL_HEIGHT,
++		p_height,
++		EGL_NONE,
++	};
++	return eglCreatePbufferSurface(p_display, p_config, attributes);
++}
++
++Vector<String> DisplayServerHeadlessEGL::get_rendering_drivers_func() {
++	Vector<String> drivers;
++	drivers.push_back("opengl3_es");
++	return drivers;
++}
++
++DisplayServer *DisplayServerHeadlessEGL::create_func(const String &p_rendering_driver, DisplayServerEnums::WindowMode p_mode, DisplayServerEnums::VSyncMode p_vsync_mode, uint32_t p_flags, const Vector2i *p_position, const Vector2i &p_resolution, int p_screen, DisplayServerEnums::Context p_context, int64_t p_parent_window, Error &r_error) {
++	DisplayServerHeadlessEGL *display_server = memnew(DisplayServerHeadlessEGL(p_rendering_driver, p_resolution, p_vsync_mode, r_error));
++	if (r_error != OK) {
++		memdelete(display_server);
++		return nullptr;
++	}
++	return display_server;
++}
++
++Vector<DisplayServerEnums::WindowID> DisplayServerHeadlessEGL::get_window_list() const {
++	Vector<DisplayServerEnums::WindowID> windows;
++	windows.push_back(DisplayServerEnums::MAIN_WINDOW_ID);
++	return windows;
++}
++
++void DisplayServerHeadlessEGL::window_set_size(const Size2i p_size, DisplayServerEnums::WindowID p_window) {
++	ERR_FAIL_COND(p_window != DisplayServerEnums::MAIN_WINDOW_ID);
++	ERR_FAIL_COND(p_size.x <= 0 || p_size.y <= 0);
++	window_size = p_size;
++}
++
++void DisplayServerHeadlessEGL::window_set_vsync_mode(DisplayServerEnums::VSyncMode p_vsync_mode, DisplayServerEnums::WindowID p_window) {
++	ERR_FAIL_COND(p_window != DisplayServerEnums::MAIN_WINDOW_ID);
++	vsync_mode = p_vsync_mode;
++	if (gl_manager != nullptr) {
++		gl_manager->set_use_vsync(vsync_mode != DisplayServerEnums::VSYNC_DISABLED);
++	}
++}
++
++int64_t DisplayServerHeadlessEGL::window_get_native_handle(DisplayServerEnums::HandleType p_handle_type, DisplayServerEnums::WindowID p_window) const {
++	ERR_FAIL_COND_V(p_window != DisplayServerEnums::MAIN_WINDOW_ID, 0);
++	ERR_FAIL_NULL_V(gl_manager, 0);
++
++	if (p_handle_type == DisplayServerEnums::DISPLAY_HANDLE) {
++		return reinterpret_cast<int64_t>(gl_manager->get_display(DisplayServerEnums::MAIN_WINDOW_ID));
++	}
++	if (p_handle_type == DisplayServerEnums::OPENGL_CONTEXT) {
++		return reinterpret_cast<int64_t>(gl_manager->get_context(DisplayServerEnums::MAIN_WINDOW_ID));
++	}
++	return 0;
++}
++
++void DisplayServerHeadlessEGL::release_rendering_thread() {
++	if (gl_manager != nullptr) {
++		gl_manager->release_current();
++	}
++}
++
++void DisplayServerHeadlessEGL::swap_buffers() {
++	if (gl_manager != nullptr) {
++		gl_manager->swap_buffers();
++	}
++}
++
++void DisplayServerHeadlessEGL::register_headless_egl_driver() {
++	register_create_function("headless_egl", create_func, get_rendering_drivers_func);
++}
++
++DisplayServerHeadlessEGL::DisplayServerHeadlessEGL(const String &p_rendering_driver, const Vector2i &p_resolution, DisplayServerEnums::VSyncMode p_vsync_mode, Error &r_error) {
++	r_error = OK;
++	window_size = p_resolution;
++	vsync_mode = p_vsync_mode;
++
++	if (p_rendering_driver != "opengl3_es") {
++		r_error = ERR_UNAVAILABLE;
++		ERR_FAIL_MSG("Headless EGL requires the opengl3_es rendering driver.");
++	}
++
++	drm_fd = open("/dev/dri/renderD128", O_RDWR | O_CLOEXEC);
++	if (drm_fd < 0) {
++		r_error = ERR_CANT_OPEN;
++		ERR_FAIL_MSG("Could not open /dev/dri/renderD128 for Headless EGL GBM.");
++	}
++
++	gbm = gbm_create_device(drm_fd);
++	if (gbm == nullptr) {
++		r_error = ERR_CANT_CREATE;
++		ERR_FAIL_MSG("Could not create the Headless EGL GBM device.");
++	}
++
++	gl_manager = memnew(GLManagerHeadlessEGL);
++	Error error = gl_manager->initialize(gbm);
++	if (error == OK) {
++		error = gl_manager->open_display(gbm);
++	}
++	if (error == OK) {
++		error = gl_manager->window_create(DisplayServerEnums::MAIN_WINDOW_ID, nullptr, nullptr, window_size.x, window_size.y);
++	}
++	if (error != OK) {
++		memdelete(gl_manager);
++		gl_manager = nullptr;
++		r_error = error;
++		ERR_FAIL_MSG("Could not initialize the Headless EGL Pbuffer.");
++	}
++
++	gl_manager->set_use_vsync(vsync_mode != DisplayServerEnums::VSYNC_DISABLED);
++	RasterizerGLES3::make_current(false);
++}
++
++DisplayServerHeadlessEGL::~DisplayServerHeadlessEGL() {
++	if (gl_manager != nullptr) {
++		gl_manager->window_destroy(DisplayServerEnums::MAIN_WINDOW_ID);
++		memdelete(gl_manager);
++		gl_manager = nullptr;
++	}
++	if (gbm != nullptr) {
++		gbm_device_destroy(gbm);
++		gbm = nullptr;
++	}
++	if (drm_fd >= 0) {
++		close(drm_fd);
++		drm_fd = -1;
++	}
++}
++#endif // GLES3_ENABLED

@@ -3,6 +3,9 @@
 状态：接受
 日期：2026-10-30
 
+显示后端部分已由 [ADR 0002](0002-use-headless-egl-for-product-runtime.md) 替代；
+本文关于 LibGodot 生命周期所有权和适配层边界的决策继续有效。
+
 ## 背景
 
 当前产品由定制 Godot 可执行文件拥有 `main()` 和主循环，GDScript 负责创建

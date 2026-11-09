@@ -1,0 +1,33 @@
+diff --git a/drivers/egl/egl_manager.cpp b/drivers/egl/egl_manager.cpp
+--- a/drivers/egl/egl_manager.cpp
++++ b/drivers/egl/egl_manager.cpp
+@@ -558,12 +558,12 @@ Error EGLManager::initialize(void *p_native_display) {
+ 	}
+ #endif
+ 
+-	String client_extensions_string = eglQueryString(EGL_NO_DISPLAY, EGL_EXTENSIONS);
++	const char *platform = _get_platform_extension_name();
++	if (platform != nullptr) {
++		String client_extensions_string = eglQueryString(EGL_NO_DISPLAY, EGL_EXTENSIONS);
+ 
+-	// If the above method fails, we don't support client extensions, so there's nothing to check.
+-	if (eglGetError() == EGL_SUCCESS) {
+-		const char *platform = _get_platform_extension_name();
+-		if (platform != nullptr && !client_extensions_string.split(" ").has(platform)) {
++		// If the above method fails, we don't support client extensions, so there's nothing to check.
++		if (eglGetError() == EGL_SUCCESS && !client_extensions_string.split(" ").has(platform)) {
+ 			ERR_FAIL_V_MSG(ERR_UNAVAILABLE, vformat("EGL platform extension \"%s\" not found.", platform));
+ 		}
+ 	}
+diff --git a/platform/linuxbsd/headless_egl/display_server_headless_egl.cpp b/platform/linuxbsd/headless_egl/display_server_headless_egl.cpp
+--- a/platform/linuxbsd/headless_egl/display_server_headless_egl.cpp
++++ b/platform/linuxbsd/headless_egl/display_server_headless_egl.cpp
+@@ -41,7 +41,7 @@ extern "C" gbm_device *gbm_create_device(int p_fd);
+ extern "C" void gbm_device_destroy(gbm_device *p_device);
+ 
+ const char *GLManagerHeadlessEGL::_get_platform_extension_name() const {
+-	return "EGL_KHR_platform_gbm";
++	return nullptr;
+ }
+ 
+ EGLenum GLManagerHeadlessEGL::_get_platform_extension_enum() const {
