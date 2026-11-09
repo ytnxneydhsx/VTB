@@ -9,3 +9,7 @@ __pycache__/
 .DS_Store
 .stfolder/
 .stversions/
+.clangd
+.codex-transfer-*/
+.playwright-cli/
+output/
