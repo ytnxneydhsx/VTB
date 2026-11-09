@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstddef>
 #include <cstdint>
 #include <functional>
 
@@ -31,7 +32,8 @@ public:
         VideoPixelFormat pixel_format,
         ModelInputLayout layout,
         ModelInputDataType data_type,
-        ModelNormalization normalization);
+        ModelNormalization normalization,
+        std::size_t minimum_buffer_size_bytes = 0);
     ~ModelInputSpec() = default;
 
     ModelInputSpec(const ModelInputSpec&) = default;
@@ -45,6 +47,7 @@ public:
     ModelInputLayout layout() const noexcept;
     ModelInputDataType data_type() const noexcept;
     ModelNormalization normalization() const noexcept;
+    std::size_t minimum_buffer_size_bytes() const noexcept;
 
 private:
     std::uint32_t width_ = 0;
@@ -53,6 +56,7 @@ private:
     ModelInputLayout layout_ = ModelInputLayout::nhwc;
     ModelInputDataType data_type_ = ModelInputDataType::uint8;
     ModelNormalization normalization_ = ModelNormalization::none;
+    std::size_t minimum_buffer_size_bytes_ = 0;
 };
 
 class CropRegion {

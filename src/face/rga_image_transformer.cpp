@@ -15,7 +15,6 @@
 #include <unistd.h>
 #include <utility>
 
-#include <linux/dma-buf.h>
 #include <linux/dma-heap.h>
 #include <rga/im2d.h>
 
@@ -123,13 +122,17 @@ public:
     RgaModelInputBuffer(
         const std::string& dma_heap_path,
         std::uint32_t width,
-        std::uint32_t height)
+        std::uint32_t height,
+        std::size_t minimum_size_bytes)
         : width_(width),
           height_(height),
           stride_bytes_(width * 3U),
           size_bytes_(
               static_cast<std::size_t>(stride_bytes_) *
               static_cast<std::size_t>(height)) {
+        if (minimum_size_bytes > size_bytes_) {
+            size_bytes_ = minimum_size_bytes;
+        }
         UniqueFd heap(open(dma_heap_path.c_str(), O_RDONLY | O_CLOEXEC));
         if (heap.get() < 0) {
             throw_errno("open RGA DMA heap " + dma_heap_path);
@@ -211,20 +214,6 @@ public:
         return buffer_;
     }
 
-    void begin_cpu_read() {
-        dma_buf_sync sync{};
-        sync.flags = DMA_BUF_SYNC_START | DMA_BUF_SYNC_READ;
-        if (ioctl(fd_.get(), DMA_BUF_IOCTL_SYNC, &sync) < 0) {
-            throw_errno("DMA_BUF_SYNC_START for RGA model input");
-        }
-    }
-
-    void end_cpu_read() noexcept {
-        dma_buf_sync sync{};
-        sync.flags = DMA_BUF_SYNC_END | DMA_BUF_SYNC_READ;
-        ioctl(fd_.get(), DMA_BUF_IOCTL_SYNC, &sync);
-    }
-
 private:
     void reset_mapping_and_handle() noexcept {
         if (handle_ != 0) {
@@ -247,20 +236,18 @@ private:
     rga_buffer_t buffer_{};
 };
 
-class EndCpuRead final {
+class KeepRgaBufferAlive final {
 public:
-    explicit EndCpuRead(std::shared_ptr<RgaModelInputBuffer> buffer)
+    explicit KeepRgaBufferAlive(std::shared_ptr<RgaModelInputBuffer> buffer)
         : buffer_(std::move(buffer)) {}
-    ~EndCpuRead() = default;
+    ~KeepRgaBufferAlive() = default;
 
-    EndCpuRead(const EndCpuRead&) = default;
-    EndCpuRead& operator=(const EndCpuRead&) = default;
-    EndCpuRead(EndCpuRead&&) noexcept = default;
-    EndCpuRead& operator=(EndCpuRead&&) noexcept = default;
+    KeepRgaBufferAlive(const KeepRgaBufferAlive&) = default;
+    KeepRgaBufferAlive& operator=(const KeepRgaBufferAlive&) = default;
+    KeepRgaBufferAlive(KeepRgaBufferAlive&&) noexcept = default;
+    KeepRgaBufferAlive& operator=(KeepRgaBufferAlive&&) noexcept = default;
 
-    void operator()() noexcept {
-        buffer_->end_cpu_read();
-    }
+    void operator()() const noexcept {}
 
 private:
     std::shared_ptr<RgaModelInputBuffer> buffer_;
@@ -327,24 +314,15 @@ std::uint32_t round_up_even(std::uint32_t value) noexcept {
 
 CropRegion rga_crop(const FrameView& frame, const CropRegion& requested) {
     std::uint32_t left = round_down_even(requested.x());
-    std::uint32_t top = requested.y();
+    std::uint32_t top = round_down_even(requested.y());
     std::uint32_t right = round_up_even(requested.x() + requested.width());
-    std::uint32_t bottom = requested.y() + requested.height();
-
-    if (frame.pixel_format() == VideoPixelFormat::nv12 ||
-        frame.pixel_format() == VideoPixelFormat::nv21) {
-        top = round_down_even(top);
-        bottom = round_up_even(bottom);
-    }
+    std::uint32_t bottom =
+        round_up_even(requested.y() + requested.height());
     if (right > frame.width()) {
         right = round_down_even(frame.width());
     }
     if (bottom > frame.height()) {
-        bottom = frame.height();
-        if (frame.pixel_format() == VideoPixelFormat::nv12 ||
-            frame.pixel_format() == VideoPixelFormat::nv21) {
-            bottom = round_down_even(bottom);
-        }
+        bottom = round_down_even(frame.height());
     }
     if (right <= left || bottom <= top) {
         throw std::invalid_argument("RGA source crop is empty after YUV alignment");
@@ -473,33 +451,27 @@ public:
                 IM_SYNC),
             "RGA crop/scale/color conversion");
 
-        output->begin_cpu_read();
-        try {
-            std::array<FramePlaneView, FrameView::max_planes> planes{};
-            planes[0] = FramePlaneView(
-                output->data(),
-                output->size_bytes(),
-                output->stride_bytes(),
-                output->fd(),
-                0);
-            FrameView transformed(
-                VideoPixelFormat::rgb888,
-                FrameMemoryType::dma_buf,
-                spec.width(),
-                spec.height(),
-                frame.frame_id(),
-                frame.timestamp_ns(),
-                frame.timestamp_source(),
-                planes,
-                1);
-            ModelInputView view(
-                std::move(transformed), spec, effective_crop);
-            return ModelInputLease(
-                std::move(view), EndCpuRead(output));
-        } catch (...) {
-            output->end_cpu_read();
-            throw;
-        }
+        std::array<FramePlaneView, FrameView::max_planes> planes{};
+        planes[0] = FramePlaneView(
+            output->data(),
+            output->size_bytes(),
+            output->stride_bytes(),
+            output->fd(),
+            0);
+        FrameView transformed(
+            VideoPixelFormat::rgb888,
+            FrameMemoryType::dma_buf,
+            spec.width(),
+            spec.height(),
+            frame.frame_id(),
+            frame.timestamp_ns(),
+            frame.timestamp_source(),
+            planes,
+            1);
+        ModelInputView view(
+            std::move(transformed), spec, effective_crop);
+        return ModelInputLease(
+            std::move(view), KeepRgaBufferAlive(std::move(output)));
     }
 
 private:
@@ -508,9 +480,12 @@ private:
         if (!output_buffer_ ||
             output_buffer_->width() != spec.width() ||
             output_buffer_->height() != spec.height() ||
+            output_buffer_->size_bytes() <
+                spec.minimum_buffer_size_bytes() ||
             output_buffer_.use_count() != 1) {
             output_buffer_ = std::make_shared<RgaModelInputBuffer>(
-                dma_heap_path_, spec.width(), spec.height());
+                dma_heap_path_, spec.width(), spec.height(),
+                spec.minimum_buffer_size_bytes());
         }
         return output_buffer_;
     }

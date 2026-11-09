@@ -202,7 +202,8 @@ RKNN Landmark 输入
 
 - 复用输入、输出和 RGA 缓冲区。
 - 取消每帧 `malloc/free`。
-- 评估 `rknn_tensor_mem` 与 DMA-BUF 共享。
+- RGA 通过 `ModelInputView` 交付地址和 DMA-BUF fd，RKNN context 自行使用
+  `rknn_create_mem_from_fd()` 与 `rknn_set_io_mem()` 建立输入绑定。
 - 将 MPP、RGA 和 RKNN 之间的 CPU 大图复制降到最少。
 - 分别测量 RGA、NPU、CPU 解码和总端到端延迟。
 

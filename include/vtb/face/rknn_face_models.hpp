@@ -34,8 +34,8 @@ public:
         const ModelInputView& input) override;
 
 private:
-    ModelInputSpec input_spec_;
     std::unique_ptr<RknnModel> model_;
+    ModelInputSpec input_spec_;
     float confidence_threshold_ = 0.6F;
 };
 
@@ -55,8 +55,8 @@ public:
     LandmarkEstimate estimate(const ModelInputView& input) override;
 
 private:
-    ModelInputSpec input_spec_;
     std::unique_ptr<RknnModel> model_;
+    ModelInputSpec input_spec_;
 };
 
 }  // namespace vtb

@@ -11,18 +11,31 @@ ModelInputSpec::ModelInputSpec(
     VideoPixelFormat pixel_format,
     ModelInputLayout layout,
     ModelInputDataType data_type,
-    ModelNormalization normalization)
+    ModelNormalization normalization,
+    std::size_t minimum_buffer_size_bytes)
     : width_(width),
       height_(height),
       pixel_format_(pixel_format),
       layout_(layout),
       data_type_(data_type),
-      normalization_(normalization) {
+      normalization_(normalization),
+      minimum_buffer_size_bytes_(minimum_buffer_size_bytes) {
     if (width_ == 0 || height_ == 0) {
         throw std::invalid_argument("Model input dimensions must be non-zero");
     }
     if (pixel_format_ == VideoPixelFormat::unknown) {
         throw std::invalid_argument("Model input pixel format must be known");
+    }
+    const std::size_t packed_rgb_size =
+        static_cast<std::size_t>(width_) *
+        static_cast<std::size_t>(height_) * 3U;
+    if (minimum_buffer_size_bytes_ == 0) {
+        minimum_buffer_size_bytes_ = packed_rgb_size;
+    }
+    if (pixel_format_ == VideoPixelFormat::rgb888 &&
+        minimum_buffer_size_bytes_ < packed_rgb_size) {
+        throw std::invalid_argument(
+            "Model input buffer is smaller than packed RGB888 data");
     }
 }
 
@@ -48,6 +61,10 @@ ModelInputDataType ModelInputSpec::data_type() const noexcept {
 
 ModelNormalization ModelInputSpec::normalization() const noexcept {
     return normalization_;
+}
+
+std::size_t ModelInputSpec::minimum_buffer_size_bytes() const noexcept {
+    return minimum_buffer_size_bytes_;
 }
 
 CropRegion::CropRegion(

@@ -1,6 +1,7 @@
 #include "vtb/face/cpu_image_transformer.hpp"
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
@@ -31,6 +32,24 @@ private:
     float red_ = 0.0F;
     float green_ = 0.0F;
     float blue_ = 0.0F;
+};
+
+class KeepStorageAlive final {
+public:
+    explicit KeepStorageAlive(
+        std::shared_ptr<std::vector<std::byte>> storage)
+        : storage_(std::move(storage)) {}
+    ~KeepStorageAlive() = default;
+
+    KeepStorageAlive(const KeepStorageAlive&) = default;
+    KeepStorageAlive& operator=(const KeepStorageAlive&) = default;
+    KeepStorageAlive(KeepStorageAlive&&) noexcept = default;
+    KeepStorageAlive& operator=(KeepStorageAlive&&) noexcept = default;
+
+    void operator()() const noexcept {}
+
+private:
+    std::shared_ptr<std::vector<std::byte>> storage_;
 };
 
 std::uint8_t byte_value(const std::byte* data, std::size_t index) noexcept {
@@ -195,8 +214,13 @@ ModelInputLease CpuImageTransformer::prepare(
 
     const std::size_t output_stride =
         static_cast<std::size_t>(spec.width()) * 3U;
-    const std::size_t output_size =
+    const std::size_t packed_output_size =
         output_stride * static_cast<std::size_t>(spec.height());
+    const std::size_t output_size = spec.minimum_buffer_size_bytes();
+    if (output_size < packed_output_size) {
+        throw std::invalid_argument(
+            "CPU model input storage is smaller than packed RGB888 data");
+    }
     auto storage = std::make_shared<std::vector<std::byte>>(output_size);
 
     const float source_width = static_cast<float>(crop.width());
@@ -272,7 +296,7 @@ ModelInputLease CpuImageTransformer::prepare(
     ModelInputView view(
         std::move(transformed), spec, crop);
     return ModelInputLease(
-        std::move(view), [storage = std::move(storage)]() {});
+        std::move(view), KeepStorageAlive(std::move(storage)));
 }
 
 }  // namespace vtb
