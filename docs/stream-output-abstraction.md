@@ -64,6 +64,10 @@ RTSP 分支使用只读 `AVBufferRef` 包装共享 payload 的地址，释放回
 FFmpeg 最后释放 `AVBufferRef` 时才释放该分支的 payload 引用。UVC 当前仍复制到 V4L2
 MMAP buffer，DMA-BUF 输出属于后续依赖驱动能力的阶段。
 
+处理后音频与视频在进入 `OutputManager` 前由独立的 `AvSynchronizer` 按共同单调
+时钟交织；等待上限、迟到包和关键帧恢复策略见
+[`audio-video-synchronization.md`](audio-video-synchronization.md)。`OutputManager`
+继续只负责出口分发、背压和故障隔离。
 
 ## 出口与格式匹配
 

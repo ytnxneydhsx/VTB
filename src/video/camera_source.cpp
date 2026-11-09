@@ -21,6 +21,7 @@
 
 #include <linux/videodev2.h>
 
+#include "vtb/time/monotonic_clock.hpp"
 #include "vtb/v4l2_camera.hpp"
 
 namespace vtb {
@@ -28,15 +29,6 @@ namespace {
 
 [[noreturn]] void throw_errno(const std::string& operation) {
     throw std::system_error(errno, std::generic_category(), operation);
-}
-
-std::uint64_t monotonic_now_ns() {
-    timespec timestamp{};
-    if (clock_gettime(CLOCK_MONOTONIC, &timestamp) != 0) {
-        throw_errno("clock_gettime(CLOCK_MONOTONIC)");
-    }
-    return static_cast<std::uint64_t>(timestamp.tv_sec) * 1000000000ULL +
-           static_cast<std::uint64_t>(timestamp.tv_nsec);
 }
 
 std::uint64_t timeval_to_ns(const timeval& timestamp) noexcept {
@@ -271,7 +263,7 @@ public:
 
                 FrameTimestampSource timestamp_source =
                     FrameTimestampSource::dequeue_monotonic;
-                std::uint64_t timestamp_ns = monotonic_now_ns();
+                std::uint64_t timestamp_ns = MonotonicClock::now_ns();
                 if ((buffer.flags & V4L2_BUF_FLAG_TIMESTAMP_MASK) ==
                     V4L2_BUF_FLAG_TIMESTAMP_MONOTONIC) {
                     timestamp_source = FrameTimestampSource::driver_monotonic;

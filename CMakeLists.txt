@@ -73,6 +73,7 @@ target_link_libraries(vtb_application_config
 vtb_configure_target(vtb_application_config)
 
 add_library(vtb_instrumentation STATIC
+    src/instrumentation/metrics_jsonl_reporter.cpp
     src/instrumentation/timer.cpp
 )
 add_library(vtb::instrumentation ALIAS vtb_instrumentation)
@@ -81,6 +82,7 @@ target_link_libraries(vtb_instrumentation PUBLIC Threads::Threads)
 vtb_configure_target(vtb_instrumentation)
 
 add_library(vtb_output_core STATIC
+    src/output/av_synchronizer.cpp
     src/output/media.cpp
     src/output/output_manager.cpp
 )
@@ -227,6 +229,7 @@ target_link_libraries(vtb_face_core PUBLIC vtb_video_core)
 vtb_configure_target(vtb_face_core)
 
 add_library(vtb_live2d_values STATIC
+    src/live2d/live2d_parameter_interpolator.cpp
     src/live2d/live2d_parameters.cpp
     src/live2d/live2d_mapping_result.cpp
 )
@@ -436,10 +439,25 @@ if(BUILD_TESTING)
     vtb_configure_target(instrumentation-timer-test)
     add_test(NAME instrumentation-timer COMMAND instrumentation-timer-test)
 
+    add_executable(monotonic-clock-test tests/monotonic_clock_test.cpp)
+    target_include_directories(monotonic-clock-test PRIVATE include)
+    vtb_configure_target(monotonic-clock-test)
+    add_test(NAME monotonic-clock COMMAND monotonic-clock-test)
+
+    add_executable(metrics-jsonl-reporter-test tests/metrics_jsonl_reporter_test.cpp)
+    target_link_libraries(metrics-jsonl-reporter-test PRIVATE vtb_instrumentation)
+    vtb_configure_target(metrics-jsonl-reporter-test)
+    add_test(NAME metrics-jsonl-reporter COMMAND metrics-jsonl-reporter-test)
+
     add_executable(output-manager-test tests/output_manager_test.cpp)
     target_link_libraries(output-manager-test PRIVATE vtb_output_core)
     vtb_configure_target(output-manager-test)
     add_test(NAME output-manager COMMAND output-manager-test)
+
+    add_executable(av-synchronizer-test tests/av_synchronizer_test.cpp)
+    target_link_libraries(av-synchronizer-test PRIVATE vtb_output_core)
+    vtb_configure_target(av-synchronizer-test)
+    add_test(NAME av-synchronizer COMMAND av-synchronizer-test)
 
     add_executable(godot-runtime-state-machine-test
         tests/godot_runtime_state_machine_test.cpp)
@@ -448,4 +466,12 @@ if(BUILD_TESTING)
     vtb_configure_target(godot-runtime-state-machine-test)
     add_test(NAME godot-runtime-state-machine
         COMMAND godot-runtime-state-machine-test)
+
+    add_executable(live2d-parameter-interpolator-test
+        tests/live2d_parameter_interpolator_test.cpp)
+    target_link_libraries(live2d-parameter-interpolator-test
+        PRIVATE vtb_live2d_values)
+    vtb_configure_target(live2d-parameter-interpolator-test)
+    add_test(NAME live2d-parameter-interpolator
+        COMMAND live2d-parameter-interpolator-test)
 endif()

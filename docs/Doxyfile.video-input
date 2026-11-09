@@ -7,10 +7,12 @@ FULL_PATH_NAMES        = NO
 STRIP_FROM_PATH        = .
 
 INPUT                  = include/vtb/video \
+                         include/vtb/time/monotonic_clock.hpp \
                          include/vtb/capture_config.hpp \
                          include/vtb/v4l2_camera.hpp \
                          include/vtb/pipeline/video_processing_runtime.hpp \
                          include/vtb/face/cpu_image_transformer.hpp \
+                         include/vtb/face/model_input.hpp \
                          include/vtb/face/face_types.hpp \
                          include/vtb/face/face_pipeline.hpp \
                          include/vtb/face/rga_image_transformer.hpp \
@@ -23,6 +25,7 @@ INPUT                  = include/vtb/video \
                          src/v4l2_camera.cpp \
                          src/pipeline/video_processing_runtime.cpp \
                          src/face/cpu_image_transformer.cpp \
+                         src/face/model_input.cpp \
                          src/face/face_types.cpp \
                          src/face/face_pipeline.cpp \
                          src/face/rga_image_transformer.cpp \

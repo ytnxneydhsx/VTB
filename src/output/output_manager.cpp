@@ -12,14 +12,10 @@
 #include <thread>
 #include <utility>
 
+#include "vtb/time/monotonic_clock.hpp"
+
 namespace vtb {
 namespace {
-
-std::uint64_t monotonic_now_ns() {
-    const auto now = std::chrono::steady_clock::now().time_since_epoch();
-    return static_cast<std::uint64_t>(
-        std::chrono::duration_cast<std::chrono::nanoseconds>(now).count());
-}
 
 std::chrono::milliseconds retry_delay(const OutputOptions& options,
                                       std::uint32_t retry_number) {
@@ -111,9 +107,11 @@ public:
                     const std::string failed_stream = packet->stream_id();
                     try {
                         output->write(std::move(*packet));
+                        const std::uint64_t success_ns =
+                            MonotonicClock::now_ns();
                         std::lock_guard<std::mutex> lock(mutex);
                         ++written;
-                        last_success_ns = monotonic_now_ns();
+                        last_success_ns = success_ns;
                         retries = 0;
                     } catch (const std::exception& error) {
                         record_error(error.what(), failed_stream);
