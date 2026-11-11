@@ -416,7 +416,9 @@ Error Live2DRenderSession::create_scene_nodes() {
 	viewport_ = memnew(SubViewport);
 	viewport_->set_name("Live2DEmbeddedViewport");
 	viewport_->set_size(config_.output_size);
+#ifndef _3D_DISABLED
 	viewport_->set_disable_3d(true);
+#endif
 	viewport_->set_transparent_background(false);
 	viewport_->set_update_mode(SubViewport::UPDATE_ALWAYS);
 	session_root_->add_child(viewport_);

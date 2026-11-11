@@ -27,6 +27,33 @@ Apply the pinned Headless EGL patch series before building LibGodot:
 ./experiments/godot/headless-egl/apply-to-godot.sh /absolute/path/to/godot
 ```
 
+For the Live2D-only product runtime, use the reproducible trimmed build after
+installing the OpenVT module into the Godot source tree:
+
+```bash
+export OPENVT_BOARD_SYSROOT=/absolute/path/to/rockchip-sysroot
+export OPENVT_BUILD_JOBS=24
+export CC=/absolute/path/to/aarch64-godot-linux-gnu-gcc
+export CXX=/absolute/path/to/aarch64-godot-linux-gnu-g++
+export SCONS=/absolute/path/to/scons
+./experiments/godot/embedded-runtime/build-trimmed-libgodot.sh \
+  /absolute/path/to/godot
+```
+
+The trimmed configuration keeps GLES3, Headless EGL, PNG loading,
+GDExtension, the 2D scene/animation classes, and the
+`openvt_dmabuf_capture` module. It disables optional Godot modules by default
+and removes the unused 3D, Godot physics/navigation, XR, advanced GUI,
+desktop audio, desktop integration, and non-GLES rendering build paths.
+`disable_path_overrides=no` remains required because the C++ host supplies the
+resource root with `--path`.
+
+This is a product-specific build. A successful compile and host link establish
+the binary boundary; RK3588 acceptance must still load the Ayagami GDExtension,
+render the deployed model, compare frame metrics, and verify clean shutdown.
+The measured size change and validation boundary are recorded in
+[`godot-libgodot-trim-validation-2026-11-11.md`](../../../docs/godot-libgodot-trim-validation-2026-11-11.md).
+
 The patch boundary and verification requirements are documented in
 [`headless-egl/README.md`](../headless-egl/README.md).
 
