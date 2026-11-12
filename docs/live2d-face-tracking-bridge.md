@@ -46,14 +46,16 @@ Godot/Ayagami、DMA-BUF、RGA 和 MPP 保留原有资源链；输出协议移到
 - `MediaOutputSession`：宿主编码包接收器，复制回调中的借用字节，管理输出启动、排空和停止。
 - `FaceDiagnosticSession`：只复制最新 `FaceTrackingResult`，后台绘制黑底人脸框和
   66 点 NV12 画面，并通过独立 MPP 编码器交付 `/face3d` 编码包。
-- `VtbApplication`：分别创建视频输入与模型管线，读取最新参数快照并提交给 Godot。
+- `VtbApplication`：分别创建视频输入与模型管线，管理顶层启动、停止和错误传播。
+- `GodotRuntimeThread`：专用所有者线程；在该线程内创建、驱动和销毁 LibGodot，并
+  读取最新参数快照提交给 Godot。
 - `Live2DParameters`：独立的十参数值对象；Godot 只编译这个数据类型，不编译
   `Live2DFaceMapper`。
 - `OpenVTLive2DFrameInput`：宿主与 LibGodot 之间的固定数值帧对象，只包含十个
   Live2D 参数、取景状态、结果产生时间戳和 snapshot_generation；通过 C linkage 函数提交。
 - `EmbeddedLive2DApplication`：Godot 内部渲染/编码编排，只消费参数帧并驱动 Ayagami。
 
-推理回调不访问 Godot 对象。它只更新纯 C++ mailbox；宿主主线程通过固定桥接函数
+推理回调不访问 Godot 对象。它只更新纯 C++ mailbox；Godot 所有者线程通过固定桥接函数
 提交数值字段，跨边界不再传递 Godot `Dictionary`、摄像头对象或模型对象。
 
 ## 参数映射
@@ -70,7 +72,7 @@ Godot/Ayagami、DMA-BUF、RGA 和 MPP 保留原有资源链；输出协议移到
 | `mouth_open` | `ParamMouthOpenY` | 归一化到 0～1 |
 | `mouth_wide` | `ParamMouthForm` | 限幅 -1～1 |
 
-`poll_snapshot_update()` 仅供主线程消费；空值表示没有新快照。`snapshot_generation`
+`read_snapshot_if_changed()` 仅供 Godot 所有者线程消费；空值表示没有新快照。`snapshot_generation`
 随映射或取景变化递增，不能当作摄像头帧号；来源帧号保留在映射结果的 `frame_id()`。
 取景更新保持原映射时间戳。没有新快照时继续使用最近参数，不能立即触发衰减。
 

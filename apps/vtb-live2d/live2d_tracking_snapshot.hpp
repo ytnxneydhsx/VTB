@@ -28,7 +28,7 @@ private:
     float offset_y_ = 0.0F;
 };
 
-/** @brief 应用主线程取得的参数和取景快照；版本随任一状态变化递增。 */
+/** @brief Godot 所有者线程取得的参数和取景快照；版本随任一状态变化递增。 */
 class Live2DTrackingSnapshot {
 public:
     Live2DTrackingSnapshot(

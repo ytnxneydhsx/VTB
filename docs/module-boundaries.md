@@ -56,12 +56,13 @@ flowchart TB
 | LibGodot 模块 | 渲染与既有 GPU/RGA/MPP 资源链；不编译 OutputManager、RTSP 或 FFmpeg |
 
 `vtb_render_runtime` 保留为带替身后端的生命周期契约原型，仅由既有状态机单元测试使用。
-产品生命周期入口为 `apps/vtb-live2d/vtb_application.cpp` 中的 `LibGodotInstance`；
-它和 Godot 模块共享参数值与桥接头文件。原型渲染头文件现在直接依赖参数值类型。
+产品生命周期入口为 `apps/vtb-live2d/vtb_application.cpp` 中的 `GodotRuntimeThread`；
+它在专用所有者线程内管理 `LibGodotInstance`，并和 Godot 模块共享参数值与桥接头文件。
+原型渲染头文件现在直接依赖参数值类型。
 
 ## 快照与帧租约语义
 
-- `poll_snapshot_update()` 由一个主线程消费。`nullopt` 表示没有新快照；跟踪有效性由
+- `read_snapshot_if_changed()` 由 Godot 所有者线程单独消费。`nullopt` 表示快照没有变化；跟踪有效性由
   `mapping().tracking_valid()` 描述。
 - `snapshot_generation` 随映射结果或取景状态更新递增；映射的 `frame_id()` 对应来源帧。
 - `produced_timestamp_ns` 由项目级 `MonotonicClock` 产生，属于 Linux
@@ -85,7 +86,7 @@ flowchart TB
 丢包统计决定。回调返回 0 表示按既有队列策略处理成功；重连、等待关键帧或背压导致
 `OutputManager::publish()` 返回 0 个入队出口时，保持原有恢复策略。
 
-宿主先构造输出接收器，再构造 LibGodot，使异常展开时接收器仍有效。正常关闭顺序：
+宿主先构造输出接收器，再启动 Godot 所有者线程，使异常展开时接收器仍有效。正常关闭顺序：
 
 1. 停止 HTTP 与跟踪会话，确保不再发布新的人脸结果。
 2. 停止并 join `FaceDiagnosticSession`，再排空 `/face3d` 输出。

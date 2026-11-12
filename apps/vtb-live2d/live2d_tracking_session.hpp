@@ -32,9 +32,10 @@ public:
     void request_stop() noexcept;
     void stop();
     void rethrow_if_failed() const;
-    // Single polling consumer. nullopt means no snapshot update, not tracking loss.
+    // Single non-blocking reader. nullopt means the snapshot has not changed,
+    // not tracking loss.
     // A view-only update retains the mapping's original produced timestamp.
-    std::optional<Live2DTrackingSnapshot> poll_snapshot_update();
+    std::optional<Live2DTrackingSnapshot> read_snapshot_if_changed();
     Live2DTrackingStatus status() const;
     void request_calibration_reset() noexcept;
     bool set_view(const Live2DTrackingViewState& view) noexcept;

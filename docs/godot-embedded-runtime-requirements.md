@@ -145,8 +145,8 @@ ADR 0002 在生命周期迁移完成后启动独立的显示后端迁移阶段�
 1. **VTB 拥有应用生命周期。** `main()`、退出码、信号处理和顶层状态机属于 VTB。
 2. **Godot 只通过窄接口暴露。** 业务模块不能直接调用 `Main::*` 或任意 Godot 单例。
 3. **单进程、单 Runtime。** 第一版只允许一个 Godot 全局状态集合。
-4. **主线程拥有 Godot 对象。** SceneTree、RenderingServer、Ayagami 和资源加载调用
-   固定在创建 Runtime 的线程。
+4. **专用所有者线程拥有 Godot 对象。** SceneTree、RenderingServer、Ayagami 和资源
+   加载调用固定在创建 Runtime 的线程。
 5. **帧接口符合异步渲染语义。** 参数提交、Godot iteration 和完成帧获取是不同阶段。
 6. **不做 CPU 图像回读。** 产品路径不能用 `ViewportTexture::get_image()` 作为连续
    输出接口。
@@ -327,7 +327,7 @@ Runtime 配置至少包含：
 - 是否完成校准；
 - 置信度。
 
-Runtime 在主线程应用参数。参数超过配置的最大年龄时，执行当前已经验证的平滑回默认
+Runtime 在 Godot 所有者线程应用参数。参数超过配置的最大年龄时，执行当前已经验证的平滑回默认
 值策略，不积压历史参数。
 
 ### 8.3 逐帧驱动
@@ -343,7 +343,7 @@ Runtime 在主线程应用参数。参数超过配置的最大年龄时，执行
   → 导出已完成纹理
 ```
 
-`step()` 由 VTB 主线程调用，并使用 `CLOCK_MONOTONIC` 时间。第一版由 VTB 维护
+`step()` 由 Godot 所有者线程调用，并使用 `CLOCK_MONOTONIC` 时间。VTB 维护
 30 FPS 调度，Godot 内部不能再创建第二套互相竞争的帧率控制。
 
 ### 8.4 完成帧
@@ -445,11 +445,12 @@ setup
 
 | 线程 | 允许职责 |
 |---|---|
-| VTB/Godot 主线程 | Runtime 生命周期、SceneTree、Ayagami、RenderingServer、参数应用 |
+| VTB 进程主线程 | 组件装配、生命周期阶段控制、停止顺序和错误接收 |
+| Godot 所有者线程 | Runtime 生命周期、SceneTree、Ayagami、RenderingServer、参数应用 |
 | 摄像头线程 | 采集和最新帧发布 |
 | 推理线程 | RKNN、PnP、表情和 Live2D 参数生成 |
 | 媒体线程 | RGA、MPP、OutputManager 发布 |
-| 控制线程 | HTTP 请求解析和向主线程提交控制快照 |
+| 控制线程 | HTTP 请求解析和向跟踪状态提交控制更新 |
 
 ### 10.2 约束
 
@@ -457,7 +458,7 @@ setup
 - 线程间只传递 VTB 自有值类型、资源租约或容量受限的快照；
 - 人脸参数继续使用容量一、最新值覆盖的交接方式；
 - 视频输出槽位必须有固定容量和明确背压；
-- 主线程调用 Godot API 时不能持有推理或输出线程需要的锁；
+- Godot 所有者线程调用 Godot API 时不能持有推理或输出线程需要的锁；
 - 关闭时先停止新输入，再排空或放弃有界队列，最后销毁 Godot；
 - signal handler 只设置原子停止标志或写入安全通知 fd，不直接调用 Godot API；
 - 任何运行线程捕获 `this` 时，对象移动操作保持删除。
@@ -797,7 +798,8 @@ Godot 4.7.1 源码检查、ARM64 探针和 RK3588 完整链路验证已经确认
    `glFinish()` 保证 GPU copy 完成；
 6. LibGodot 使用独立产物名和部署目录，旧 Godot-hosted 路径继续保留；
 7. 启动、iteration、输出或关闭错误向 C++ `main()` 传播并决定进程退出码；
-8. `SIGINT` 和 `SIGTERM` 的 handler 只设置原子停止标志，资源释放在主线程执行；
+8. `SIGINT` 和 `SIGTERM` 的 handler 只设置原子停止标志，进程主线程编排停止，Godot
+   资源由所有者线程释放；
 9. Godot、GPU copy、RGA、MPP 或输出错误会终止当前产品链路；
 10. Headless EGL/GBM 在生命周期迁移完成后作为独立阶段接入，不改变本节记录的
     第一版生命周期结论。

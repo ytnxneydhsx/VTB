@@ -5,6 +5,8 @@
 
 显示后端部分已由 [ADR 0002](0002-use-headless-egl-for-product-runtime.md) 替代；
 本文关于 LibGodot 生命周期所有权和适配层边界的决策继续有效。
+LibGodot 的具体线程所有权已由
+[ADR 0003](0003-run-libgodot-on-dedicated-owner-thread.md) 调整为专用所有者线程。
 
 ## 背景
 

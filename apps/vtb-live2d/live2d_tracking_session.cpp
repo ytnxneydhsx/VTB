@@ -163,7 +163,7 @@ public:
     void request_calibration_reset() noexcept { state_.request_calibration_reset(); }
     bool set_view(const Live2DTrackingViewState& view) noexcept { return state_.set_view(view); }
 
-    std::optional<Live2DTrackingSnapshot> poll_snapshot_update() {
+    std::optional<Live2DTrackingSnapshot> read_snapshot_if_changed() {
         runtime_->rethrow_if_failed();
         std::optional<Live2DTrackingSnapshot> snapshot = state_.read();
         if (!snapshot.has_value() ||
@@ -219,8 +219,9 @@ void Live2DTrackingSession::rethrow_if_failed() const {
     impl_->rethrow_if_failed();
 }
 
-std::optional<Live2DTrackingSnapshot> Live2DTrackingSession::poll_snapshot_update() {
-    return impl_->poll_snapshot_update();
+std::optional<Live2DTrackingSnapshot>
+Live2DTrackingSession::read_snapshot_if_changed() {
+    return impl_->read_snapshot_if_changed();
 }
 
 Live2DTrackingStatus Live2DTrackingSession::status() const {
