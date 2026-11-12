@@ -23,6 +23,7 @@ flowchart TB
     Control --> Session
     Session --> Runtime[VideoProcessingRuntime]
     Runtime --> Video[VideoSource / VideoFrameConsumer]
+    Runtime --> StreamProtocol[VideoStreamControlProtocol]
     Session --> Face[FaceFrameConsumer / FacePipeline]
     Session --> Mapper[Live2DFaceMapper]
     Mapper --> TrackingChannel[LatestTrackingChannel latest-only]
@@ -47,7 +48,7 @@ flowchart TB
 
 | 位置 / 目标 | 责任与依赖限制 |
 | --- | --- |
-| `include/vtb/video`、`vtb_video_core` | 视频值类型、来源、同步消费者；不依赖 face、live2d、应用配置 |
+| `include/vtb/video`、`vtb_video_core` | 视频值类型、来源、同步消费者和源生命周期控制协议；不依赖 face、live2d、应用配置 |
 | `vtb_capture` | V4L2 设备和缓冲区；只接收 `CaptureConfig` |
 | `vtb_face_core` | 通用算法接口、流程与 FaceFrameConsumer；不包含 HTTP 或 Live2D 类型 |
 | `vtb_live2d_values` | 参数与映射结果值类型；没有 face 或推理依赖 |
@@ -107,8 +108,9 @@ Godot 会创建 RenderingServer 线程，捕获回调通过命令队列转交；
   不能让过期的映射重新变新。
 - Godot 没有收到新快照时保持最近参数；超过 150 ms 后以 250 ms 时间常数衰减到默认值。
   取景更新独立应用，过期快照不能把已经衰减的参数重置回旧值。
-- `VideoFrameConsumer::consume()` 必须在返回前完成处理并释放租约。接口没有异步队列
-  的排空/停止协议；消费者不能把租约或帧内存指针保存到返回之后。
+- `VideoFrameConsumer::consume()` 必须在返回前完成处理并释放租约。控制线程通过
+  `VideoStreamControlProtocol` 在采集前确认 `begin_source`，在最后一帧后确认
+  `retire_source`；消费者仍不能把租约或帧内存指针保存到返回之后。
 - 可选人脸诊断只复制 `FaceTrackingResult`，后台槽位容量为一。它没有把
   `DecodedFrameLease` 变成多消费者总线，也不会让诊断编码背压延长 V4L2 租约。
 

@@ -56,6 +56,7 @@
 | `VideoFrameConsumer` | 统一同步消费一帧租约，不包含具体模型和结果类型 |
 | `FaceFrameConsumer` | 把通用帧租约交给 `FacePipeline` 并发布人脸结果 |
 | `LatestFrameSlot` | 在采集线程和模型线程之间保存最新一帧，替换时自动释放旧帧 |
+| `VideoStreamControlProtocol` | 传递不可丢失的源开始、源退休和消费者关闭请求/应答 |
 | `VideoProcessingRuntime` | 组合视频源和消费者，管理线程、停止、latest-only 和错误传播 |
 | `FaceDiagnosticSession` | 只复制最新人脸值结果，异步绘制诊断 NV12 并独立 MPP 编码 |
 
@@ -67,6 +68,9 @@
 值类型不包含算法、线程和 HTTP。完整依赖图见 [模块边界](module-boundaries.md)。
 
 `VideoProcessingRuntime` 的启动、停止、等待和析构由拥有它的控制线程顺序调用。
+控制线程先通过 `VideoStreamControlProtocol` 等待消费者完成 `begin_source`，再启动
+采集线程；采集结束后发送 `retire_source`，等待消费者释放该代源相关缓存，再发送
+`shutdown_consumer`。控制请求不会进入允许覆盖旧帧的 `LatestFrameSlot`。
 采集线程和消费线程只访问内部状态对象；运行时在释放该对象前完成两个线程的
 `join()`。内部状态仅为实际跨线程的停止请求、异常和计数保留同步。
 
@@ -146,7 +150,9 @@ FaceDetector / LandmarkEstimator
 
 `ImageTransformer` 可以根据输入和输出规格选择最短路径。例如 YUYV 可以由一次 RGA 操作同时完成 ROI 裁剪、缩放和 RGB 转换。MPP 输出的 NV12 也直接交给 RGA，无需提前生成完整分辨率 RGB 中间帧。
 
-当前产品路径使用 `RgaImageTransformer`。它直接导入 V4L2 帧的 DMA-BUF，并由一次
+当前产品路径使用 `RgaImageTransformer`。同一源代次首次出现某个 V4L2 DMA-BUF 时，
+它复制 fd、导入 RGA handle 并缓存源缓冲区描述；后续帧复用该 handle。消费线程处理
+完该代最后一帧并收到 `retire_source` 后，统一释放输入 handle 和复制的 fd。每次预处理由一次
 同步 RGA 操作完成 ROI 裁剪、缩放和 BT.601 limited YUV 到 RGB888 转换。输出缓冲区
 从 JSON 指定的 DMA heap 分配并复用。`RgaImageTransformer` 通过 `ModelInputView` 同时
 交付 DMA-BUF fd、CPU 映射地址、缓冲区大小和行步长，不包含 RKNN 头文件，也不创建或
@@ -481,9 +487,11 @@ FaceTrackingResult
 - 容量为一的 `LatestFrameSlot`，替换旧帧时通过租约析构归还底层缓冲区。
 - `FacePipeline` 对检测、关键点、姿态计算和重新检测策略的同步编排。
 - `VideoFrameConsumer` 统一消费接口和 `FaceFrameConsumer` 人脸适配器。
+- `VideoStreamControlProtocol` 使用请求号和源代次完成 begin/retire/shutdown 应答，
+  控制消息与 latest-only 视频帧分离。
 - `VideoProcessingRuntime` 的采集线程、消费线程、latest-only 交接、停止顺序和
   异常保存；该运行时不依赖人脸类型。
-- `RgaImageTransformer` 直接导入 V4L2 DMA-BUF，并在一次同步 RGA 操作中完成
+- `RgaImageTransformer` 按源代次缓存 V4L2 DMA-BUF 的 RGA 输入 handle，并在一次同步 RGA 操作中完成
   YUYV/NV12/NV21 ROI 裁剪、缩放和 224x224 RGB888 转换。
 - `CpuImageTransformer` 保留相同的 `ImageTransformer` 契约，用于功能对照和
   不依赖 Rockchip RGA 的构建；产品入口不做隐式 CPU 回退。

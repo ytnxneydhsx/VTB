@@ -54,6 +54,11 @@ FacePipeline::FacePipeline(
     }
 }
 
+void FacePipeline::begin_source(VideoStreamGeneration generation) {
+    reset_tracking();
+    image_transformer_->begin_source(generation);
+}
+
 std::optional<FaceTrackingResult> FacePipeline::process(const FrameView& frame) {
     bool must_detect = !tracked_box_.has_value();
     if (tracking_confidence_ < config_.minimum_tracking_confidence) {
@@ -104,6 +109,11 @@ std::optional<FaceTrackingResult> FacePipeline::process(const FrameView& frame) 
         geometry.expression(),
         geometry.success(),
         tracking_confidence_);
+}
+
+void FacePipeline::retire_source(VideoStreamGeneration generation) noexcept {
+    image_transformer_->retire_source(generation);
+    reset_tracking();
 }
 
 CropRegion FacePipeline::full_frame_crop(const FrameView& frame) const {

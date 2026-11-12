@@ -52,6 +52,42 @@ public:
         video_source_->close();
     }
 
+    void begin_source() {
+        VideoStreamControlReply reply = control_protocol_.exchange(
+            VideoStreamControlAction::begin_source, generation_);
+        reply.rethrow_if_failed();
+        source_active_ = true;
+    }
+
+    void retire_source() noexcept {
+        if (!source_active_) {
+            return;
+        }
+        try {
+            VideoStreamControlReply reply = control_protocol_.exchange(
+                VideoStreamControlAction::retire_source, generation_);
+            reply.rethrow_if_failed();
+        } catch (...) {
+            record_failure(std::current_exception());
+        }
+        source_active_ = false;
+    }
+
+    void shutdown_consumer() noexcept {
+        if (consumer_shutdown_) {
+            return;
+        }
+        try {
+            VideoStreamControlReply reply = control_protocol_.exchange(
+                VideoStreamControlAction::shutdown_consumer, generation_);
+            reply.rethrow_if_failed();
+        } catch (...) {
+            record_failure(std::current_exception());
+        }
+        consumer_shutdown_ = true;
+        control_protocol_.close();
+    }
+
     void capture_loop() noexcept {
         bool completed = false;
         try {
@@ -76,6 +112,34 @@ public:
     }
 
     void consumer_loop() noexcept {
+        std::optional<VideoStreamControlRequest> begin_request =
+            control_protocol_.wait_request();
+        if (!begin_request) {
+            return;
+        }
+        if (begin_request->action() !=
+                VideoStreamControlAction::begin_source ||
+            begin_request->generation() != generation_) {
+            const std::exception_ptr failure = std::make_exception_ptr(
+                std::logic_error(
+                    "Consumer expected begin_source for the active generation"));
+            control_protocol_.fail(*begin_request, failure);
+            record_failure(failure);
+            control_protocol_.close();
+            return;
+        }
+        try {
+            frame_consumer_->begin_source(generation_);
+            control_protocol_.complete(*begin_request);
+        } catch (...) {
+            const std::exception_ptr failure = std::current_exception();
+            control_protocol_.fail(*begin_request, failure);
+            record_failure(failure);
+            request_stop();
+            control_protocol_.close();
+            return;
+        }
+
         try {
             while (true) {
                 std::optional<DecodedFrameLease> frame =
@@ -90,6 +154,46 @@ public:
             record_failure(std::current_exception());
             request_stop();
         }
+
+        std::optional<VideoStreamControlRequest> retire_request =
+            control_protocol_.wait_request();
+        if (!retire_request) {
+            frame_consumer_->retire_source(generation_);
+            return;
+        }
+        if (retire_request->action() !=
+                VideoStreamControlAction::retire_source ||
+            retire_request->generation() != generation_) {
+            const std::exception_ptr failure = std::make_exception_ptr(
+                std::logic_error(
+                    "Consumer expected retire_source for the active generation"));
+            control_protocol_.fail(*retire_request, failure);
+            record_failure(failure);
+            frame_consumer_->retire_source(generation_);
+            control_protocol_.close();
+            return;
+        }
+        frame_consumer_->retire_source(generation_);
+        control_protocol_.complete(*retire_request);
+
+        std::optional<VideoStreamControlRequest> shutdown_request =
+            control_protocol_.wait_request();
+        if (!shutdown_request) {
+            return;
+        }
+        if (shutdown_request->action() !=
+                VideoStreamControlAction::shutdown_consumer ||
+            shutdown_request->generation() != generation_) {
+            const std::exception_ptr failure = std::make_exception_ptr(
+                std::logic_error(
+                    "Consumer expected shutdown_consumer after source retirement"));
+            control_protocol_.fail(*shutdown_request, failure);
+            record_failure(failure);
+            control_protocol_.close();
+            return;
+        }
+        control_protocol_.complete(*shutdown_request);
+        control_protocol_.close();
     }
 
     void rethrow_if_failed() const {
@@ -126,9 +230,13 @@ private:
     std::unique_ptr<VideoSource> video_source_;
     std::unique_ptr<VideoFrameConsumer> frame_consumer_;
     LatestFrameSlot latest_frame_;
+    VideoStreamControlProtocol control_protocol_;
     mutable std::mutex mutex_;
     std::exception_ptr failure_;
     bool stop_requested_ = false;
+    bool source_active_ = false;
+    bool consumer_shutdown_ = false;
+    VideoStreamGeneration generation_{1};
     std::atomic<std::uint64_t> processed_frame_count_{0};
 };
 
@@ -155,6 +263,7 @@ void VideoProcessingRuntime::start() {
         consumer_thread_ = std::thread(
             &VideoProcessingRuntimeState::consumer_loop,
             state_.get());
+        state_->begin_source();
         capture_thread_ = std::thread(
             &VideoProcessingRuntimeState::capture_loop,
             state_.get());
@@ -203,6 +312,8 @@ void VideoProcessingRuntime::join_threads() {
         capture_thread_.join();
     }
     if (consumer_thread_.joinable()) {
+        state_->retire_source();
+        state_->shutdown_consumer();
         consumer_thread_.join();
     }
     state_->close_source();

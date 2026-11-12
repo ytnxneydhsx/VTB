@@ -16,10 +16,19 @@ FaceFrameConsumer::FaceFrameConsumer(
     }
 }
 
+void FaceFrameConsumer::begin_source(VideoStreamGeneration generation) {
+    face_pipeline_->begin_source(generation);
+}
+
 void FaceFrameConsumer::consume(DecodedFrameLease frame) {
     std::optional<FaceTrackingResult> result =
         face_pipeline_->process(frame.view());
     result_handler_(result);
+}
+
+void FaceFrameConsumer::retire_source(
+    VideoStreamGeneration generation) noexcept {
+    face_pipeline_->retire_source(generation);
 }
 
 }  // namespace vtb

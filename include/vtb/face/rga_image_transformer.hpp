@@ -16,6 +16,10 @@ namespace vtb {
  * DMA-BUF fd。YUYV、NV12 和 NV21 的有效 ROI 会扩展到驱动要求的偶数坐标
  * 和尺寸，并把实际 ROI 交给模型后处理。RGA 实现不创建或配置 RKNN context；
  * 模型消费者自行导入缓冲区。
+ *
+ * 同一源代次中首次看到某个摄像头 DMA-BUF 时，转换器复制 fd、导入 RGA handle 并
+ * 缓存完整源缓冲区描述；后续帧复用该 handle。retire_source() 在消费线程确认该代
+ * 已无在途帧后统一释放输入 handle 和复制的 fd。输出模型缓冲区继续按规格复用。
  */
 class RgaImageTransformer final : public ImageTransformer {
 public:
@@ -27,10 +31,12 @@ public:
     RgaImageTransformer(RgaImageTransformer&&) = delete;
     RgaImageTransformer& operator=(RgaImageTransformer&&) = delete;
 
+    void begin_source(VideoStreamGeneration generation) override;
     ModelInputLease prepare(
         const FrameView& frame,
         const CropRegion& crop,
         const ModelInputSpec& spec) override;
+    void retire_source(VideoStreamGeneration generation) noexcept override;
 
 private:
     /**

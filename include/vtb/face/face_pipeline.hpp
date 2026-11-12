@@ -75,7 +75,9 @@ public:
     FacePipeline(FacePipeline&&) = delete;
     FacePipeline& operator=(FacePipeline&&) = delete;
 
+    void begin_source(VideoStreamGeneration generation);
     std::optional<FaceTrackingResult> process(const FrameView& frame);
+    void retire_source(VideoStreamGeneration generation) noexcept;
 
 private:
     CropRegion full_frame_crop(const FrameView& frame) const;

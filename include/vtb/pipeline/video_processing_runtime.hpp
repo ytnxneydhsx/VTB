@@ -16,10 +16,15 @@ class VideoProcessingRuntimeState;
  *
  * 采集线程从 VideoSource 读取帧并发布到容量为一的 LatestFrameSlot；消费线程取得
  * 最新帧并调用 VideoFrameConsumer::consume()。本类不依赖具体模型或结果类型。
+ * VideoStreamControlProtocol 独立传递不可丢失的 begin_source、retire_source 和
+ * shutdown_consumer 请求：消费线程确认源已准备后才启动采集；采集结束后，运行时
+ * 等待消费者释放该代源相关资源，再关闭消费者线程和视频源。
  *
  * start()、request_stop()、wait()、stop() 和析构由拥有本对象的同一个控制线程
  * 调用。两个工作线程只访问 VideoProcessingRuntimeState，不访问本对象的生命周期
  * 函数。运行时在销毁状态对象前等待两个工作线程退出。
+ * 当前运行时仍只承载一代视频源；协议代次为以后由协调器重建 CaptureSession、保持
+ * 消费线程长期运行预留，不在本类中实现摄像头热重连。
  */
 class VideoProcessingRuntime {
 public:

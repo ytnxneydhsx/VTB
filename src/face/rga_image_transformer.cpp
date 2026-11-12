@@ -7,6 +7,7 @@
 #include <cstdint>
 #include <fcntl.h>
 #include <memory>
+#include <optional>
 #include <stdexcept>
 #include <string>
 #include <system_error>
@@ -14,6 +15,7 @@
 #include <sys/mman.h>
 #include <unistd.h>
 #include <utility>
+#include <vector>
 
 #include <linux/dma-heap.h>
 #include <rga/im2d.h>
@@ -79,12 +81,24 @@ public:
         std::uint32_t width,
         std::uint32_t height,
         std::uint32_t horizontal_stride,
-        int format) {
+        int format)
+        : source_fd_(dma_buf_fd),
+          size_bytes_(size_bytes),
+          width_(width),
+          height_(height),
+          horizontal_stride_(horizontal_stride),
+          format_(format) {
         if (size_bytes > static_cast<std::size_t>(INT_MAX)) {
             throw std::invalid_argument("RGA DMA-BUF is too large to import");
         }
+        const int duplicated_fd =
+            fcntl(dma_buf_fd, F_DUPFD_CLOEXEC, 0);
+        if (duplicated_fd < 0) {
+            throw_errno("duplicate RGA source DMA-BUF");
+        }
+        owned_fd_ = UniqueFd(duplicated_fd);
         handle_ = importbuffer_fd(
-            dma_buf_fd, static_cast<int>(size_bytes));
+            owned_fd_.get(), static_cast<int>(size_bytes));
         if (handle_ == 0) {
             throw std::runtime_error("RGA DMA-BUF import failed");
         }
@@ -112,7 +126,26 @@ public:
         return buffer_;
     }
 
+    bool matches(
+        int dma_buf_fd,
+        std::size_t size_bytes,
+        std::uint32_t width,
+        std::uint32_t height,
+        std::uint32_t horizontal_stride,
+        int format) const noexcept {
+        return source_fd_ == dma_buf_fd && size_bytes_ == size_bytes &&
+            width_ == width && height_ == height &&
+            horizontal_stride_ == horizontal_stride && format_ == format;
+    }
+
 private:
+    int source_fd_ = -1;
+    std::size_t size_bytes_ = 0;
+    std::uint32_t width_ = 0;
+    std::uint32_t height_ = 0;
+    std::uint32_t horizontal_stride_ = 0;
+    int format_ = RK_FORMAT_UNKNOWN;
+    UniqueFd owned_fd_;
     rga_buffer_handle_t handle_ = 0;
     rga_buffer_t buffer_{};
 };
@@ -398,6 +431,17 @@ public:
     Impl(Impl&&) = delete;
     Impl& operator=(Impl&&) = delete;
 
+    void begin_source(VideoStreamGeneration generation) {
+        if (active_generation_) {
+            if (*active_generation_ == generation) {
+                return;
+            }
+            throw std::logic_error(
+                "RGA image transformer source generation is still active");
+        }
+        active_generation_ = generation;
+    }
+
     ModelInputLease prepare(
         const FrameView& frame,
         const CropRegion& crop,
@@ -408,14 +452,8 @@ public:
         std::shared_ptr<RgaModelInputBuffer> output = output_buffer(spec);
 
         const FramePlaneView& source_plane = frame.plane(0);
-        ImportedRgaBuffer source(
-            source_plane.dma_buf_fd(),
-            source_plane.size_bytes(),
-            frame.width(),
-            frame.height(),
-            layout.horizontal_stride(),
-            layout.format());
-        rga_buffer_t source_buffer = source.buffer();
+        rga_buffer_t source_buffer = source_buffer_for(
+            frame, source_plane, layout);
         imsetColorSpace(&source_buffer, IM_YUV_BT601_LIMIT_RANGE);
         rga_buffer_t destination_buffer = output->buffer();
 
@@ -474,7 +512,50 @@ public:
             std::move(view), KeepRgaBufferAlive(std::move(output)));
     }
 
+    void retire_source(VideoStreamGeneration generation) noexcept {
+        if (!active_generation_) {
+            return;
+        }
+        if (*active_generation_ != generation) {
+            return;
+        }
+        source_buffers_.clear();
+        active_generation_.reset();
+    }
+
 private:
+    rga_buffer_t source_buffer_for(
+        const FrameView& frame,
+        const FramePlaneView& plane,
+        const SourceLayout& layout) {
+        if (!active_generation_) {
+            throw std::logic_error(
+                "RGA image transformer source generation is not active");
+        }
+        for (const std::unique_ptr<ImportedRgaBuffer>& buffer :
+             source_buffers_) {
+            if (buffer->matches(
+                    plane.dma_buf_fd(),
+                    plane.size_bytes(),
+                    frame.width(),
+                    frame.height(),
+                    layout.horizontal_stride(),
+                    layout.format())) {
+                return buffer->buffer();
+            }
+        }
+        auto imported = std::make_unique<ImportedRgaBuffer>(
+            plane.dma_buf_fd(),
+            plane.size_bytes(),
+            frame.width(),
+            frame.height(),
+            layout.horizontal_stride(),
+            layout.format());
+        rga_buffer_t result = imported->buffer();
+        source_buffers_.push_back(std::move(imported));
+        return result;
+    }
+
     std::shared_ptr<RgaModelInputBuffer> output_buffer(
         const ModelInputSpec& spec) {
         if (!output_buffer_ ||
@@ -491,6 +572,8 @@ private:
     }
 
     std::string dma_heap_path_;
+    std::optional<VideoStreamGeneration> active_generation_;
+    std::vector<std::unique_ptr<ImportedRgaBuffer>> source_buffers_;
     std::shared_ptr<RgaModelInputBuffer> output_buffer_;
 };
 
@@ -499,11 +582,20 @@ RgaImageTransformer::RgaImageTransformer(std::string dma_heap_path)
 
 RgaImageTransformer::~RgaImageTransformer() = default;
 
+void RgaImageTransformer::begin_source(VideoStreamGeneration generation) {
+    impl_->begin_source(generation);
+}
+
 ModelInputLease RgaImageTransformer::prepare(
     const FrameView& frame,
     const CropRegion& crop,
     const ModelInputSpec& spec) {
     return impl_->prepare(frame, crop, spec);
+}
+
+void RgaImageTransformer::retire_source(
+    VideoStreamGeneration generation) noexcept {
+    impl_->retire_source(generation);
 }
 
 }  // namespace vtb

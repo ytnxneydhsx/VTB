@@ -203,6 +203,7 @@ endif()
 add_library(vtb_video_core STATIC
     src/video/frame.cpp
     src/video/latest_frame_slot.cpp
+    src/video/video_stream_control_protocol.cpp
 )
 add_library(vtb::video_core ALIAS vtb_video_core)
 target_include_directories(vtb_video_core PUBLIC include)
@@ -220,6 +221,7 @@ vtb_configure_target(vtb_capture)
 
 add_library(vtb_face_core STATIC
     src/face/model_input.cpp
+    src/face/image_transformer.cpp
     src/face/cpu_image_transformer.cpp
     src/face/face_types.cpp
     src/face/face_pipeline.cpp
@@ -494,4 +496,20 @@ if(BUILD_TESTING)
     vtb_configure_target(live2d-parameter-interpolator-test)
     add_test(NAME live2d-parameter-interpolator
         COMMAND live2d-parameter-interpolator-test)
+
+    add_executable(video-stream-control-protocol-test
+        tests/video_stream_control_protocol_test.cpp)
+    target_link_libraries(video-stream-control-protocol-test
+        PRIVATE vtb_video_core Threads::Threads)
+    vtb_configure_target(video-stream-control-protocol-test)
+    add_test(NAME video-stream-control-protocol
+        COMMAND video-stream-control-protocol-test)
+
+    add_executable(video-processing-runtime-protocol-test
+        tests/video_processing_runtime_protocol_test.cpp)
+    target_link_libraries(video-processing-runtime-protocol-test
+        PRIVATE vtb_video_processing_runtime Threads::Threads)
+    vtb_configure_target(video-processing-runtime-protocol-test)
+    add_test(NAME video-processing-runtime-protocol
+        COMMAND video-processing-runtime-protocol-test)
 endif()

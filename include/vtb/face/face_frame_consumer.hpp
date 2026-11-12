@@ -30,7 +30,9 @@ public:
     FaceFrameConsumer(FaceFrameConsumer&&) = delete;
     FaceFrameConsumer& operator=(FaceFrameConsumer&&) = delete;
 
+    void begin_source(VideoStreamGeneration generation) override;
     void consume(DecodedFrameLease frame) override;
+    void retire_source(VideoStreamGeneration generation) noexcept override;
 
 private:
     std::unique_ptr<FacePipeline> face_pipeline_;
