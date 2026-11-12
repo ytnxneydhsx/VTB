@@ -16,7 +16,7 @@ V4L2 CameraSource (MMAP / DQBUF / QBUF)
   → optional latest-only FaceDiagnosticSession → NV12 DMA-BUF → MPP H.264
       → host MediaOutputSession → OutputManager → /face3d RTSP
   → C++ Live2DFaceMapper
-  → Live2DTrackingSession capacity-one parameter snapshot
+  → LatestTrackingChannel versioned latest-only snapshot
   → openvt_libgodot_application_submit_live2d_frame()
   → Godot main thread parameter input
   → Ayagami model parameters
@@ -41,7 +41,10 @@ Godot/Ayagami、DMA-BUF、RGA 和 MPP 保留原有资源链；输出协议移到
 - `OpenSeeFaceGeometryEstimator`：保留 70 点模板、14 点 PnP、Euler 角、66 点反投影和
   Remedian 表情特征语义。
 - `Live2DFaceMapper`：中立姿态校准、限幅、参数映射和按单调时钟计算的一阶平滑。
-- `Live2DTrackingSession`：应用层组合类，创建 `FaceFrameConsumer`，管理参数快照和校准。
+- `Live2DTrackingSession`：应用层组合类，创建 `FaceFrameConsumer`，在人脸消费线程完成
+  映射和校准，并管理运行时生命周期。
+- `LatestTrackingChannel`：只保存已经完成的映射、取景状态和版本号；互斥锁封装在内部，
+  Godot 所有者线程使用非阻塞读取，不清空最近状态。
 - `Live2DControlServer`：独立的 HTTP 控制组件，借用寿命更长的会话，序列化状态和转发命令。
 - `MediaOutputSession`：宿主编码包接收器，复制回调中的借用字节，管理输出启动、排空和停止。
 - `FaceDiagnosticSession`：只复制最新 `FaceTrackingResult`，后台绘制黑底人脸框和
@@ -55,7 +58,8 @@ Godot/Ayagami、DMA-BUF、RGA 和 MPP 保留原有资源链；输出协议移到
   Live2D 参数、取景状态、结果产生时间戳和 snapshot_generation；通过 C linkage 函数提交。
 - `EmbeddedLive2DApplication`：Godot 内部渲染/编码编排，只消费参数帧并驱动 Ayagami。
 
-推理回调不访问 Godot 对象。它只更新纯 C++ mailbox；Godot 所有者线程通过固定桥接函数
+推理回调不访问 Godot 对象。它先完成 Live2D 映射，再把值快照发布到纯 C++ Channel；
+Godot 所有者线程通过固定桥接函数
 提交数值字段，跨边界不再传递 Godot `Dictionary`、摄像头对象或模型对象。
 
 ## 参数映射

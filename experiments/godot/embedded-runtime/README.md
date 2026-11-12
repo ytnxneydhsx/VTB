@@ -130,8 +130,10 @@ OPENVT_CONFIG=/home/huangnv/VTB/runtime/cpp-host-libgodot-20261030-01/config/vtb
 Set `render.total_frames` to `0` in the JSON file for continuous operation. The
 C++ host uses `steady_clock` as the process monotonic frame clock and paces
 iterations at `render.output_fps`; `--fixed-fps` only supplies the matching
-Godot simulation step. The example configuration uses 60 FPS output while the
-camera and face inference remain at 30 Hz. The LibGodot application buffers the
+Godot simulation step. VTB also fixes `--render-thread safe`, so the Godot owner
+thread remains the `RenderingServer` execution thread; passthrough arguments
+cannot replace this product-owned setting. The example configuration uses 60
+FPS output while the camera and face inference remain at 30 Hz. The LibGodot application buffers the
 two newest timestamped parameter snapshots and samples them once per render
 frame. It activates interpolation only when the snapshot interval is
 meaningfully longer than the render interval, so a 30 Hz / 30 FPS configuration

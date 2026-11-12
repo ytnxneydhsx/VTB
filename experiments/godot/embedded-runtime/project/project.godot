@@ -17,6 +17,7 @@ window/size/window_height_override=1080
 
 [rendering]
 
+driver/threads/thread_model=1
 renderer/rendering_method="gl_compatibility"
 renderer/rendering_method.mobile="gl_compatibility"
 textures/default_filters/use_nearest_mipmap_filter=false

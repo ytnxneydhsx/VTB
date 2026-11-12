@@ -25,13 +25,17 @@ flowchart TB
     Runtime --> Video[VideoSource / VideoFrameConsumer]
     Session --> Face[FaceFrameConsumer / FacePipeline]
     Session --> Mapper[Live2DFaceMapper]
+    Mapper --> TrackingChannel[LatestTrackingChannel latest-only]
     Mapper --> FaceData[FaceTrackingResult]
     Session --> Diagnostic[FaceDiagnosticSession latest-only]
     Diagnostic --> DiagnosticSink[独立 MPP H.264 / face3d sink]
     Mapper --> Values[Live2DParameters / Live2DMappingResult]
-    App --> Godot[LibGodotInstance / ABI v3]
-    Godot --> Render[Godot / Ayagami / DMA-BUF / RGA / MPP]
-    Render --> Sink[EncodedVideoSink 借用编码数据]
+    App --> GodotThread[GodotRuntimeThread]
+    GodotThread --> TrackingChannel
+    GodotThread --> Godot[LibGodotInstance / ABI v3]
+    Godot --> Render[Godot / Ayagami / DMA-BUF GL copy]
+    Render --> Media[OpenVT RGA/MPP media thread]
+    Media --> Sink[EncodedVideoSink 借用编码数据]
     App --> Output[MediaOutputSession / OutputManager]
     Output --> Sink
     App --> DiagnosticOutput[face3d MediaOutputSession]
@@ -39,7 +43,7 @@ flowchart TB
     Output --> Protocol[应用选择 RtspOutput]
 ```
 
-箭头表示依赖或装配关系。编码数据由 `Render` 经 sink 回调进入宿主 `MediaOutputSession`。
+箭头表示依赖或装配关系。编码数据由 `Media` 经 sink 回调进入宿主 `MediaOutputSession`。
 
 | 位置 / 目标 | 责任与依赖限制 |
 | --- | --- |
@@ -48,7 +52,7 @@ flowchart TB
 | `vtb_face_core` | 通用算法接口、流程与 FaceFrameConsumer；不包含 HTTP 或 Live2D 类型 |
 | `vtb_live2d_values` | 参数与映射结果值类型；没有 face 或推理依赖 |
 | `vtb_live2d_mapper` | 人脸结果到 Live2D 的校准、映射和平滑 |
-| `vtb_live2d_tracking_session` | 应用会话，装配 runtime、face、mapper；独占状态，停止前等待消费者结束 |
+| `vtb_live2d_tracking_session` | 应用会话，装配 runtime、face、mapper 和 LatestTrackingChannel；停止前等待消费者结束 |
 | `vtb_live2d_control` | HTTP 解析与 JSON 状态序列化；借用会话的查询、取景、校准能力 |
 | `vtb_application_video_input` | 应用配置转换为后端配置并选择摄像头实现 |
 | `vtb_media_output_session` | 接收编码包、输出生命周期与统计；具体协议由组合根注入 |
@@ -59,6 +63,39 @@ flowchart TB
 产品生命周期入口为 `apps/vtb-live2d/vtb_application.cpp` 中的 `GodotRuntimeThread`；
 它在专用所有者线程内管理 `LibGodotInstance`，并和 Godot 模块共享参数值与桥接头文件。
 原型渲染头文件现在直接依赖参数值类型。
+
+## 当前渲染与输出线程
+
+产品启动参数显式固定 `--render-thread safe`，资源工程也固定
+`rendering/driver/threads/thread_model=1`。在该模式下，Godot 所有者线程同时是 Godot
+主线程和 `RenderingServer` 执行线程。`call_on_render_thread()` 检测到调用者就是
+`server_thread` 后会直接执行捕获回调。
+这里的“同一线程”指同一个 OS thread ID；Linux 调度器仍可让该线程在不同 CPU core
+之间迁移，当前实现没有做 CPU 亲和性绑定。
+
+```text
+Godot 所有者兼渲染执行线程
+  prepare_frame → iteration → RenderingServer draw
+  → complete_frame → viewport texture → glBlitFramebuffer → glFinish
+  → 发布 READY DMA-BUF slot
+                    │
+                    ▼
+OpenVT RGA/MPP 媒体线程
+  READY slot → RGA RGBA/NV12 → MPP H.264
+  → EncodedVideoSink::publish → OutputManager 有界队列
+                    │
+                    ▼
+RTSP Output 工作线程
+  take_packet → RtspOutput::write → FFmpeg/RTSP
+```
+
+这里列出的是 Live2D 渲染到网络输出的三个主要 CPU 线程。摄像头采集、人脸消费、控制、
+可选诊断、指标以及 Godot 内部工作池仍有各自线程。GPU 作为独立硬件执行图形命令；
+`glFinish()` 是所有者线程等待本次 DMA-BUF 复制完成的同步点。
+
+`call_on_render_thread()` 保留对 Separate 模式的正确路由能力。以后显式切换 Separate 时，
+Godot 会创建 RenderingServer 线程，捕获回调通过命令队列转交；该模式需要重新进行完整
+实机验收，不属于当前产品配置。
 
 ## 快照与帧租约语义
 

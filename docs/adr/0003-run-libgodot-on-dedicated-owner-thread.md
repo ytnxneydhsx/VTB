@@ -9,7 +9,8 @@ ADR 0001 让 VTB 进程主线程直接创建、驱动和销毁唯一 LibGodot �
 完成构建与既有运行验证，但应用主线程同时承担组件装配、逐帧调度和关闭编排。后续若
 进程主线程需要承载独立的控制事件循环，Godot 的线程所有权会与顶层控制职责重叠。
 
-人脸处理结果已经通过 `Live2DTrackingState` 的互斥锁保护快照跨线程交接。此次调整不
+人脸处理结果已经通过 latest-only 快照跨线程交接。该交接随后明确命名为
+`LatestTrackingChannel`，映射计算留在人脸消费线程，Channel 只保存完成后的值。此次调整不
 增加第二套参数邮箱，也不允许多个线程拿锁后轮流调用 Godot。目标是让一个专用线程从
 创建到销毁独占 LibGodot，其他线程继续只传递 VTB 自有值类型。
 
@@ -27,6 +28,11 @@ ADR 0001 让 VTB 进程主线程直接创建、驱动和销毁唯一 LibGodot �
 `GodotInstance::start()`，再由同一线程执行 iteration、应用关闭和实例销毁。该结论是
 源码确认；Ayagami、Headless EGL、GPU 捕获和完整退出仍需在 RK3588 上验证。
 
+当前产品显式使用 `--render-thread safe`，资源工程同时设置
+`rendering/driver/threads/thread_model=1`。Safe 模式下 Godot 所有者线程也是
+`RenderingServer` 的 `server_thread`；只有以后切换 Separate 模式时才会新增独立 Godot
+Render Thread。
+
 ## 决策
 
 新增应用私有的 `GodotRuntimeThread`：
@@ -43,7 +49,7 @@ VTB 进程主线程
 
 GodotRuntimeThread
   → 创建并启动 LibGodotInstance
-  → 直接读取 Live2DTrackingSession 的现有最新快照
+  → 直接读取 LatestTrackingChannel 的现有最新快照
   → submit + iteration + 完成帧捕获
   → 完成 Godot application
   → 完成主视频输出

@@ -459,7 +459,7 @@ render_dmabuf_video.gd::_capture_frame_after_draw(frame)
 
 `OpenVTDmaBufCapture` 是加入定制 Godot 的 C++ 内置模块。
 
-### 10.2 从 Godot 主线程切换到 Render Thread
+### 10.2 通过 `call_on_render_thread()` 保证图形上下文归属
 
 ```text
 OpenVTDmaBufCapture::capture_frame(...)
@@ -469,9 +469,16 @@ OpenVTDmaBufCapture::capture_frame(...)
 └─ operation_finished.wait()
 ```
 
-当前调用会等待 Render Thread 完成本帧的 GPU copy、RGA 和 MPP 操作，因此当前正确性版本是一条同步链路。
+当前产品固定使用 Safe 线程模型，Godot 所有者线程同时是 `server_thread`，所以
+`call_on_render_thread()` 会直接执行 `_capture_frame_render_thread()`。如果以后切换到
+Separate 模式，这个调用才会把任务放入 Godot 渲染命令队列，由独立 Render Thread
+执行。
 
-### 10.3 Render Thread 取得 SubViewport 的原生纹理
+`capture_frame()` 会等待纹理复制、`glFinish()` 和 READY slot 发布完成。RGA/MPP 由
+`OpenVT RGA MPP` 媒体线程异步消费 READY slot，RTSP 写出再由 `OutputManager` 工作线程
+处理；调用方不会同步等待这两个阶段完成。
+
+### 10.3 图形上下文所属线程取得 SubViewport 原生纹理
 
 ```text
 _capture_frame_render_thread(viewport_rid, ...)

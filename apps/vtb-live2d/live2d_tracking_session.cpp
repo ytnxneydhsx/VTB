@@ -17,91 +17,62 @@ constexpr float kViewZoomMaximum = 6.0F;
 constexpr float kViewOffsetMinimum = -2.0F;
 constexpr float kViewOffsetMaximum = 2.0F;
 
-class Live2DTrackingState final {
+/**
+ * @brief 人脸消费线程和 Godot 所有者线程之间的 latest-only 快照交接对象。
+ *
+ * 映射计算在发布前已经完成。本类只保存最新映射、取景状态和版本号，并在内部封装
+ * 互斥锁；单一消费者按版本非阻塞读取。读取不会清空最近状态。
+ */
+class LatestTrackingChannel final {
 public:
-    explicit Live2DTrackingState(Live2DMappingConfig config)
-        : mapper_(config), calibration_required_(config.calibration_frames) {}
-    ~Live2DTrackingState() = default;
+    LatestTrackingChannel() = default;
+    ~LatestTrackingChannel() = default;
 
-    Live2DTrackingState(const Live2DTrackingState&) = delete;
-    Live2DTrackingState& operator=(const Live2DTrackingState&) = delete;
-    Live2DTrackingState(Live2DTrackingState&&) = delete;
-    Live2DTrackingState& operator=(Live2DTrackingState&&) = delete;
+    LatestTrackingChannel(const LatestTrackingChannel&) = delete;
+    LatestTrackingChannel& operator=(const LatestTrackingChannel&) = delete;
+    LatestTrackingChannel(LatestTrackingChannel&&) = delete;
+    LatestTrackingChannel& operator=(LatestTrackingChannel&&) = delete;
 
-    void publish(const std::optional<FaceTrackingResult>& result) {
-        const std::uint64_t requested_reset =
-            reset_generation_.load(std::memory_order_acquire);
-        if (requested_reset != applied_reset_generation_) {
-            mapper_.reset_calibration();
-            applied_reset_generation_ = requested_reset;
-            reset_pending_.store(false, std::memory_order_release);
-        }
-        const FaceTrackingResult* face = nullptr;
-        if (result.has_value()) {
-            face = &result.value();
-        }
-        Live2DMappingResult mapped =
-            mapper_.update(face, MonotonicClock::now_ns());
+    void publish_mapping(Live2DMappingResult mapping) {
         std::lock_guard<std::mutex> lock(mutex_);
-        latest_ = std::move(mapped);
+        latest_mapping_ = std::move(mapping);
         ++snapshot_generation_;
     }
 
-    std::optional<Live2DTrackingSnapshot> read() const {
+    std::optional<Live2DTrackingSnapshot> read_latest() const {
         std::lock_guard<std::mutex> lock(mutex_);
-        if (!latest_.has_value()) {
+        if (!latest_mapping_.has_value()) {
             return std::nullopt;
         }
-        return Live2DTrackingSnapshot(snapshot_generation_, latest_.value(), view_);
+        return Live2DTrackingSnapshot(
+            snapshot_generation_, latest_mapping_.value(), view_);
     }
 
-    void request_calibration_reset() noexcept {
-        reset_pending_.store(true, std::memory_order_release);
-        reset_generation_.fetch_add(1, std::memory_order_release);
-    }
-
-    bool set_view(const Live2DTrackingViewState& view) noexcept {
-        if (!std::isfinite(view.zoom()) || !std::isfinite(view.offset_x()) ||
-            !std::isfinite(view.offset_y()) ||
-            view.zoom() < kViewZoomMinimum || view.zoom() > kViewZoomMaximum ||
-            view.offset_x() < kViewOffsetMinimum ||
-            view.offset_x() > kViewOffsetMaximum ||
-            view.offset_y() < kViewOffsetMinimum ||
-            view.offset_y() > kViewOffsetMaximum) {
-            return false;
-        }
+    void publish_view(const Live2DTrackingViewState& view) noexcept {
         std::lock_guard<std::mutex> lock(mutex_);
         view_ = view;
         ++snapshot_generation_;
-        return true;
     }
 
-    Live2DTrackingStatus status() const {
+    Live2DTrackingStatus read_status(
+        std::size_t calibration_required) const {
         std::lock_guard<std::mutex> lock(mutex_);
         Live2DTrackingStatus status;
-        status.calibration_required = calibration_required_;
+        status.calibration_required = calibration_required;
         status.view = view_;
-        if (latest_.has_value()) {
-            status.calibrated = latest_->calibrated();
-            status.tracking_valid = latest_->tracking_valid();
-            status.calibration_progress = latest_->calibration_progress();
-            status.confidence = latest_->confidence();
-        }
-        if (reset_pending_.load(std::memory_order_acquire)) {
-            status.calibrated = false;
-            status.calibration_progress = 0;
+        if (latest_mapping_.has_value()) {
+            status.calibrated = latest_mapping_->calibrated();
+            status.tracking_valid = latest_mapping_->tracking_valid();
+            status.calibration_progress =
+                latest_mapping_->calibration_progress();
+            status.confidence = latest_mapping_->confidence();
         }
         return status;
     }
 
 private:
     mutable std::mutex mutex_;
-    Live2DFaceMapper mapper_;
-    std::size_t calibration_required_ = 0;
-    std::optional<Live2DMappingResult> latest_;
-    std::atomic<std::uint64_t> reset_generation_{0};
-    std::atomic<bool> reset_pending_{false};
-    std::uint64_t applied_reset_generation_ = 0;
+    std::optional<Live2DMappingResult> latest_mapping_;
     std::uint64_t snapshot_generation_ = 0;
     Live2DTrackingViewState view_;
 };
@@ -115,14 +86,15 @@ public:
         std::unique_ptr<FacePipeline> face_pipeline,
         Live2DMappingConfig mapping_config,
         ResultObserver result_observer)
-        : state_(mapping_config),
+        : mapper_(mapping_config),
+          calibration_required_(mapping_config.calibration_frames),
           runtime_(std::make_unique<VideoProcessingRuntime>(
               std::move(video_input),
               std::make_unique<FaceFrameConsumer>(
                   std::move(face_pipeline),
                   [this, observer = std::move(result_observer)](
                       const std::optional<FaceTrackingResult>& result) {
-                      state_.publish(result);
+                      process_result(result);
                       if (observer) {
                           observer(result);
                       }
@@ -159,13 +131,38 @@ public:
         runtime_->rethrow_if_failed();
     }
 
-    Live2DTrackingStatus status() const { return state_.status(); }
-    void request_calibration_reset() noexcept { state_.request_calibration_reset(); }
-    bool set_view(const Live2DTrackingViewState& view) noexcept { return state_.set_view(view); }
+    Live2DTrackingStatus status() const {
+        Live2DTrackingStatus result =
+            channel_.read_status(calibration_required_);
+        if (reset_pending_.load(std::memory_order_acquire)) {
+            result.calibrated = false;
+            result.calibration_progress = 0;
+        }
+        return result;
+    }
+
+    void request_calibration_reset() noexcept {
+        reset_pending_.store(true, std::memory_order_release);
+        reset_generation_.fetch_add(1, std::memory_order_release);
+    }
+
+    bool set_view(const Live2DTrackingViewState& view) noexcept {
+        if (!std::isfinite(view.zoom()) || !std::isfinite(view.offset_x()) ||
+            !std::isfinite(view.offset_y()) ||
+            view.zoom() < kViewZoomMinimum || view.zoom() > kViewZoomMaximum ||
+            view.offset_x() < kViewOffsetMinimum ||
+            view.offset_x() > kViewOffsetMaximum ||
+            view.offset_y() < kViewOffsetMinimum ||
+            view.offset_y() > kViewOffsetMaximum) {
+            return false;
+        }
+        channel_.publish_view(view);
+        return true;
+    }
 
     std::optional<Live2DTrackingSnapshot> read_snapshot_if_changed() {
         runtime_->rethrow_if_failed();
-        std::optional<Live2DTrackingSnapshot> snapshot = state_.read();
+        std::optional<Live2DTrackingSnapshot> snapshot = channel_.read_latest();
         if (!snapshot.has_value() ||
             snapshot->snapshot_generation() == delivered_snapshot_generation_) {
             return std::nullopt;
@@ -175,6 +172,23 @@ public:
     }
 
 private:
+    void process_result(const std::optional<FaceTrackingResult>& result) {
+        const std::uint64_t requested_reset =
+            reset_generation_.load(std::memory_order_acquire);
+        if (requested_reset != applied_reset_generation_) {
+            mapper_.reset_calibration();
+            applied_reset_generation_ = requested_reset;
+            reset_pending_.store(false, std::memory_order_release);
+        }
+        const FaceTrackingResult* face = nullptr;
+        if (result.has_value()) {
+            face = &result.value();
+        }
+        Live2DMappingResult mapping =
+            mapper_.update(face, MonotonicClock::now_ns());
+        channel_.publish_mapping(std::move(mapping));
+    }
+
     void shutdown_noexcept() noexcept {
         try {
             request_stop();
@@ -184,8 +198,13 @@ private:
         started_ = false;
     }
 
-    Live2DTrackingState state_;
+    Live2DFaceMapper mapper_;
+    std::size_t calibration_required_ = 0;
+    LatestTrackingChannel channel_;
     std::unique_ptr<VideoProcessingRuntime> runtime_;
+    std::atomic<std::uint64_t> reset_generation_{0};
+    std::atomic<bool> reset_pending_{false};
+    std::uint64_t applied_reset_generation_ = 0;
     std::uint64_t delivered_snapshot_generation_ = 0;
     bool started_ = false;
 };

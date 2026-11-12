@@ -156,9 +156,10 @@ public:
         : godot_arguments_(command_line.passthrough_arguments()),
           iteration_limit_(command_line.iteration_limit()),
           output_fps_(render.output_fps) {
-        if (has_argument("--path") || has_argument("--fixed-fps")) {
+        if (has_argument("--path") || has_argument("--fixed-fps") ||
+            has_argument("--render-thread")) {
             throw std::invalid_argument(
-                "--path and --fixed-fps are managed by the JSON configuration");
+                "--path, --fixed-fps and --render-thread are managed by VTB");
         }
         godot_arguments_.emplace_back("--path");
         godot_arguments_.push_back(render.godot_project_dir);
@@ -167,6 +168,7 @@ public:
         append_default_flag("--single-window");
         append_default_flag("--disable-crash-handler");
         append_default_flag("--disable-vsync");
+        append_default_argument("--render-thread", "safe");
         godot_arguments_.emplace_back("--fixed-fps");
         godot_arguments_.push_back(std::to_string(output_fps_));
         refresh_pointers();
