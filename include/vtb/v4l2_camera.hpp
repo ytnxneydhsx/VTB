@@ -15,6 +15,15 @@ namespace vtb {
  *
  * 本类独占打开的设备文件描述符，并在析构时关闭。对象不可复制或移动，保证文件
  * 描述符的所有权和对象地址在生命周期内保持稳定。
+ *
+ * @htmlonly
+ * <div class="vtb-resource-card">
+ *   <div class="vtb-resource-card__title">独占系统资源</div>
+ *   <span class="vtb-resource-owned">fd_</span> 是 open() 打开的摄像头设备 fd，
+ *   由析构函数执行 close(fd_)。复制和移动全部删除，避免设备 fd 出现重复关闭
+ *   或所有权不清晰。
+ * </div>
+ * @endhtmlonly
  */
 class V4l2Camera {
 public:
@@ -27,9 +36,13 @@ public:
     /** @brief 关闭已经打开的摄像头文件描述符。 */
     ~V4l2Camera();
 
+    /** @brief 禁止复制摄像头设备 fd。 */
     V4l2Camera(const V4l2Camera&) = delete;
+    /** @brief 禁止通过复制赋值共享摄像头设备 fd。 */
     V4l2Camera& operator=(const V4l2Camera&) = delete;
+    /** @brief 当前设计不转移摄像头设备所有权。 */
     V4l2Camera(V4l2Camera&&) = delete;
+    /** @brief 当前设计不通过移动赋值转移摄像头设备所有权。 */
     V4l2Camera& operator=(V4l2Camera&&) = delete;
 
     /**
@@ -47,7 +60,8 @@ public:
 
     /**
      * @brief 返回当前对象持有的摄像头文件描述符。
-     * @return 未打开时返回 -1，成功打开后返回非负文件描述符。
+     * @return 借用 fd；未打开时返回 -1，成功打开后返回非负文件描述符。
+     * @note 调用者不得关闭该 fd。
      */
     int fd() const noexcept;
 
@@ -55,7 +69,7 @@ private:
     /** @brief 调用方请求的唯一采集配置。 */
     CaptureConfig config_;
 
-    /** @brief 本对象独占的摄像头文件描述符。 */
+    /** @brief <span class="vtb-resource-owned">独占资源</span> 摄像头设备 fd，析构时关闭。 */
     int fd_ = -1;
 };
 

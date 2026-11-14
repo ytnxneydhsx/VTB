@@ -11,6 +11,19 @@
 
 namespace vtb {
 
+/**
+ * @brief 保存视频运行时中由两个工作线程共同访问的稳定状态。
+ *
+ * @htmlonly
+ * <div class="vtb-resource-card">
+ *   <div class="vtb-resource-card__title">运行时拥有的协作资源</div>
+ *   <span class="vtb-resource-owned">video_source_ / frame_consumer_</span> 是独占依赖，
+ *   <span class="vtb-resource-owned">latest_frame_</span> 可能临时拥有一帧租约，
+ *   <span class="vtb-resource-owned">mutex_</span> 保护停止状态和异常状态。
+ *   对象由 VideoProcessingRuntime::state_ 持有，并在工作线程退出后销毁。
+ * </div>
+ * @endhtmlonly
+ */
 class VideoProcessingRuntimeState final {
 public:
     VideoProcessingRuntimeState(
@@ -227,10 +240,15 @@ private:
         }
     }
 
+    /** @brief <span class="vtb-resource-owned">独占资源</span> 视频输入源。 */
     std::unique_ptr<VideoSource> video_source_;
+    /** @brief <span class="vtb-resource-owned">独占资源</span> 同步帧消费者。 */
     std::unique_ptr<VideoFrameConsumer> frame_consumer_;
+    /** @brief <span class="vtb-resource-owned">临时所有权</span> 最新帧同步槽位。 */
     LatestFrameSlot latest_frame_;
+    /** @brief <span class="vtb-resource-owned">同步资源</span> 生命周期请求/应答协议。 */
     VideoStreamControlProtocol control_protocol_;
+    /** @brief <span class="vtb-resource-owned">同步资源</span> 保护停止和异常状态。 */
     mutable std::mutex mutex_;
     std::exception_ptr failure_;
     bool stop_requested_ = false;

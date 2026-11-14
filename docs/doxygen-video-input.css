@@ -1,0 +1,37 @@
+.vtb-resource-card {
+  margin: 1rem 0;
+  padding: 0.9rem 1rem;
+  border: 1px solid rgba(255, 93, 93, 0.72);
+  border-left: 5px solid #ff5d5d;
+  border-radius: 6px;
+  background: rgba(255, 93, 93, 0.1);
+}
+
+.vtb-resource-card__title {
+  margin-bottom: 0.45rem;
+  color: #ff6b6b;
+  font-size: 1.05rem;
+  font-weight: 700;
+}
+
+.vtb-resource-owned,
+.vtb-resource-owned code {
+  color: #ff6b6b !important;
+  font-weight: 700;
+}
+
+.vtb-resource-card--borrowed {
+  border-color: rgba(210, 153, 34, 0.72);
+  border-left-color: #d29922;
+  background: rgba(210, 153, 34, 0.1);
+}
+
+.vtb-resource-card--borrowed .vtb-resource-card__title {
+  color: #e3b341;
+}
+
+.vtb-resource-borrowed,
+.vtb-resource-borrowed code {
+  color: #e3b341 !important;
+  font-weight: 700;
+}

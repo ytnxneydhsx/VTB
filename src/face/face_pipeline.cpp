@@ -2,8 +2,14 @@
 
 #include <algorithm>
 #include <cmath>
+#include <memory>
 #include <stdexcept>
 #include <utility>
+
+#include "vtb/face/openseeface_geometry_estimator.hpp"
+#include "vtb/hardware/rga/rga_device.hpp"
+#include "vtb/hardware/rga/rga_image_transformer.hpp"
+#include "vtb/hardware/rknn/rknn_face_models.hpp"
 
 namespace vtb {
 namespace {
@@ -22,6 +28,26 @@ void require_unit_interval(float value, const char* description) {
 }
 
 }  // namespace
+
+std::unique_ptr<FacePipeline> FacePipeline::create(
+    FacePipelineConfig config) {
+    std::shared_ptr<RgaDevice> rga_device =
+        std::make_shared<RgaDevice>(config.rga_dma_heap);
+    auto image_transformer =
+        std::make_unique<RgaImageTransformer>(std::move(rga_device));
+    auto detector = std::make_unique<RknnFaceDetector>(
+        config.detector_model, RknnCore::core0);
+    auto landmark = std::make_unique<RknnLandmarkEstimator>(
+        config.landmark_model, RknnCore::core1);
+    auto geometry = std::make_unique<OpenSeeFaceGeometryEstimator>();
+
+    return std::make_unique<FacePipeline>(
+        std::move(config),
+        std::move(image_transformer),
+        std::move(detector),
+        std::move(landmark),
+        std::move(geometry));
+}
 
 FacePipeline::FacePipeline(
     FacePipelineConfig config,

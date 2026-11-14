@@ -1,6 +1,6 @@
 #pragma once
 
-#include "vtb/video/frame.hpp"
+#include "vtb/messaging/video/decoded_frame_lease.hpp"
 #include "vtb/video/video_stream_control_protocol.hpp"
 
 namespace vtb {

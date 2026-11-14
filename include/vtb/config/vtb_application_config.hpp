@@ -4,6 +4,9 @@
 #include <string>
 #include <string_view>
 
+#include "vtb/face/face_types.hpp"
+#include "vtb/live2d/live2d_face_mapper.hpp"
+
 namespace vtb {
 
 enum class VideoInputType {
@@ -19,24 +22,6 @@ public:
     std::uint32_t height = 0;
     std::uint32_t fps = 0;
     std::uint32_t buffer_count = 0;
-};
-
-class FacePipelineConfiguration {
-public:
-    std::string detector_model;
-    std::string landmark_model;
-    std::string rga_dma_heap;
-    std::uint32_t redetect_interval_frames = 0;
-    float minimum_tracking_confidence = 0.0F;
-};
-
-class FaceMappingConfiguration {
-public:
-    std::uint32_t calibration_frames = 0;
-    float smoothing_tau_ms = 0.0F;
-    float angle_x_sign = 0.0F;
-    float angle_y_sign = 0.0F;
-    float angle_z_sign = 0.0F;
 };
 
 class ControlConfiguration {
@@ -61,15 +46,6 @@ public:
     std::string rtsp_url;
 };
 
-class FaceDiagnosticOutputConfiguration {
-public:
-    bool enabled = false;
-    std::string rtsp_url;
-    std::uint32_t maximum_fps = 30;
-    std::uint32_t bitrate = 1200000;
-    std::uint32_t gop = 30;
-};
-
 class InstrumentationConfiguration {
 public:
     std::string metrics_directory;
@@ -83,12 +59,11 @@ public:
 class VtbApplicationConfiguration {
 public:
     VideoInputConfiguration video_input;
-    FacePipelineConfiguration face_pipeline;
-    FaceMappingConfiguration mapping;
+    FacePipelineConfig face_pipeline;
+    Live2DMappingConfig mapping;
     ControlConfiguration control;
     RenderConfiguration render;
     MediaOutputConfiguration output;
-    FaceDiagnosticOutputConfiguration face_diagnostic_output;
     InstrumentationConfiguration instrumentation;
 };
 

@@ -18,7 +18,7 @@
   "mapping": {
     "calibration_frames": 30,
     "smoothing_tau_ms": 50.0,
-    "angle_x_sign": -1.0,
+    "angle_x_sign": 1.0,
     "angle_y_sign": -1.0,
     "angle_z_sign": -1.0
   },
@@ -37,13 +37,6 @@
   },
   "output": {
     "rtsp_url": "rtsp://127.0.0.1:8554/live2d"
-  },
-  "face_diagnostic_output": {
-    "enabled": true,
-    "rtsp_url": "rtsp://127.0.0.1:8554/face3d",
-    "maximum_fps": 30,
-    "bitrate": 1200000,
-    "gop": 30
   },
   "instrumentation": {
     "metrics_directory": "/home/huangnv/VTB/runtime/cpp-host-libgodot-20261030-01/metrics",

@@ -48,13 +48,6 @@ const char* valid_configuration() {
         "output": {
             "rtsp_url": "rtsp://127.0.0.1:8554/live2d"
         },
-        "face_diagnostic_output": {
-            "enabled": true,
-            "rtsp_url": "rtsp://127.0.0.1:8554/face3d",
-            "maximum_fps": 30,
-            "bitrate": 1200000,
-            "gop": 30
-        },
         "instrumentation": {
             "metrics_directory": "/runtime/metrics",
             "report_interval_ms": 5000
@@ -87,16 +80,6 @@ void test_valid_configuration() {
     require(config.control.port == 11575, "control port mismatch");
     require(config.render.output_fps == 30, "output fps mismatch");
     require(config.output.rtsp_url == "rtsp://127.0.0.1:8554/live2d", "output URL mismatch");
-    require(
-        config.face_diagnostic_output.enabled,
-        "face diagnostic output was not enabled");
-    require(
-        config.face_diagnostic_output.rtsp_url ==
-            "rtsp://127.0.0.1:8554/face3d",
-        "face diagnostic output URL mismatch");
-    require(
-        config.face_diagnostic_output.maximum_fps == 30,
-        "face diagnostic maximum FPS mismatch");
     require(
         config.instrumentation.metrics_persistence_enabled(),
         "metrics persistence was not enabled");
@@ -194,67 +177,6 @@ void test_instrumentation_interval_range() {
     require(rejected, "sub-second metrics interval was accepted");
 }
 
-void test_face_diagnostic_section_is_optional() {
-    std::string json = valid_configuration();
-    const std::string section = R"json(,
-        "face_diagnostic_output": {
-            "enabled": true,
-            "rtsp_url": "rtsp://127.0.0.1:8554/face3d",
-            "maximum_fps": 30,
-            "bitrate": 1200000,
-            "gop": 30
-        })json";
-    const std::size_t position = json.find(section);
-    require(position != std::string::npos, "face diagnostic section is missing");
-    json.erase(position, section.size());
-
-    vtb::VtbApplicationConfigParser parser;
-    const vtb::VtbApplicationConfiguration config = parser.parse(json);
-    require(
-        !config.face_diagnostic_output.enabled,
-        "missing face diagnostic section enabled output");
-}
-
-void test_disabled_face_diagnostic_requires_no_output_fields() {
-    std::string json = valid_configuration();
-    const std::string section = R"json("face_diagnostic_output": {
-            "enabled": true,
-            "rtsp_url": "rtsp://127.0.0.1:8554/face3d",
-            "maximum_fps": 30,
-            "bitrate": 1200000,
-            "gop": 30
-        })json";
-    const std::size_t position = json.find(section);
-    require(position != std::string::npos, "face diagnostic section is missing");
-    json.replace(
-        position,
-        section.size(),
-        R"json("face_diagnostic_output": {"enabled": false})json");
-
-    vtb::VtbApplicationConfigParser parser;
-    const vtb::VtbApplicationConfiguration config = parser.parse(json);
-    require(
-        !config.face_diagnostic_output.enabled,
-        "disabled face diagnostic output was enabled");
-}
-
-void test_face_diagnostic_fps_must_not_exceed_input() {
-    std::string json = valid_configuration();
-    const std::string expected = "\"maximum_fps\": 30";
-    const std::size_t position = json.find(expected);
-    require(position != std::string::npos, "face diagnostic FPS is missing");
-    json.replace(position, expected.size(), "\"maximum_fps\": 31");
-
-    vtb::VtbApplicationConfigParser parser;
-    bool rejected = false;
-    try {
-        parser.parse(json);
-    } catch (const std::invalid_argument&) {
-        rejected = true;
-    }
-    require(rejected, "face diagnostic FPS above input FPS was accepted");
-}
-
 }  // namespace
 
 int main() {
@@ -265,9 +187,6 @@ int main() {
         test_render_output_url_requires_migration();
         test_instrumentation_section_is_optional();
         test_instrumentation_interval_range();
-        test_face_diagnostic_section_is_optional();
-        test_disabled_face_diagnostic_requires_no_output_fields();
-        test_face_diagnostic_fps_must_not_exceed_input();
         std::cout << "vtb_application_config_test passed\n";
         return 0;
     } catch (const std::exception& error) {

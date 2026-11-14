@@ -11,11 +11,11 @@ option(VTB_BUILD_OUTPUT_CLI "Build the optional output control example" OFF)
 option(VTB_ENABLE_ROCKCHIP_MPP_PUBLISHER
     "Build the RK3588 RGA/MPP RTSP publisher" OFF)
 option(VTB_ENABLE_RKNN_FACE
-    "Build the RK3588 RKNN OpenSeeFace detector and landmark models" OFF)
+    "Build the RK3588 RKNN OpenSeeFace detector and landmark models" ON)
 option(VTB_ENABLE_RGA_FACE
-    "Build the Rockchip RGA face image transformer" OFF)
+    "Build the Rockchip RGA face image transformer" ON)
 option(VTB_ENABLE_OPENCV_FACE_PIPELINE
-    "Build the OpenCV-based OpenSeeFace geometry estimator" OFF)
+    "Build the OpenCV-based OpenSeeFace geometry estimator" ON)
 option(VTB_ENABLE_EMBEDDED_GODOT
     "Build the VTB-owned LibGodot host executable" OFF)
 set(VTB_ROCKCHIP_SYSROOT "" CACHE PATH
@@ -44,7 +44,7 @@ if(VTB_ENABLE_ROCKCHIP_MPP_PUBLISHER OR VTB_ENABLE_RGA_FACE)
         REQUIRED)
 endif()
 
-if(VTB_ENABLE_ROCKCHIP_MPP_PUBLISHER OR VTB_ENABLE_EMBEDDED_GODOT)
+if(VTB_ENABLE_ROCKCHIP_MPP_PUBLISHER)
     if(VTB_ROCKCHIP_SYSROOT STREQUAL "")
         message(FATAL_ERROR
             "VTB_ROCKCHIP_SYSROOT is required for Rockchip MPP support")
@@ -65,6 +65,11 @@ function(vtb_configure_target target)
 endfunction()
 
 find_package(Threads REQUIRED)
+
+add_library(vtb_messaging INTERFACE)
+add_library(vtb::messaging ALIAS vtb_messaging)
+target_include_directories(vtb_messaging INTERFACE include)
+target_compile_features(vtb_messaging INTERFACE cxx_std_17)
 
 include(FetchContent)
 set(JSON_BuildTests OFF CACHE BOOL "" FORCE)
@@ -201,7 +206,9 @@ if(VTB_BUILD_OUTPUT_CLI)
     vtb_configure_target(vtb-output-cli)
 endif()
 add_library(vtb_video_core STATIC
-    src/video/frame.cpp
+    src/messaging/video/decoded_frame_lease.cpp
+    src/messaging/video/frame_plane_view.cpp
+    src/messaging/video/frame_view.cpp
     src/video/latest_frame_slot.cpp
     src/video/video_stream_control_protocol.cpp
 )
@@ -213,6 +220,8 @@ vtb_configure_target(vtb_video_core)
 add_library(vtb_capture STATIC
     src/v4l2_camera.cpp
     src/video/camera_source.cpp
+    src/video/v4l2/v4l2_buffer_mapping.cpp
+    src/video/v4l2/v4l2_buffer_pool.cpp
 )
 add_library(vtb::capture ALIAS vtb_capture)
 target_include_directories(vtb_capture PUBLIC include)
@@ -224,13 +233,20 @@ add_library(vtb_face_core STATIC
     src/face/image_transformer.cpp
     src/face/cpu_image_transformer.cpp
     src/face/face_types.cpp
-    src/face/face_pipeline.cpp
-    src/face/face_frame_consumer.cpp
 )
 add_library(vtb::face_core ALIAS vtb_face_core)
 target_include_directories(vtb_face_core PUBLIC include)
 target_link_libraries(vtb_face_core PUBLIC vtb_video_core)
 vtb_configure_target(vtb_face_core)
+
+add_library(vtb_face_pipeline STATIC
+    src/face/face_pipeline.cpp
+    src/face/face_frame_consumer.cpp
+)
+add_library(vtb::face_pipeline ALIAS vtb_face_pipeline)
+target_include_directories(vtb_face_pipeline PUBLIC include)
+target_link_libraries(vtb_face_pipeline PUBLIC vtb_face_core)
+vtb_configure_target(vtb_face_pipeline)
 
 add_library(vtb_live2d_values STATIC
     src/live2d/live2d_parameter_interpolator.cpp
@@ -246,6 +262,11 @@ add_library(vtb::live2d_mapper ALIAS vtb_live2d_mapper)
 target_include_directories(vtb_live2d_mapper PUBLIC include)
 target_link_libraries(vtb_live2d_mapper PUBLIC vtb_face_core vtb_live2d_values)
 vtb_configure_target(vtb_live2d_mapper)
+
+# The application configuration exposes the domain-owned FacePipelineConfig
+# and Live2DMappingConfig value types directly.
+target_link_libraries(vtb_application_config
+    PUBLIC vtb_face_core vtb_live2d_mapper)
 
 add_library(vtb_render_runtime STATIC
     src/render/godot_runtime.cpp
@@ -293,7 +314,7 @@ if(VTB_ENABLE_RKNN_FACE)
         REQUIRED)
 
     add_library(vtb_face_rknn STATIC
-        src/face/rknn_face_models.cpp
+        src/hardware/rknn/rknn_face_models.cpp
     )
     add_library(vtb::face_rknn ALIAS vtb_face_rknn)
     target_include_directories(vtb_face_rknn PUBLIC include)
@@ -309,7 +330,8 @@ endif()
 
 if(VTB_ENABLE_RGA_FACE)
     add_library(vtb_face_rga STATIC
-        src/face/rga_image_transformer.cpp
+        src/hardware/rga/rga_device.cpp
+        src/hardware/rga/rga_image_transformer.cpp
     )
     add_library(vtb::face_rga ALIAS vtb_face_rga)
     target_include_directories(vtb_face_rga PUBLIC include)
@@ -320,6 +342,16 @@ if(VTB_ENABLE_RGA_FACE)
         PRIVATE "${VTB_RGA_LIBRARY}"
     )
     vtb_configure_target(vtb_face_rga)
+endif()
+
+if(VTB_ENABLE_OPENCV_FACE_PIPELINE AND VTB_ENABLE_RKNN_FACE AND
+   VTB_ENABLE_RGA_FACE)
+    target_link_libraries(vtb_face_pipeline
+        PRIVATE
+            vtb_face_rga
+            vtb_face_rknn
+            vtb_face_geometry_opencv
+    )
 endif()
 
 add_library(vtb_video_processing_runtime STATIC
@@ -334,22 +366,24 @@ target_link_libraries(vtb_video_processing_runtime
 )
 vtb_configure_target(vtb_video_processing_runtime)
 
-# Application composition remains buildable without concrete inference backends.
-add_library(vtb_live2d_tracking_session STATIC
+# Independent stages and their shared message value types.
+add_library(vtb_live2d_stages STATIC
     apps/vtb-live2d/live2d_tracking_snapshot.cpp
-    apps/vtb-live2d/live2d_tracking_session.cpp
+    apps/vtb-live2d/pipeline/face_tracking_stage.cpp
+    apps/vtb-live2d/pipeline/live2d_tracking_pipeline.cpp
+    apps/vtb-live2d/pipeline/video_capture_stage.cpp
 )
-target_include_directories(vtb_live2d_tracking_session PUBLIC apps/vtb-live2d)
-target_link_libraries(vtb_live2d_tracking_session
-    PUBLIC vtb_live2d_mapper
-    PRIVATE vtb_video_processing_runtime Threads::Threads)
-vtb_configure_target(vtb_live2d_tracking_session)
+target_include_directories(vtb_live2d_stages PUBLIC apps/vtb-live2d)
+target_link_libraries(vtb_live2d_stages
+    PUBLIC vtb_live2d_mapper vtb::messaging
+    PRIVATE vtb_face_pipeline vtb_video_core Threads::Threads)
+vtb_configure_target(vtb_live2d_stages)
 
 add_library(vtb_live2d_control STATIC apps/vtb-live2d/live2d_control_server.cpp)
 target_include_directories(vtb_live2d_control PUBLIC apps/vtb-live2d)
 target_link_libraries(vtb_live2d_control
     PUBLIC vtb_application_config
-    PRIVATE vtb_live2d_tracking_session Threads::Threads)
+    PRIVATE vtb_live2d_stages Threads::Threads)
 vtb_configure_target(vtb_live2d_control)
 
 add_library(vtb_application_video_input STATIC apps/vtb-live2d/video_input_factory.cpp)
@@ -391,23 +425,6 @@ if(VTB_ENABLE_EMBEDDED_GODOT)
         message(FATAL_ERROR "VTB_LIBGODOT_LIBRARY does not exist")
     endif()
 
-    add_library(vtb_face_diagnostic_output STATIC
-        apps/vtb-live2d/face_diagnostic_session.cpp
-    )
-    target_include_directories(vtb_face_diagnostic_output
-        PUBLIC apps/vtb-live2d)
-    target_include_directories(vtb_face_diagnostic_output
-        SYSTEM PRIVATE "${VTB_MPP_INCLUDE_DIR}")
-    target_link_libraries(vtb_face_diagnostic_output
-        PUBLIC
-            vtb_application_config
-            vtb_face_core
-        PRIVATE
-            Threads::Threads
-            "${VTB_MPP_LIBRARY}"
-    )
-    vtb_configure_target(vtb_face_diagnostic_output)
-
     add_executable(vtb-live2d
         apps/vtb-live2d/main.cpp
         apps/vtb-live2d/vtb_application.cpp
@@ -419,16 +436,13 @@ if(VTB_ENABLE_EMBEDDED_GODOT)
     )
     target_link_libraries(vtb-live2d
         PRIVATE
-            vtb_live2d_tracking_session
+            vtb_live2d_stages
             vtb_live2d_control
             vtb_media_output_session
             vtb_output_rtsp
             vtb_application_config
             vtb_application_video_input
-            vtb_face_rga
-            vtb_face_rknn
-            vtb_face_geometry_opencv
-            vtb_face_diagnostic_output
+            vtb_face_pipeline
             "${VTB_LIBGODOT_LIBRARY}"
     )
     target_link_options(vtb-live2d PRIVATE -Wl,--allow-shlib-undefined)
@@ -449,6 +463,13 @@ add_executable(camera-info examples/camera-info/main.cpp)
 vtb_configure_target(camera-info)
 
 if(BUILD_TESTING)
+    add_executable(bounded-fifo-channel-test
+        tests/messaging/bounded_fifo_channel_test.cpp)
+    target_link_libraries(bounded-fifo-channel-test
+        PRIVATE vtb::messaging Threads::Threads)
+    vtb_configure_target(bounded-fifo-channel-test)
+    add_test(NAME bounded-fifo-channel COMMAND bounded-fifo-channel-test)
+
     add_executable(vtb-application-config-test
         tests/vtb_application_config_test.cpp)
     target_link_libraries(vtb-application-config-test

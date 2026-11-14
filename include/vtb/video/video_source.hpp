@@ -2,7 +2,7 @@
 
 #include <optional>
 
-#include "vtb/video/frame.hpp"
+#include "vtb/messaging/video/decoded_frame_lease.hpp"
 
 namespace vtb {
 

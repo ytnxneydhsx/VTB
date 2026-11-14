@@ -1,5 +1,5 @@
 #include "live2d_control_server.hpp"
-#include "live2d_tracking_session.hpp"
+#include "pipeline/face_tracking_stage.hpp"
 
 #include <arpa/inet.h>
 #include <netinet/in.h>
@@ -27,8 +27,8 @@ class Live2DControlServer::Impl final {
 public:
     Impl(
         ControlConfiguration config,
-        Live2DTrackingSession& session)
-        : config_(std::move(config)), session_(session) {
+        FaceTrackingStage& tracking_stage)
+        : config_(std::move(config)), tracking_stage_(tracking_stage) {
         if (config_.bind_address.empty() || config_.port < 1) {
             throw std::invalid_argument(
                 "Live2D control server configuration is invalid");
@@ -81,8 +81,8 @@ public:
                 "Unable to bind Live2D control socket: " +
                 std::string(std::strerror(saved_errno)));
         }
-        listen_socket_.store(created_socket, std::memory_order_release);
-        stop_requested_.store(false, std::memory_order_release);
+        listen_socket_.store(created_socket);
+        stop_requested_.store(false);
         worker_ = std::thread([this]() { run(); });
     }
 
@@ -94,9 +94,9 @@ public:
     }
 
     void request_stop() noexcept {
-        stop_requested_.store(true, std::memory_order_release);
+        stop_requested_.store(true);
         const int socket_to_close =
-            listen_socket_.exchange(-1, std::memory_order_acq_rel);
+            listen_socket_.exchange(-1);
         if (socket_to_close >= 0) {
             shutdown(socket_to_close, SHUT_RDWR);
             close(socket_to_close);
@@ -105,7 +105,7 @@ public:
 
 private:
     std::string health_json() const {
-        const Live2DTrackingStatus status = session_.status();
+        const Live2DTrackingStatus status = tracking_stage_.status();
         std::ostringstream body;
         body << "{\"state\":\"running\",\"calibrated\":";
         if (status.calibrated) {
@@ -311,7 +311,7 @@ private:
                 return;
             }
             if (first_line == "POST /recalibrate HTTP/1.1") {
-                session_.request_calibration_reset();
+                tracking_stage_.request_calibration_reset();
                 send_response(
                     client, request, 202, "Accepted", health_json());
                 return;
@@ -324,7 +324,7 @@ private:
                 if (!parse_json_number(body, "zoom", zoom) ||
                     !parse_json_number(body, "offset_x", offset_x) ||
                     !parse_json_number(body, "offset_y", offset_y) ||
-                    !session_.set_view(Live2DTrackingViewState(
+                    !tracking_stage_.set_view(Live2DTrackingViewState(
                         static_cast<float>(zoom),
                         static_cast<float>(offset_x),
                         static_cast<float>(offset_y)))) {
@@ -357,9 +357,9 @@ private:
     }
 
     void run() noexcept {
-        while (!stop_requested_.load(std::memory_order_acquire)) {
+        while (!stop_requested_.load()) {
             const int current_socket =
-                listen_socket_.load(std::memory_order_acquire);
+                listen_socket_.load();
             if (current_socket < 0) {
                 break;
             }
@@ -382,14 +382,17 @@ private:
     }
 
     ControlConfiguration config_;
-    Live2DTrackingSession& session_;
+    FaceTrackingStage& tracking_stage_;
     std::atomic<int> listen_socket_{-1};
     std::atomic<bool> stop_requested_{false};
     std::thread worker_;
 };
 
-Live2DControlServer::Live2DControlServer(ControlConfiguration config, Live2DTrackingSession& session)
-    : impl_(std::make_unique<Impl>(std::move(config), session)) {}
+Live2DControlServer::Live2DControlServer(
+    ControlConfiguration config,
+    FaceTrackingStage& tracking_stage)
+    : impl_(std::make_unique<Impl>(
+          std::move(config), tracking_stage)) {}
 Live2DControlServer::~Live2DControlServer() = default;
 void Live2DControlServer::start() { impl_->start(); }
 void Live2DControlServer::request_stop() noexcept { impl_->request_stop(); }

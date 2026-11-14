@@ -249,7 +249,7 @@ GodotRuntimeResult GodotRuntime::initialize(GodotRuntimeConfig config) {
         return invalid_state("initialize", GodotRuntimeState::created);
     }
 
-    state_.store(GodotRuntimeState::initializing, std::memory_order_release);
+    state_.store(GodotRuntimeState::initializing);
     const std::optional<std::string> validation_error = validate_config(config);
     if (validation_error) {
         return invalid_configuration(*validation_error);
@@ -270,7 +270,7 @@ GodotRuntimeResult GodotRuntime::initialize(GodotRuntimeConfig config) {
             "initialize", "unknown exception", GodotRuntimeState::failed);
     }
 
-    state_.store(GodotRuntimeState::initialized, std::memory_order_release);
+    state_.store(GodotRuntimeState::initialized);
     return GodotRuntimeResult::success(GodotRuntimeState::initialized);
 }
 
@@ -278,7 +278,7 @@ GodotRuntimeResult GodotRuntime::load_model() {
     if (state() != GodotRuntimeState::initialized) {
         return invalid_state("load_model", GodotRuntimeState::initialized);
     }
-    state_.store(GodotRuntimeState::model_loading, std::memory_order_release);
+    state_.store(GodotRuntimeState::model_loading);
 
     try {
         GodotRuntimeBackendResult result =
@@ -295,7 +295,7 @@ GodotRuntimeResult GodotRuntime::load_model() {
             "load_model", "unknown exception", GodotRuntimeState::failed);
     }
 
-    state_.store(GodotRuntimeState::ready, std::memory_order_release);
+    state_.store(GodotRuntimeState::ready);
     return GodotRuntimeResult::success(GodotRuntimeState::ready);
 }
 
@@ -318,8 +318,8 @@ GodotRuntimeResult GodotRuntime::start() {
             "start", "unknown exception", GodotRuntimeState::failed);
     }
 
-    stop_requested_.store(false, std::memory_order_release);
-    state_.store(GodotRuntimeState::running, std::memory_order_release);
+    stop_requested_.store(false);
+    state_.store(GodotRuntimeState::running);
     return GodotRuntimeResult::success(GodotRuntimeState::running);
 }
 
@@ -367,7 +367,7 @@ GodotRuntimeResult GodotRuntime::step(
         return invalid_state("step", GodotRuntimeState::running);
     }
     if (stop_requested()) {
-        state_.store(GodotRuntimeState::stopping, std::memory_order_release);
+        state_.store(GodotRuntimeState::stopping);
         return GodotRuntimeResult::success(GodotRuntimeState::stopping);
     }
 
@@ -405,7 +405,7 @@ GodotRuntimeResult GodotRuntime::step(
 }
 
 void GodotRuntime::request_stop() noexcept {
-    stop_requested_.store(true, std::memory_order_release);
+    stop_requested_.store(true);
 }
 
 GodotRuntimeResult GodotRuntime::shutdown() {
@@ -413,8 +413,8 @@ GodotRuntimeResult GodotRuntime::shutdown() {
         return GodotRuntimeResult::success(GodotRuntimeState::stopped);
     }
 
-    stop_requested_.store(true, std::memory_order_release);
-    state_.store(GodotRuntimeState::stopping, std::memory_order_release);
+    stop_requested_.store(true);
+    state_.store(GodotRuntimeState::stopping);
     backend_->request_stop();
 
     try {
@@ -431,16 +431,16 @@ GodotRuntimeResult GodotRuntime::shutdown() {
             "shutdown", "unknown exception", GodotRuntimeState::stopped);
     }
 
-    state_.store(GodotRuntimeState::stopped, std::memory_order_release);
+    state_.store(GodotRuntimeState::stopped);
     return GodotRuntimeResult::success(GodotRuntimeState::stopped);
 }
 
 GodotRuntimeState GodotRuntime::state() const noexcept {
-    return state_.load(std::memory_order_acquire);
+    return state_.load();
 }
 
 bool GodotRuntime::stop_requested() const noexcept {
-    return stop_requested_.load(std::memory_order_acquire);
+    return stop_requested_.load();
 }
 
 std::optional<GodotRuntimeError> GodotRuntime::last_error() const {
@@ -465,7 +465,7 @@ GodotRuntimeResult GodotRuntime::invalid_state(
 }
 
 GodotRuntimeResult GodotRuntime::invalid_configuration(std::string message) {
-    state_.store(GodotRuntimeState::failed, std::memory_order_release);
+    state_.store(GodotRuntimeState::failed);
     GodotRuntimeError error(
         GodotRuntimeErrorCode::invalid_configuration,
         GodotRuntimeState::failed,
@@ -486,7 +486,7 @@ GodotRuntimeResult GodotRuntime::invalid_frame(std::string message) {
 GodotRuntimeResult GodotRuntime::backend_failure(
     GodotRuntimeBackendResult result,
     GodotRuntimeState failure_state) {
-    state_.store(failure_state, std::memory_order_release);
+    state_.store(failure_state);
     GodotRuntimeErrorCode code = result.code();
     if (code == GodotRuntimeErrorCode::none) {
         code = GodotRuntimeErrorCode::backend_failure;
@@ -504,7 +504,7 @@ GodotRuntimeResult GodotRuntime::exception_failure(
     const char* operation,
     const char* detail,
     GodotRuntimeState failure_state) {
-    state_.store(failure_state, std::memory_order_release);
+    state_.store(failure_state);
     std::string message(operation);
     message += " backend threw an exception: ";
     message += detail;
@@ -524,7 +524,7 @@ void GodotRuntime::shutdown_noexcept() noexcept {
     try {
         shutdown();
     } catch (...) {
-        state_.store(GodotRuntimeState::stopped, std::memory_order_release);
+        state_.store(GodotRuntimeState::stopped);
     }
 }
 

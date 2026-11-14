@@ -4,12 +4,14 @@
 #include "vtb/config/vtb_application_config.hpp"
 
 namespace vtb {
-class Live2DTrackingSession;
+class FaceTrackingStage;
 
 class Live2DControlServer final {
 public:
-    // session must outlive this server; stop() joins all control requests.
-    Live2DControlServer(ControlConfiguration config, Live2DTrackingSession& session);
+    // tracking_stage must outlive this server; stop() joins all requests.
+    Live2DControlServer(
+        ControlConfiguration config,
+        FaceTrackingStage& tracking_stage);
     ~Live2DControlServer();
     Live2DControlServer(const Live2DControlServer&) = delete;
     Live2DControlServer& operator=(const Live2DControlServer&) = delete;

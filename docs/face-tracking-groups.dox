@@ -1,0 +1,505 @@
+/**
+ * @defgroup face_tracking 专题二：人脸跟踪处理
+ * @brief 从最新摄像头帧到人脸结果，再交给 Godot 所有者线程的完整处理链路。
+ *
+ * 本专题以 VideoFrameChannel 交付的 DecodedFrameLease 为上游边界，以 Godot
+ * 所有者线程从 Live2DTrackingChannel 非阻塞取得 Live2DTrackingSnapshot 为下游边界。
+ * 核心类按职责放入四个入口：
+ *
+ * 1. @ref face_tracking_coordination "接入与编排"：VtbApplication 组合根、
+ *    VideoCaptureStage、FaceTrackingStage、Live2DTrackingPipeline、FacePipeline。
+ * 2. @ref face_tracking_model_input "模型输入资源"：RgaDevice、RgaImageTransformer、
+ *    ModelInputLease。
+ * 3. @ref face_tracking_inference "检测与关键点"：RknnFaceDetector、RknnLandmarkEstimator。
+ * 4. @ref face_tracking_geometry_output "几何与结果"：OpenSeeFaceGeometryEstimator、
+ *    FaceTrackingResult。
+ *
+ * ImageTransformer、FaceDetector、LandmarkEstimator、FaceGeometryEstimator、RgaBuffer、
+ * ModelInputView、ModelInputSpec、CropRegion、FaceBox、LandmarkEstimate、FacePose、
+ * FaceExpression 以及实现文件内的 SourceRegistration、RknnModel 等资源包装类通过
+ * 完整类页面或协作图提供进阶查询。
+ *
+ * @par 专题边界与正常数据路径
+ *
+ * @code
+ * VideoCaptureStage::VideoSource::read()
+ *     -> VideoFrameChannel::publish(DecodedFrameLease)
+ *     -> FaceTrackingStage::wait_pop()
+ *     -> Live2DTrackingPipeline::process(frame.view())
+ *     -> FacePipeline::process(frame.view())
+ *     -> RgaImageTransformer::prepare()
+ *     -> [按需] RknnFaceDetector::detect()
+ *     -> RgaImageTransformer::prepare(face ROI)
+ *     -> RknnLandmarkEstimator::estimate()
+ *     -> OpenSeeFaceGeometryEstimator::estimate()
+ *     -> optional<FaceTrackingResult>
+ *     -> Live2DFaceMapper::update()
+ *     -> Live2DTrackingChannel::publish(Live2DTrackingSnapshot)
+ *     -> Godot 所有者线程 try_pop()
+ *     -> Live2DTrackingSnapshot
+ *     -> LibGodotInstance::submit()
+ * @endcode
+ *
+ * FacePipeline 在没有历史框、跟踪置信度低于阈值，或达到非零周期重检间隔时执行
+ * 整帧检测。其他帧沿用上一帧 LandmarkEstimate::updated_box()；当前跟踪路径由历史
+ * 人脸框与本帧 66 点结果共同推进。检测与关键点在当前产品装配中分别使用 NPU Core0
+ * 和 Core1，单帧内按人脸框依赖关系串行执行。
+ *
+ * Live2DTrackingPipeline 在构造时固定 FacePipeline 和 Live2DFaceMapper 配置，且不创建
+ * 线程或持有通道。FaceTrackingStage 在自己的线程内调用该同步主体，再把完整
+ * Live2DTrackingSnapshot 发布到容量一的跟踪通道。Godot 所有者线程在自身循环中调用
+ * try_pop() 非阻塞取得新快照并提交给 LibGodotInstance；通道结束且没有剩余快照时
+ * 退出渲染循环。通道满时释放旧快照，保留最新状态。
+ *
+ * @par 建议阅读顺序
+ *
+ * 先看完整时序图，观察一帧如何跨越采集、人脸处理和 Godot 渲染三个执行上下文。
+ * 随后从人脸工作线程进入对象结构，再分别展开 RGA 源注册缓存、RGA 模型输入缓存和
+ * 每个 RKNN 模型实例的资源，解释时序中每一次借用、复用与释放由谁负责。
+ *
+ * @par 连续帧人脸处理的完整控制时序
+ *
+ * @mermaid{face_tracking_single_frame_sequence} "采集线程生产最新帧、人脸线程消费后生产最新状态、渲染线程按固定周期读取的完整时序"
+ * sequenceDiagram
+ *     participant Capture as 摄像头采集线程
+ *     participant InputSlot as VideoFrameChannel<br/>BoundedFifoChannel
+ *     participant Worker as 人脸处理线程
+ *     participant Consumer as FaceTrackingStage
+ *     participant Subject as Live2DTrackingPipeline
+ *     participant Pipeline as FacePipeline
+ *     participant RGA as RgaImageTransformer
+ *     participant Detector as RknnFaceDetector
+ *     participant Landmark as RknnLandmarkEstimator
+ *     participant Geometry as OpenSeeFaceGeometryEstimator
+ *     participant Mapper as Live2DFaceMapper
+ *     participant TrackingChannel as Live2DTrackingChannel<br/>BoundedFifoChannel，无独立线程
+ *     participant Render as Godot所有者兼渲染执行线程
+ *     participant Godot as LibGodotInstance
+ *
+ *     Note over Pipeline,Landmark: 黄色曲线=控制判断或跨帧算法状态变化；紫色半透明背景=条件控制区域
+ *     Note over Capture,Worker: 上游容量一通道采用 drop_oldest；处理线程无帧时在 wait_pop() 阻塞
+ *     Note over TrackingChannel,Render: 下游容量一通道采用 drop_oldest；Godot 所有者线程调用 try_pop() 非阻塞读取
+ *
+ *     par 摄像头采集线程：持续发布最新帧
+ *         loop 每次 VideoSource::read() 得到 DecodedFrameLease
+ *             Capture->>InputSlot: publish(move(frame))：通道满时释放最旧帧
+ *             Note over Capture,InputSlot: 若旧帧尚未取走，旧 Lease 在锁外析构并归还对应 V4L2 buffer
+ *             InputSlot-->>Worker: not_empty_.notify_one()：通知最新帧可取
+ *         end
+ *
+ *     and 人脸处理线程：阻塞取得最新帧后同步处理
+ *         loop 每次处理一张槽位当前保存的最新帧
+ *             Worker->>InputSlot: wait_pop()：无帧且未结束时阻塞
+ *             InputSlot-->>Worker: move(最新 DecodedFrameLease)
+ *             Worker->>Consumer: process_frame(move(DecodedFrameLease))
+ *             Consumer->>Subject: process(frame.view())
+ *             Subject->>Pipeline: process(frame.view())
+ *             Pipeline->>Pipeline: 判断本帧路径：计算 must_detect
+ *             Note over Pipeline: 无历史框 / 上一成功帧关键点平均置信度不足 / 到达重检间隔时执行整帧检测
+ *
+ *             alt must_detect == true
+ *                 rect rgba(163, 113, 247, 0.07)
+ *                     Pipeline->>RGA: prepare(frame, full_frame_crop, detector input_spec)
+ *                     RGA-->>Pipeline: detector_input（224×224 RGB888 DMA-BUF）
+ *                     Pipeline->>Detector: detect(detector_input.view())
+ *                     Detector->>Detector: rknn_run() + 检测输出后处理
+ *                     Detector-->>Pipeline: optional<FaceDetection>
+ *                 end
+ *
+ *                 alt 未检测到人脸或当前帧检测置信度低于阈值
+ *                     rect rgba(163, 113, 247, 0.07)
+ *                         Pipeline->>Pipeline: 跟踪失效：reset_tracking()
+ *                         Note over Pipeline: 清空历史框、置信度、检测间隔计数和几何状态；下一帧重新检测
+ *                         Pipeline-->>Subject: nullopt（process() 提前返回）
+ *                     end
+ *                 else 检测成功
+ *                     Pipeline->>Pipeline: 检测成功：保存检测框和检测置信度
+ *                     Note over Pipeline: 建立当前帧人脸框并重置检测间隔计数；随后用该框裁剪关键点 ROI
+ *                     Pipeline->>RGA: prepare(frame, face_crop, landmark input_spec)
+ *                     RGA-->>Pipeline: landmark_input（224×224 RGB888 DMA-BUF）
+ *                     Pipeline->>Landmark: estimate(landmark_input.view())
+ *                     Landmark->>Landmark: rknn_run() + 66 点后处理
+ *                     Landmark-->>Pipeline: LandmarkEstimate（updated_box + 66 点 + 当前平均置信度）
+ *
+ *                     alt 当前帧 66 点平均置信度小于等于阈值
+ *                         rect rgba(163, 113, 247, 0.07)
+ *                             Pipeline->>Pipeline: 跟踪失效：reset_tracking()
+ *                             Note over Pipeline: 清空本次检测建立的历史状态；下一帧因无历史框而重新整帧检测
+ *                             Pipeline-->>Subject: nullopt（process() 提前返回）
+ *                         end
+ *                     else 当前帧 66 点平均置信度合格
+ *                         Pipeline->>Pipeline: 关键点可信：保存本帧 updated_box 给下一帧
+ *                         Note over Pipeline: 保存当前平均置信度并增加检测间隔计数；新框成为下一帧入口状态
+ *                         Pipeline->>Geometry: estimate(frame, updated_box, landmarks)
+ *                         Geometry->>Geometry: solvePnP + 姿态/表情更新
+ *                         Geometry-->>Pipeline: FaceGeometryResult
+ *                         Pipeline-->>Subject: FaceTrackingResult
+ *                     end
+ *                 end
+ *
+ *             else must_detect == false
+ *                 rect rgba(163, 113, 247, 0.07)
+ *                     Pipeline->>Pipeline: 继续跟踪：读取上一成功帧的 updated_box
+ *                     Note over Pipeline: 用上一成功帧的人脸框裁剪当前帧 ROI，再用当前帧66点结果决定能否继续跟踪
+ *                 end
+ *                 Pipeline->>RGA: prepare(frame, face_crop, landmark input_spec)
+ *                 RGA-->>Pipeline: landmark_input（224×224 RGB888 DMA-BUF）
+ *                 Pipeline->>Landmark: estimate(landmark_input.view())
+ *                 Landmark->>Landmark: rknn_run() + 66 点后处理
+ *                 Landmark-->>Pipeline: LandmarkEstimate（updated_box + 66 点 + 当前平均置信度）
+ *
+ *                 alt 当前帧 66 点平均置信度小于等于阈值
+ *                     rect rgba(163, 113, 247, 0.07)
+ *                         Pipeline->>Pipeline: 跟踪失效：reset_tracking()
+ *                         Note over Pipeline: 清空历史框、置信度、检测间隔计数和几何状态；下一帧重新整帧检测
+ *                         Pipeline-->>Subject: nullopt（process() 提前返回）
+ *                     end
+ *                 else 当前帧 66 点平均置信度合格
+ *                     Pipeline->>Pipeline: 关键点可信：保存本帧 updated_box 给下一帧
+ *                     Note over Pipeline: 保存当前平均置信度并增加检测间隔计数；新框成为下一帧入口状态
+ *                     Pipeline->>Geometry: estimate(frame, updated_box, landmarks)
+ *                     Geometry->>Geometry: solvePnP + 姿态/表情更新
+ *                     Geometry-->>Pipeline: FaceGeometryResult
+ *                     Pipeline-->>Subject: FaceTrackingResult
+ *                 end
+ *             end
+ *
+ *             Note over Subject,Pipeline: FacePipeline 的所有结果在同步任务主体中汇合
+ *             Subject->>Mapper: mapper_.update(result)
+ *             Mapper->>Mapper: mapper_.update()：计算最新 Live2D 参数
+ *             Mapper-->>Subject: Live2DMappingResult
+ *             Subject-->>Consumer: Live2DMappingResult
+ *             Consumer->>TrackingChannel: publish(Live2DTrackingSnapshot)
+ *             TrackingChannel->>TrackingChannel: 满载时在锁外释放旧快照
+ *             Consumer-->>Worker: process_frame() 返回，本帧 Lease 析构
+ *             Note over InputSlot,Pipeline: 本帧结束；处理线程回到 wait_pop()
+ *         end
+ *
+ *     and Godot所有者兼渲染执行线程：按固定渲染周期消费人脸线程发布的最新状态
+ *         loop 每个 output_fps 渲染周期
+ *             Render->>TrackingChannel: try_pop()（非阻塞）
+ *             TrackingChannel-->>Render: optional<Live2DTrackingSnapshot>
+ *             alt 取得新快照
+ *                 rect rgba(163, 113, 247, 0.07)
+ *                     Render->>Godot: submit(snapshot)
+ *                     Render->>Godot: run_frame()
+ *                     Render->>Render: sleep_until(next_frame_deadline)：只等待本周期剩余时间
+ *                 end
+ *             else 没有快照且 tracking_channel.finished() == true
+ *                 rect rgba(163, 113, 247, 0.07)
+ *                     Note over Render: 通道已排空并结束；退出渲染循环，本周期不调用 run_frame()
+ *                     Render->>Render: break
+ *                 end
+ *             else 暂时没有快照且通道仍在运行
+ *                 rect rgba(163, 113, 247, 0.07)
+ *                     Note over Render: 保持 Godot 内最近参数，本周期跳过 submit()
+ *                     Render->>Godot: run_frame()
+ *                     Render->>Render: sleep_until(next_frame_deadline)：只等待本周期剩余时间
+ *                 end
+ *             end
+ *         end
+ *     end
+ * @endmermaid
+ *
+ * 时序图给出运行顺序；下面的结构图从 FaceTrackingStage 开始，解释人脸工作线程
+ * 同步调用的任务主体及其内部资源。
+ *
+ * @par 一、人脸工作线程执行的对象结构
+ *
+ * 从 FaceTrackingStage 开始向下阅读。红色实线表示独占成员或值成员，蓝色实线
+ * 表示 shared_ptr 保活，黄色虚线表示线程执行期间的借用。两条消息通道作为
+ * Stage 的借用边界，同步任务对象和硬件适配器由 Stage 递归拥有。
+ *
+ * @mermaid{face_tracking_worker_object_structure} "人脸工作线程、同步任务主体与 RGA/RKNN 对象层次"
+ * flowchart TB
+ *     App["VtbApplication::run()<br/>构造阶段"]
+ *     Stage["FaceTrackingStage<br/>人脸处理阶段所有者"]
+ *     Worker["worker_ / thread_main()<br/>人脸工作线程"]
+ *     InputChannel["VideoFrameChannel<br/>输入通道"]
+ *     OutputChannel["Live2DTrackingChannel<br/>输出通道"]
+ *     Tracking["Live2DTrackingPipeline<br/>同步任务主体"]
+ *     Face["FacePipeline<br/>人脸算法编排"]
+ *     Mapper["Live2DFaceMapper<br/>值成员"]
+ *     RGA["RgaImageTransformer<br/>图像预处理"]
+ *     Device["RgaDevice<br/>同步 RGA 执行资源"]
+ *     Detector["RknnFaceDetector<br/>Core0"]
+ *     DetectorModel["RknnModel<br/>检测实例"]
+ *     Landmark["RknnLandmarkEstimator<br/>Core1"]
+ *     LandmarkModel["RknnModel<br/>关键点实例"]
+ *     Geometry["OpenSeeFaceGeometryEstimator<br/>姿态与表情"]
+ *
+ *     App -->|"红色：局部对象生命期覆盖 run()"| Stage
+ *     Stage -->|"红色：拥有 std::thread"| Worker
+ *     Stage -->|"红色：unique_ptr tracking_pipeline_"| Tracking
+ *     Stage -.->|"黄色：input_channel_ 引用"| InputChannel
+ *     Stage -.->|"黄色：output_channel_ 引用"| OutputChannel
+ *     Worker -.->|"黄色：在该线程同步调用"| Tracking
+ *     Tracking -->|"红色：unique_ptr face_pipeline_"| Face
+ *     Tracking -->|"红色：按值拥有 mapper_"| Mapper
+ *     Face -->|"红色：unique_ptr image_transformer_"| RGA
+ *     Face -->|"红色：unique_ptr detector_"| Detector
+ *     Face -->|"红色：unique_ptr landmark_estimator_"| Landmark
+ *     Face -->|"红色：unique_ptr geometry_estimator_"| Geometry
+ *     RGA -->|"蓝色：shared_ptr 保持设备有效"| Device
+ *     Detector -->|"红色：unique_ptr model_"| DetectorModel
+ *     Landmark -->|"红色：unique_ptr model_"| LandmarkModel
+ *
+ *     classDef neutral fill:#161b22,stroke:#8b949e,color:#ffffff
+ *     class App,Stage,Worker,InputChannel,OutputChannel,Tracking,Face,Mapper,RGA,Device,Detector,DetectorModel,Landmark,LandmarkModel,Geometry neutral
+ *     linkStyle 0,1,2,6,7,8,9,10,11,13,14 stroke:#ff5d5d,stroke-width:3px,color:#ff7b72
+ *     linkStyle 12 stroke:#58a6ff,stroke-width:3px,color:#58a6ff
+ *     linkStyle 3,4,5 stroke:#e3b341,stroke-width:2px,stroke-dasharray:6 4,color:#e3b341
+ * @endmermaid
+ *
+ * 对象构造与缓存建立发生在不同时机：
+ *
+ * | 时机 | 执行上下文 | 建立的对象或状态 |
+ * | --- | --- | --- |
+ * | `VtbApplication::run()` 构造阶段 | 启动工作线程前的调用线程 | `FacePipeline::create()` 创建 RgaDevice、RgaImageTransformer、两个 RKNN 模型实例和几何估计器；RKNN 构造期建立 context、张量属性和预分配输出存储。 |
+ * | `FaceTrackingStage::start()` | 启动调用线程 | 创建 `worker_`，并等待工作线程完成源初始化。 |
+ * | `thread_main()` 进入接收循环前 | 人脸工作线程 | `begin_source()` 重置跟踪状态，记录当前 `VideoStreamGeneration`，并以空的 RGA 源注册缓存开始。 |
+ * | 首次处理具体输入 Buffer | 人脸工作线程 | RGA 注册源 DMA-BUF、分配模型输入 Buffer；每个 RknnModel 首次收到自己的 DMA-BUF 时建立 `RknnInputBinding`。 |
+ *
+ * @par 二、RGA 源 Buffer 注册缓存的资源结构
+ *
+ * 这张图围绕一个源代次的 `source_buffers_` 展开。红色实线是独占成员，蓝色实线是
+ * shared_ptr 保活，黄色虚线是当前 `prepare()` 的借用访问，灰色线是创建或清理动作。
+ *
+ * @mermaid{face_tracking_rga_source_cache_structure} "RgaImageTransformer 内的源 DMA-BUF 注册缓存"
+ * flowchart TB
+ *     Transformer["RgaImageTransformer"]
+ *     Impl["RgaImageTransformer::Impl"]
+ *     Device["RgaDevice"]
+ *     Generation["active_generation_<br/>当前源代次"]
+ *     Cache["source_buffers_<br/>vector&lt;SourceRegistration&gt;"]
+ *     Registration["SourceRegistration[N]<br/>源 fd 与布局匹配信息"]
+ *     Buffer["RgaBuffer<br/>源 DMA-BUF 注册租约"]
+ *     OwnedFd["UniqueFd<br/>F_DUPFD_CLOEXEC 复制 fd"]
+ *     Handle["RGA handle<br/>importbuffer_fd()"]
+ *     Frame["DecodedFrameLease / FramePlaneView<br/>当前源 fd"]
+ *     SyncUse["improcess(..., IM_SYNC)<br/>同步读取源 Buffer"]
+ *     Retire["retire_source(generation)<br/>source_buffers_.clear()"]
+ *
+ *     Transformer -->|"红色：unique_ptr impl_"| Impl
+ *     Impl -->|"蓝色：shared_ptr device_"| Device
+ *     Impl -->|"红色：optional 值状态"| Generation
+ *     Impl -->|"红色：按值拥有容器"| Cache
+ *     Cache -->|"红色：按值拥有注册项"| Registration
+ *     Registration -->|"蓝色：shared_ptr 保活"| Buffer
+ *     Device -->|"灰色：复制 fd 并导入后返回"| Buffer
+ *     Buffer -->|"红色：独占复制 fd"| OwnedFd
+ *     Buffer -->|"红色：独占导入 handle"| Handle
+ *     Frame -.->|"黄色：借用源 fd 与像素"| SyncUse
+ *     Registration -.->|"黄色：提供已注册 handle"| SyncUse
+ *     Retire -->|"灰色：清空当前代次的注册项"| Cache
+ *
+ *     classDef neutral fill:#161b22,stroke:#8b949e,color:#ffffff
+ *     class Transformer,Impl,Device,Generation,Cache,Registration,Buffer,OwnedFd,Handle,Frame,SyncUse,Retire neutral
+ *     linkStyle 0,2,3,4,7,8 stroke:#ff5d5d,stroke-width:3px,color:#ff7b72
+ *     linkStyle 1,5 stroke:#58a6ff,stroke-width:3px,color:#58a6ff
+ *     linkStyle 9,10 stroke:#e3b341,stroke-width:2px,stroke-dasharray:6 4,color:#e3b341
+ *     linkStyle 6,11 stroke:#8b949e,stroke-width:1.5px,color:#8b949e
+ * @endmermaid
+ *
+ * `begin_source()` 设置 `active_generation_`。首次看到一个源 DMA-BUF 时，RgaDevice
+ * 复制 fd、导入 RGA handle，SourceRegistration 保存匹配信息并保活 RgaBuffer。
+ * 后续帧匹配同一源描述时复用该注册项。`retire_source()` 清空当前代次缓存，
+ * 最后一份 shared_ptr 析构时释放 RGA handle 并关闭复制 fd。
+ *
+ * @par 三、RGA 模型输入 Buffer 和每次 ModelInputLease
+ *
+ * 这张图从 `output_buffer_` 缓存展开，再连到一次 `prepare()` 返回的租约。
+ * 缓存和 KeepRgaBufferAlive 各保留一份 shared_ptr，ModelInputView 在租约窗口内提供
+ * RGB 地址、DMA-BUF fd 和 source_crop。
+ *
+ * @mermaid{face_tracking_rga_output_cache_structure} "RGA 输出缓存与 ModelInputLease 保活结构"
+ * flowchart TB
+ *     Impl["RgaImageTransformer::Impl"]
+ *     Device["RgaDevice"]
+ *     Cache["output_buffer_<br/>shared_ptr&lt;RgaBuffer&gt;"]
+ *     Buffer["RgaBuffer<br/>224×224 RGB888 模型输入"]
+ *     DmaFd["UniqueFd<br/>DMA heap fd"]
+ *     Mapping["mapping<br/>mmap CPU 地址"]
+ *     Handle["RGA handle<br/>输出目标"]
+ *     Lease["ModelInputLease<br/>本次输入租约"]
+ *     KeepAlive["return_buffer_<br/>KeepRgaBufferAlive"]
+ *     View["ModelInputView<br/>FrameView + Spec + source_crop"]
+ *     Rknn["RknnModel::run()<br/>本次同步借用"]
+ *
+ *     Impl -->|"红色：按值拥有 shared_ptr 成员"| Cache
+ *     Cache -->|"蓝色：缓存一份 shared_ptr"| Buffer
+ *     Impl -->|"蓝色：shared_ptr device_"| Device
+ *     Device -->|"灰色：allocate_buffer() 返回"| Buffer
+ *     Buffer -->|"红色：独占 DMA heap fd"| DmaFd
+ *     Buffer -->|"红色：独占 mmap"| Mapping
+ *     Buffer -->|"红色：独占 RGA handle"| Handle
+ *     Lease -->|"红色：按值拥有保活动作"| KeepAlive
+ *     KeepAlive -->|"蓝色：shared_ptr 覆盖本次输入"| Buffer
+ *     Lease -->|"红色：按值拥有 view_"| View
+ *     View -.->|"黄色：借用 RGB 地址与 fd"| Buffer
+ *     Rknn -.->|"黄色：Lease 有效期内读取"| View
+ *
+ *     classDef neutral fill:#161b22,stroke:#8b949e,color:#ffffff
+ *     class Impl,Device,Cache,Buffer,DmaFd,Mapping,Handle,Lease,KeepAlive,View,Rknn neutral
+ *     linkStyle 0,4,5,6,7,9 stroke:#ff5d5d,stroke-width:3px,color:#ff7b72
+ *     linkStyle 1,2,8 stroke:#58a6ff,stroke-width:3px,color:#58a6ff
+ *     linkStyle 10,11 stroke:#e3b341,stroke-width:2px,stroke-dasharray:6 4,color:#e3b341
+ *     linkStyle 3 stroke:#8b949e,stroke-width:1.5px,color:#8b949e
+ * @endmermaid
+ *
+ * `output_buffer()` 按 ModelInputSpec 和当前 shared_ptr 占用状态选择复用或分配。
+ * `prepare()` 把输出 Buffer 的地址和 fd 放入 ModelInputView，并把另一份 shared_ptr
+ * 放入 KeepRgaBufferAlive。Lease 析构时结束本次保活；缓存替换后，旧 Buffer
+ * 在最后一份 Lease 结束时释放 handle、mmap 和 fd。
+ *
+ * @par 四、每个 RKNN 模型实例内部的资源
+ *
+ * 检测器和关键点估计器各自独占一个 RknnModel。图中的“单个实例成员结构”
+ * 在 Core0 检测实例与 Core1 关键点实例中各存在一份，两份资源独立。
+ *
+ * @mermaid{face_tracking_rknn_model_resource_structure} "两个 RKNN 模型实例及每个实例拥有的 context、输入绑定和输出存储"
+ * flowchart TB
+ *     Face["FacePipeline"]
+ *     Detector["RknnFaceDetector<br/>Core0"]
+ *     Landmark["RknnLandmarkEstimator<br/>Core1"]
+ *     DetectorModel["RknnModel<br/>检测实例"]
+ *     LandmarkModel["RknnModel<br/>关键点实例"]
+ *     ModelLayout["单个 RknnModel 成员结构<br/>两个实例各有一份"]
+ *     Context["rknn_context<br/>rknn_init() 创建"]
+ *     Attributes["input_attr_ / output_attrs_<br/>构造期查询"]
+ *     InputBinding["input_binding_<br/>unique_ptr&lt;RknnInputBinding&gt;"]
+ *     DupFd["duplicated_fd_<br/>F_DUPFD_CLOEXEC"]
+ *     InputMap["mapping_<br/>mmap"]
+ *     InputMemory["rknn_tensor_mem*<br/>rknn_create_mem_from_fd()"]
+ *     OutputStorage["output_buffers_<br/>预分配 float 存储"]
+ *     OutputDescriptors["outputs_<br/>rknn_output 描述符"]
+ *     TensorViews["output_tensors_<br/>RknnTensor 视图"]
+ *     OutputLease["RknnOutputLease<br/>一次 outputs_release 责任"]
+ *     OutputRelease["rknn_outputs_release()<br/>结束本次输出占用"]
+ *     Postprocess["Detector / Landmark 后处理"]
+ *
+ *     Face -->|"红色：unique_ptr detector_"| Detector
+ *     Face -->|"红色：unique_ptr landmark_estimator_"| Landmark
+ *     Detector -->|"红色：unique_ptr model_"| DetectorModel
+ *     Landmark -->|"红色：unique_ptr model_"| LandmarkModel
+ *     DetectorModel -->|"灰色：按该成员结构各自展开"| ModelLayout
+ *     LandmarkModel -->|"灰色：按该成员结构各自展开"| ModelLayout
+ *     ModelLayout -->|"红色：独占 context"| Context
+ *     ModelLayout -->|"红色：按值拥有张量属性"| Attributes
+ *     ModelLayout -->|"红色：首次 DMA-BUF 输入延迟建立"| InputBinding
+ *     InputBinding -->|"红色：独占复制 fd"| DupFd
+ *     InputBinding -->|"红色：独占 mmap"| InputMap
+ *     InputBinding -->|"红色：独占 RKNN memory"| InputMemory
+ *     ModelLayout -->|"红色：按值拥有预分配存储"| OutputStorage
+ *     ModelLayout -->|"红色：按值拥有描述符"| OutputDescriptors
+ *     ModelLayout -->|"红色：按值拥有张量视图"| TensorViews
+ *     ModelLayout -->|"灰色：run() 成功后构造"| OutputLease
+ *     OutputLease -->|"红色：独占一次释放责任"| OutputRelease
+ *     OutputDescriptors -.->|"黄色：buf 指向预分配存储"| OutputStorage
+ *     TensorViews -.->|"黄色：values_ 指向预分配存储"| OutputStorage
+ *     OutputLease -.->|"黄色：本次 run() 借用输出成员"| ModelLayout
+ *     Postprocess -.->|"黄色：Lease 有效期内读取 tensors()"| TensorViews
+ *
+ *     classDef neutral fill:#161b22,stroke:#8b949e,color:#ffffff
+ *     class Face,Detector,Landmark,DetectorModel,LandmarkModel,ModelLayout,Context,Attributes,InputBinding,DupFd,InputMap,InputMemory,OutputStorage,OutputDescriptors,TensorViews,OutputLease,OutputRelease,Postprocess neutral
+ *     linkStyle 0,1,2,3,6,7,8,9,10,11,12,13,14,16 stroke:#ff5d5d,stroke-width:3px,color:#ff7b72
+ *     linkStyle 17,18,19,20 stroke:#e3b341,stroke-width:2px,stroke-dasharray:6 4,color:#e3b341
+ *     linkStyle 4,5,15 stroke:#8b949e,stroke-width:1.5px,color:#8b949e
+ * @endmermaid
+ *
+ * RknnModel 构造期加载模型、创建 context、查询输入输出属性，并为每个输出
+ * 预分配 float 存储。首次 DMA-BUF 输入为当前模型建立 RknnInputBinding，
+ * 同一输入 Buffer 在后续帧中复用绑定。每次 `run()` 取得 RknnOutputLease，
+ * 后处理在租约期间读取预分配存储，租约结束时执行 `rknn_outputs_release()`。
+ * RknnModel 析构时先释放输入绑定，再执行 `rknn_destroy(context_)`。
+ *
+ *
+ * @par RKNN 输出张量如何变成检测框和 66 点
+ *
+ * 两个实现都在 RknnOutputLease 有效期内完成 CPU 后处理，并把普通值结果带出输出
+ * 租约。RknnTensor::value(channel, y, x) 统一处理 NCHW 和 NHWC 索引。
+ *
+ * | 实现 | 已验证的输出契约 | 当前 CPU 后处理 |
+ * | --- | --- | --- |
+ * | RknnFaceDetector | 两个 `2×56×56` 张量 | 第一个张量的通道 0 提供置信度、通道 1 提供归一化半径；第二个张量的通道 0 提供 max-pool 峰值。遍历局部峰值后选择最高置信度位置。 |
+ * | RknnLandmarkEstimator | 一个 `198×28×28` 张量 | 通道 0–65 提供 66 个关键点热力图，66–131 提供行/Y 偏移，132–197 提供列/X 偏移；每点先取热力图峰值，再读取同位置偏移。 |
+ *
+ * 检测网格的每一格对应 224×224 输入中的 4 像素，半径值乘以 112 恢复模型输入
+ * 像素半径；检测框随后使用 source_crop 的偏移和横纵缩放恢复到源帧坐标。关键点路径
+ * 将 28×28 峰值与 clamped_logit() 解码的行列偏移恢复到 224×224，再映射到
+ * source_crop；66 点平均置信度形成 LandmarkEstimate::confidence()，点集包围盒形成
+ * updated_box()。
+ *
+ * @par 结果值与线程交接
+ *
+ * FaceTrackingResult、Live2DMappingResult 和 Live2DTrackingSnapshot 由普通值承载；
+ * 66 点关键点先由几何估计器生成 yaw/pitch/roll 与表情结果，随后
+ * Live2DFaceMapper 才应用校准、平滑和方向配置。水平映射使用
+ * `ParamAngleX = (yaw - neutral_yaw) * angle_x_sign`；当前同向示例配置为 `+1.0`。
+ * FaceTrackingStage 在状态锁下生成递增 snapshot_generation 的完整快照，再发布到
+ * Live2DTrackingChannel。通道的 drop_oldest 策略由上方完整时序图说明。
+ * @htmlonly
+ * <script src="doxygen-mermaid-viewer.js"></script>
+ * @endhtmlonly
+ */
+
+/**
+ * @defgroup face_tracking_coordination 接入与编排
+ * @ingroup face_tracking
+ * @brief 两个 Stage、两条消息通道、单帧人脸算法及跟踪状态协调。
+ */
+
+/**
+ * @defgroup face_tracking_model_input 模型输入资源
+ * @ingroup face_tracking
+ * @brief 源帧 ROI 到 RKNN 输入 DMA-BUF 的转换、共享有效期和借用视图。
+ */
+
+/**
+ * @defgroup face_tracking_inference 检测与关键点
+ * @ingroup face_tracking
+ * @brief RKNN 人脸检测、66 点推理及源帧坐标后处理。
+ */
+
+/**
+ * @defgroup face_tracking_geometry_output 几何与结果
+ * @ingroup face_tracking
+ * @brief OpenSeeFace 兼容姿态和表情计算，以及单帧跟踪结果边界。
+ */
+
+/** @class vtb::VtbApplication
+ * @ingroup face_tracking_coordination
+ */
+/** @class vtb::VideoCaptureStage
+ * @ingroup face_tracking_coordination
+ */
+/** @class vtb::FaceTrackingStage
+ * @ingroup face_tracking_coordination
+ */
+/** @class vtb::Live2DTrackingPipeline
+ * @ingroup face_tracking_coordination
+ */
+/** @class vtb::FacePipeline
+ * @ingroup face_tracking_coordination
+ */
+/** @class vtb::RgaDevice
+ * @ingroup face_tracking_model_input
+ */
+/** @class vtb::RgaImageTransformer
+ * @ingroup face_tracking_model_input
+ */
+/** @class vtb::ModelInputLease
+ * @ingroup face_tracking_model_input
+ */
+/** @class vtb::RknnFaceDetector
+ * @ingroup face_tracking_inference
+ */
+/** @class vtb::RknnLandmarkEstimator
+ * @ingroup face_tracking_inference
+ */
+/** @class vtb::OpenSeeFaceGeometryEstimator
+ * @ingroup face_tracking_geometry_output
+ */
+/** @class vtb::FaceTrackingResult
+ * @ingroup face_tracking_geometry_output
+ */

@@ -1,4 +1,4 @@
-#include "vtb/face/rknn_face_models.hpp"
+#include "vtb/hardware/rknn/rknn_face_models.hpp"
 
 #include <algorithm>
 #include <array>

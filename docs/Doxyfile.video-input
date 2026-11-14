@@ -1,5 +1,5 @@
-PROJECT_NAME           = "VTB Video Input"
-PROJECT_BRIEF          = "Video source inheritance and frame ownership collaboration"
+PROJECT_NAME           = "VTB C++ 专题说明书"
+PROJECT_BRIEF          = "视频输入与人脸跟踪的对象关系、运行时序和资源生命周期"
 OUTPUT_DIRECTORY       = build/docs/video-input-doxygen
 
 OUTPUT_LANGUAGE        = Chinese
@@ -7,20 +7,24 @@ FULL_PATH_NAMES        = NO
 STRIP_FROM_PATH        = .
 
 INPUT                  = include/vtb/video \
+                         include/vtb/messaging \
                          include/vtb/time/monotonic_clock.hpp \
                          include/vtb/capture_config.hpp \
                          include/vtb/v4l2_camera.hpp \
                          include/vtb/pipeline/video_processing_runtime.hpp \
                          include/vtb/face/cpu_image_transformer.hpp \
+                         include/vtb/face/image_transformer.hpp \
                          include/vtb/face/model_input.hpp \
                          include/vtb/face/face_types.hpp \
                          include/vtb/face/face_pipeline.hpp \
-                         include/vtb/face/rga_image_transformer.hpp \
-                         include/vtb/face/rknn_face_models.hpp \
+                         include/vtb/hardware/rga \
+                         include/vtb/hardware/rknn \
+                         include/vtb/face/openseeface_geometry_estimator.hpp \
                          include/vtb/face/face_frame_consumer.hpp \
                          include/vtb/live2d \
                          include/vtb/output/encoded_video_sink.hpp \
                          apps/vtb-live2d \
+                         src/messaging \
                          src/video \
                          src/v4l2_camera.cpp \
                          src/pipeline/video_processing_runtime.cpp \
@@ -28,11 +32,13 @@ INPUT                  = include/vtb/video \
                          src/face/model_input.cpp \
                          src/face/face_types.cpp \
                          src/face/face_pipeline.cpp \
-                         src/face/rga_image_transformer.cpp \
-                         src/face/rknn_face_models.cpp \
+                         src/hardware/rga \
+                         src/hardware/rknn \
+                         src/face/openseeface_geometry_estimator.cpp \
                          src/face/face_frame_consumer.cpp \
                          src/live2d \
-                         docs/video-input-groups.dox
+                         docs/video-input-groups.dox \
+                         docs/face-tracking-groups.dox
 FILE_PATTERNS          = *.hpp *.cpp *.dox
 RECURSIVE              = YES
 
@@ -51,6 +57,8 @@ GENERATE_TREEVIEW      = YES
 SEARCHENGINE           = NO
 GENERATE_LATEX         = NO
 SORT_GROUP_NAMES       = NO
+HTML_EXTRA_STYLESHEET  = docs/doxygen-video-input.css
+HTML_EXTRA_FILES       = docs/doxygen-mermaid-viewer.js
 
 HAVE_DOT               = YES
 DOT_PATH               = /opt/homebrew/bin

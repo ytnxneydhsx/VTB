@@ -17,16 +17,14 @@
 #include <vector>
 
 #include "core/extension/libgodot.h"
-#include "face_diagnostic_session.hpp"
 #include "live2d_control_server.hpp"
-#include "live2d_tracking_session.hpp"
 #include "media_output_session.hpp"
 #include "openvt_libgodot_bridge.h"
+#include "pipeline/face_tracking_stage.hpp"
+#include "pipeline/live2d_tracking_pipeline.hpp"
+#include "pipeline/video_capture_stage.hpp"
 #include "vtb/config/config_file_reader.hpp"
 #include "vtb/config/vtb_application_config.hpp"
-#include "vtb/face/openseeface_geometry_estimator.hpp"
-#include "vtb/face/rga_image_transformer.hpp"
-#include "vtb/face/rknn_face_models.hpp"
 #include "vtb/output/rtsp_output.hpp"
 #include "vtb/time/monotonic_clock.hpp"
 #include "video_input_factory.hpp"
@@ -384,8 +382,8 @@ private:
  *
  * LibGodot 的 Main::setup() 会释放初始主线程身份，GodotInstance::start() 调用的
  * Main::setup2() 会把当前调用线程登记为 Godot 主线程。因此本类在线程入口内部创建、
- * 启动、驱动并销毁 LibGodotInstance，其他线程只通过 Live2DTrackingSession 的现有
- * 线程安全快照传值，不直接访问 Godot 对象。
+ * 启动、驱动并销毁 LibGodotInstance，其他线程只通过 Live2DTrackingChannel 发布
+ * 已完成的值快照，不直接访问 Godot 对象。
  *
  * 主控制线程在 start() 返回后启动跟踪和控制生产者，再用 begin_frames() 放行帧循环。
  * 帧循环结束后，主控制线程先停止这些生产者，最后调用 finish()，允许所有者线程按
@@ -399,27 +397,17 @@ public:
         EncodedVideoSink output_sink,
         std::string media_metrics_path,
         std::chrono::milliseconds metrics_report_interval,
-        Live2DTrackingSession& tracking_session,
+        Live2DTrackingChannel& tracking_channel,
         MediaOutputSession& media_output,
-        FaceDiagnosticSession* face_diagnostic,
-        MediaOutputSession* face_diagnostic_output,
         const std::atomic<bool>& process_stop_requested)
         : arguments_(arguments),
           render_config_(std::move(render_config)),
           output_sink_(output_sink),
           media_metrics_path_(std::move(media_metrics_path)),
           metrics_report_interval_(metrics_report_interval),
-          tracking_session_(tracking_session),
+          tracking_channel_(tracking_channel),
           media_output_(media_output),
-          face_diagnostic_(face_diagnostic),
-          face_diagnostic_output_(face_diagnostic_output),
-          process_stop_requested_(process_stop_requested) {
-        if ((face_diagnostic_ == nullptr) !=
-            (face_diagnostic_output_ == nullptr)) {
-            throw std::invalid_argument(
-                "Face diagnostic session and output must be provided together");
-        }
-    }
+          process_stop_requested_(process_stop_requested) {}
 
     ~GodotRuntimeThread() {
         shutdown_noexcept();
@@ -522,12 +510,14 @@ private:
 
     void run_frame_loop(LibGodotInstance& godot) {
         auto next_frame_deadline = std::chrono::steady_clock::now();
-        while (!process_stop_requested_.load(std::memory_order_acquire) &&
-               !internal_stop_requested_.load(std::memory_order_acquire)) {
+        while (!process_stop_requested_.load() &&
+               !internal_stop_requested_.load()) {
             std::optional<Live2DTrackingSnapshot> snapshot =
-                tracking_session_.read_snapshot_if_changed();
+                tracking_channel_.try_pop();
             if (snapshot.has_value()) {
                 godot.submit(snapshot.value());
+            } else if (tracking_channel_.finished()) {
+                break;
             }
 
             bool finished = false;
@@ -538,10 +528,6 @@ private:
                 throw;
             }
             media_output_.rethrow_if_failed();
-            if (face_diagnostic_ != nullptr) {
-                face_diagnostic_->rethrow_if_failed();
-                face_diagnostic_output_->rethrow_if_failed();
-            }
 
             ++iterations_;
             if (finished) {
@@ -623,7 +609,7 @@ private:
     }
 
     void shutdown_noexcept() noexcept {
-        internal_stop_requested_.store(true, std::memory_order_release);
+        internal_stop_requested_.store(true);
         {
             std::lock_guard<std::mutex> lock(mutex_);
             frames_permitted_ = true;
@@ -640,10 +626,8 @@ private:
     EncodedVideoSink output_sink_;
     std::string media_metrics_path_;
     std::chrono::milliseconds metrics_report_interval_;
-    Live2DTrackingSession& tracking_session_;
+    Live2DTrackingChannel& tracking_channel_;
     MediaOutputSession& media_output_;
-    FaceDiagnosticSession* face_diagnostic_ = nullptr;
-    MediaOutputSession* face_diagnostic_output_ = nullptr;
     const std::atomic<bool>& process_stop_requested_;
     std::atomic<bool> internal_stop_requested_{false};
     mutable std::mutex mutex_;
@@ -657,47 +641,6 @@ private:
     bool frame_loop_finished_ = false;
     bool cleanup_permitted_ = false;
 };
-
-std::unique_ptr<FacePipeline> create_face_pipeline(
-    const FacePipelineConfiguration& config) {
-    auto image_transformer =
-        std::make_unique<RgaImageTransformer>(config.rga_dma_heap);
-    auto detector = std::make_unique<RknnFaceDetector>(
-        config.detector_model, RknnCore::core0);
-    auto landmark = std::make_unique<RknnLandmarkEstimator>(
-        config.landmark_model, RknnCore::core1);
-    auto geometry = std::make_unique<OpenSeeFaceGeometryEstimator>();
-    FacePipelineConfig face_config;
-    face_config.redetect_interval_frames = config.redetect_interval_frames;
-    face_config.minimum_tracking_confidence =
-        config.minimum_tracking_confidence;
-    return std::make_unique<FacePipeline>(
-        face_config,
-        std::move(image_transformer),
-        std::move(detector),
-        std::move(landmark),
-        std::move(geometry));
-}
-
-std::unique_ptr<Live2DTrackingSession> create_tracking_session(
-    const FaceMappingConfiguration& mapping,
-    std::unique_ptr<VideoSource> video_input,
-    std::unique_ptr<FacePipeline> face_pipeline,
-    Live2DTrackingSession::ResultObserver result_observer) {
-    Live2DMappingConfig mapping_config;
-    mapping_config.calibration_frames =
-        static_cast<std::size_t>(mapping.calibration_frames);
-    mapping_config.smoothing_tau_ms = mapping.smoothing_tau_ms;
-    mapping_config.angle_x_sign = mapping.angle_x_sign;
-    mapping_config.angle_y_sign = mapping.angle_y_sign;
-    mapping_config.angle_z_sign = mapping.angle_z_sign;
-
-    return std::make_unique<Live2DTrackingSession>(
-        std::move(video_input),
-        std::move(face_pipeline),
-        mapping_config,
-        std::move(result_observer));
-}
 
 }  // namespace
 
@@ -716,59 +659,52 @@ public:
     Impl& operator=(Impl&&) = delete;
 
     int run(const std::atomic<bool>& stop_requested) {
-        // 第 1 阶段：装配摄像头输入、人脸流水线和可选 face3d 诊断链路。
+        // 第 1 阶段：根据应用配置装配摄像头输入和人脸处理流水线。
+        // video_input 的实际对象当前是 CameraSource，但上层只依赖 VideoSource 接口。
         VideoInputFactory video_input_factory;
         std::unique_ptr<VideoSource> video_input =
             video_input_factory.create(config_.video_input);
+        // FacePipeline 在自己的创建入口内装配 RGA、RKNN 与几何估计依赖。
         std::unique_ptr<FacePipeline> face_pipeline =
-            create_face_pipeline(config_.face_pipeline);
-        std::unique_ptr<MediaOutputSession> face_diagnostic_output;
-        std::unique_ptr<FaceDiagnosticSession> face_diagnostic;
-        Live2DTrackingSession::ResultObserver result_observer;
+            FacePipeline::create(config_.face_pipeline);
+        // Live2DTrackingPipeline 只组合已初始化的人脸流水线与映射配置。
+        std::unique_ptr<Live2DTrackingPipeline> tracking_pipeline =
+            std::make_unique<Live2DTrackingPipeline>(
+                std::move(face_pipeline), config_.mapping);
+
+        // live2d 媒体链路和输出链路共用同一个指标上报周期。
         const std::chrono::milliseconds metrics_report_interval(
             config_.instrumentation.report_interval_ms);
-        if (config_.face_diagnostic_output.enabled) {
-            const std::string diagnostic_metrics_path = metrics_path(
-                config_.instrumentation,
-                "vtb-face3d-output.metrics.jsonl");
-            face_diagnostic_output = std::make_unique<MediaOutputSession>(
-                std::make_unique<RtspOutput>(
-                    config_.face_diagnostic_output.rtsp_url),
-                diagnostic_metrics_path,
-                metrics_report_interval,
-                "face3d-output",
-                "face3d-video",
-                "vtb-face3d.output",
-                "face3d.output_write");
-            face_diagnostic = std::make_unique<FaceDiagnosticSession>(
-                config_.face_diagnostic_output,
-                config_.video_input.width,
-                config_.video_input.height,
-                config_.face_pipeline.rga_dma_heap,
-                face_diagnostic_output->sink());
-            FaceDiagnosticSession* const diagnostic = face_diagnostic.get();
-            result_observer = [diagnostic](
-                                  const std::optional<FaceTrackingResult>&
-                                      result) {
-                diagnostic->publish(result);
-            };
-        }
-        std::unique_ptr<Live2DTrackingSession> tracking_session =
-            create_tracking_session(
-                config_.mapping,
-                std::move(video_input),
-                std::move(face_pipeline),
-                std::move(result_observer));
+        // 第 2 阶段：Application 直接实例化两条容量一消息队列。
+        // 消息队列只保存数据并提供同步，不创建线程，也不绑定具体生产者和消费者。
+        VideoFrameChannel frame_channel(
+            1, messaging::ChannelOverflowPolicy::drop_oldest);
+        Live2DTrackingChannel tracking_channel(
+            1, messaging::ChannelOverflowPolicy::drop_oldest);
 
-        // 第 2 阶段：创建借用 tracking_session 的控制服务和两路输出上下文。
-        Live2DControlServer control_server(config_.control, *tracking_session);
+        // Face Stage 的线程阻塞读取 frame_channel，完成同步人脸处理和映射后，
+        // 把值快照发布到 tracking_channel。Capture Stage 的线程只负责读取视频源
+        // 并向 frame_channel 发布 move-only 帧租约。
+        FaceTrackingStage face_tracking_stage(
+            std::move(tracking_pipeline),
+            frame_channel,
+            tracking_channel);
+        VideoCaptureStage video_capture_stage(
+            std::move(video_input), frame_channel);
+
+        // 控制服务直接借用 Face Stage 的线程安全状态和控制接口。
+        Live2DControlServer control_server(
+            config_.control, face_tracking_stage);
+
+        // 分别准备 live2d 编码输出和 LibGodot 渲染链路的指标文件路径。
         const std::string output_metrics_path = metrics_path(
             config_.instrumentation,
             "vtb-live2d-output.metrics.jsonl");
         const std::string media_metrics_path = metrics_path(
             config_.instrumentation,
             "vtb-live2d-media.metrics.jsonl");
-        // 局部对象按声明逆序析构，也能在异常展开时保护回调借用的上下文。
+        // 创建 live2d RTSP 输出上下文。局部对象按声明逆序析构，这个顺序也能
+        // 在异常展开时保护被回调借用的上下文。
         MediaOutputSession media_output(
             std::make_unique<RtspOutput>(config_.output.rtsp_url),
             output_metrics_path,
@@ -783,32 +719,32 @@ public:
             media_output.sink(),
             media_metrics_path,
             metrics_report_interval,
-            *tracking_session,
+            tracking_channel,
             media_output,
-            face_diagnostic.get(),
-            face_diagnostic_output.get(),
             stop_requested);
 
         // 第 3 阶段：先在线程内部完成 LibGodot 初始化，再启动各生产者，最后放行帧循环。
         godot_runtime.start();
-        if (face_diagnostic) {
-            face_diagnostic->start();
-        }
-        tracking_session->start();
+        // Face Stage 先完成源初始化并进入接收循环，再启动 Capture Stage 的
+        // 发布循环；随后启动控制服务并放行渲染循环。
+        face_tracking_stage.start();
+        video_capture_stage.start();
         control_server.start();
         godot_runtime.begin_frames();
         godot_runtime.wait_for_frame_loop();
 
-        // 第 4 阶段：帧循环结束后先停止所有生产者，再允许 Godot 所有者线程清理并 join。
+        // 第 4 阶段：帧循环结束后先停止外部控制入口和所有生产者，再允许
+        // Godot 所有者线程清理并 join。
+        // 先让采集线程停止发布并关闭 frame_channel，再唤醒、停止和回收 Face Stage。
         control_server.stop();
-        tracking_session->request_stop();
-        tracking_session->stop();
-        if (face_diagnostic) {
-            face_diagnostic->request_stop();
-            face_diagnostic->stop();
-            face_diagnostic_output->finish();
-        }
+        video_capture_stage.request_stop();
+        video_capture_stage.stop();
+        face_tracking_stage.stop();
+        video_capture_stage.rethrow_if_failed();
+        face_tracking_stage.rethrow_if_failed();
+
         godot_runtime.finish();
+        // 0 作为 main() 的最终退出码，表示本次运行正常完成。
         return 0;
     }
 

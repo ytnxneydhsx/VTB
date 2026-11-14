@@ -13,7 +13,7 @@ static_assert(
     "The signal stop flag must use lock-free atomic operations");
 
 void handle_signal(int) noexcept {
-    stop_requested.store(true, std::memory_order_release);
+    stop_requested.store(true);
 }
 
 }  // namespace

@@ -25,6 +25,15 @@ class VideoProcessingRuntimeState;
  * 函数。运行时在销毁状态对象前等待两个工作线程退出。
  * 当前运行时仍只承载一代视频源；协议代次为以后由协调器重建 CaptureSession、保持
  * 消费线程长期运行预留，不在本类中实现摄像头热重连。
+ *
+ * @htmlonly
+ * <div class="vtb-resource-card">
+ *   <div class="vtb-resource-card__title">独占线程与运行状态</div>
+ *   <span class="vtb-resource-owned">capture_thread_ / consumer_thread_</span> 是必须
+ *   join 的工作线程；<span class="vtb-resource-owned">state_</span> 独占线程共同访问的
+ *   状态对象。析构顺序为请求停止、join 两个线程、再销毁状态。
+ * </div>
+ * @endhtmlonly
  */
 class VideoProcessingRuntime {
 public:
@@ -51,8 +60,11 @@ public:
 private:
     void join_threads();
 
+    /** @brief <span class="vtb-resource-owned">独占资源</span> 工作线程共享的运行状态。 */
     std::unique_ptr<VideoProcessingRuntimeState> state_;
+    /** @brief <span class="vtb-resource-owned">线程资源</span> 摄像头采集线程，析构前 join。 */
     std::thread capture_thread_;
+    /** @brief <span class="vtb-resource-owned">线程资源</span> 帧消费线程，析构前 join。 */
     std::thread consumer_thread_;
     bool started_ = false;
     bool stop_requested_ = false;

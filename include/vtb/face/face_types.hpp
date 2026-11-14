@@ -2,13 +2,17 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <string>
 #include <vector>
 
 namespace vtb {
 
-/** @brief FacePipeline 的检测间隔、跟踪阈值和关键点 ROI 配置。 */
+/** @brief FacePipeline 的模型、预处理资源、检测策略和关键点 ROI 配置。 */
 class FacePipelineConfig {
 public:
+    std::string detector_model;
+    std::string landmark_model;
+    std::string rga_dma_heap;
     std::size_t redetect_interval_frames = 0;
     float minimum_tracking_confidence = 0.6F;
     float landmark_roi_horizontal_expansion = 0.10F;
@@ -176,7 +180,13 @@ private:
     FaceExpression expression_;
 };
 
-/** @brief FacePipeline 对一帧视频生成的完整人脸跟踪数据。 */
+/**
+ * @brief FacePipeline 对一帧视频生成的完整、可独立保存的人脸跟踪结果值。
+ *
+ * 结果按值拥有帧编号、采集时间戳、人脸框、66 点、姿态、表情、几何成功标志和
+ * 关键点平均置信度，不借用源 FrameView 或模型输出缓冲区。复制使用值语义；移动
+ * 构造和移动赋值明确为 noexcept default。
+ */
 class FaceTrackingResult {
 public:
     FaceTrackingResult(
