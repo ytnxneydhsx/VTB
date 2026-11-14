@@ -3,8 +3,8 @@ set -eu
 
 trace_root=/sys/kernel/tracing
 event_group=openvt_ayagami
-ayagami_so=/home/huangnv/open-vt-test/thirdparty/ayagami/addons/ayagami/lib/libayagami_gd.release.aarch64.so
-runner=/home/huangnv/open-vt-test/thirdparty/ayagami/experiments/openvt-dmabuf-capture/run_render_on_rk.sh
+ayagami_so=/home/huangnv/open-vt-test/support/third_party/ayagami/addons/ayagami/lib/libayagami_gd.release.aarch64.so
+runner=/home/huangnv/open-vt-test/support/third_party/ayagami/experiments/openvt-dmabuf-capture/run_render_on_rk.sh
 profile_dir=${OPENVT_PROFILE_OUTPUT_DIR:-/home/huangnv/openvt-dmabuf-profile-20261027-01}
 render_dir="$profile_dir/render"
 trace_output="$profile_dir/ayagami-uprobes.trace"

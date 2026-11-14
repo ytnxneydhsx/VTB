@@ -96,7 +96,7 @@ OpenVT 测试目录：
 Ayagami ARM64 GDExtension：
 
 ```text
-/home/huangnv/open-vt-test/thirdparty/ayagami/addons/ayagami/lib/
+/home/huangnv/open-vt-test/support/third_party/ayagami/addons/ayagami/lib/
   libayagami_gd.release.aarch64.so
 ```
 
@@ -456,8 +456,8 @@ GPU 最高频率：600 MHz
 新增测试文件：
 
 ```text
-/home/huangnv/open-vt-test/thirdparty/ayagami/offscreen_benchmark.gd
-/home/huangnv/open-vt-test/thirdparty/ayagami/offscreen_benchmark.tscn
+/home/huangnv/open-vt-test/support/third_party/ayagami/offscreen_benchmark.gd
+/home/huangnv/open-vt-test/support/third_party/ayagami/offscreen_benchmark.tscn
 ```
 
 关键配置：

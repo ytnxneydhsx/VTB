@@ -3,7 +3,7 @@ set -u
 
 task_output_dir=${OPENVT_RENDER_OUTPUT_DIR:-/home/huangnv/openvt-video-render-20261027-01}
 godot_bin=/home/huangnv/tools/godot-ayagami-4.7.1/godot-ayagami-4.7.1-linux.arm64
-project_dir=/home/huangnv/open-vt-test/thirdparty/ayagami
+project_dir=/home/huangnv/open-vt-test/support/third_party/ayagami
 scene_path=res://experiments/openvt-video-render/render_video.tscn
 video_path="$task_output_dir/openvt-ayagami-1920x1080-30fps-10s.avi"
 run_log="$task_output_dir/godot-render.log"

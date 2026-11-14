@@ -108,8 +108,8 @@ quit
 ```bash
 ./scripts/install-openseeface-runtime.sh
 python3 -m venv build/openseeface-venv
-build/openseeface-venv/bin/python -m pip install -r requirements/openseeface-preview.txt
-build/openseeface-venv/bin/python tools/openseeface_3d_preview.py --capture 0
+build/openseeface-venv/bin/python -m pip install -r support/requirements/openseeface-preview.txt
+build/openseeface-venv/bin/python support/tools/openseeface_3d_preview.py --capture 0
 ```
 
 预览只绘制整体置信度和 66 个三维点，不显示摄像头原始画面。需要显示官方人脸拓扑连线时增加 `--show-lines`。按 `Q` 或 `Esc` 关闭窗口。
@@ -140,11 +140,8 @@ VTB_FACE3D_LIVE2D_UDP=127.0.0.1:11574 \
 ```
 
 新的 Live2D 产品链路不会读取这个 UDP 参数流；`vtb-live2d` 宿主独立打开输入、
-执行一次 RKNN 推理并向 Godot 提交最终参数。JSON 中启用
-`face_diagnostic_output` 后，同一个 C++ 进程还会把最新的 `FaceTrackingResult`
-绘制成黑底人脸框和 66 点诊断画面，通过独立 MPP 编码器发布 `/face3d`；右侧
-Godot 输出继续发布 `/live2d`。诊断分支不持有摄像头帧租约，积压时只保留最新结果。
-旧 Python 诊断进程仍不能与 C++ 产品进程同时独占同一个摄像头节点。
+执行一次 RKNN 推理并向 Godot 提交最终参数，只发布 `/live2d`。旧 Python 诊断进程
+继续作为独立调试工具，且不能与 C++ 产品进程同时独占同一个摄像头节点。
 在 Mac 上启动左侧人脸检测、右侧 Live2D 的双流监看页：
 
 ```bash
@@ -155,7 +152,7 @@ Godot 输出继续发布 `/live2d`。诊断分支不持有摄像头帧租约，�
 网卡地址或端口变化时，分别设置 `VTB_MONITOR_BIND_ADDRESS` 和
 `VTB_MONITOR_PORT`。
 
-监看页的“以当前正脸校准”按钮会请求 RK 上的纯 C++ `Live2DTrackingSession` 清空
+监看页的“以当前正脸校准”按钮会请求 RK 上的纯 C++ `FaceTrackingStage` 清空
 原中立姿态，再用接下来 30 个有效正脸帧计算新零点。校准期间页面
 显示进度，Live2D 头部参数先回到中立值。控制口默认只绑定
 `192.168.77.2:11575`，浏览器请求来源限制为
@@ -190,9 +187,10 @@ ssh -fN \
 
 ## OpenSeeFace 驱动 Live2D
 
-当前分支由 `VtbApplication` 分别创建视频输入和模型管线。纯 C++
-`Live2DTrackingSession` 完成 RKNN 检测、66 点关键点、OpenSeeFace 兼容 PnP/表情、
-校准和 Live2D 参数映射；Godot 只通过固定 C ABI 接收容量为一的最终参数快照并写入
+当前分支由 `VtbApplication` 分别创建视频输入和模型管线，并直接实例化两个容量一通道、
+`VideoCaptureStage` 和 `FaceTrackingStage`。`Live2DTrackingPipeline` 在构造时固定人脸算法
+与映射配置，Face Stage 在线程内调用该同步主体完成 RKNN 检测、66 点关键点、
+OpenSeeFace 兼容 PnP/表情、校准和 Live2D 参数映射；Godot 只通过固定 C ABI 接收最终参数快照并写入
 Ayagami。产品路径不再启动 Python、JSON 或 UDP 参数桥接，浏览器校准和取景控制由
 宿主 `Live2DControlServer` 提供。
 

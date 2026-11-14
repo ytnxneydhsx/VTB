@@ -38,7 +38,7 @@ Mali-G610
 相关源码证据：
 
 ```text
-/home/huangnv/open-vt-test/thirdparty/ayagami/src/loader.rs
+/home/huangnv/open-vt-test/support/third_party/ayagami/src/loader.rs
 ```
 
 该文件按 `DrawNode::ArtMesh` 循环，为每个 ArtMesh 创建独立的 `ArrayMesh` 和 `MeshInstance2D`。
@@ -713,8 +713,8 @@ Godot Engine（C++）
 修改位置：
 
 ```text
-thirdparty/ayagami/src/model.rs
-thirdparty/ayagami-core/ayagami/src/driver/mod.rs
+support/third_party/ayagami/src/model.rs
+support/third_party/ayagami-core/ayagami/src/driver/mod.rs
 ```
 
 `ayagami-gd` 适配层新增：

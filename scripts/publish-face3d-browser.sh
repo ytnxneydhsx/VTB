@@ -68,7 +68,7 @@ fi
 
 tracker_command=(
   "$python_bin"
-  "$project_dir/tools/openseeface_3d_preview.py"
+  "$project_dir/support/tools/openseeface_3d_preview.py"
   --capture "$capture_device"
   --width "$capture_width"
   --height "$capture_height"

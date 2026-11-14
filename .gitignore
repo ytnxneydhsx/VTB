@@ -3,7 +3,7 @@ build/
 bin/mediamtx
 models/openseeface/*.onnx
 models/openseeface/*.rknn
-third_party/openseeface/
+support/third_party/openseeface/
 __pycache__/
 *.py[cod]
 .DS_Store

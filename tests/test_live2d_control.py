@@ -1,7 +1,7 @@
 import math
 import unittest
 
-from tools.openseeface_3d_preview import Live2DCalibrationControl
+from support.tools.openseeface_3d_preview import Live2DCalibrationControl
 
 
 class Live2DControlTest(unittest.TestCase):

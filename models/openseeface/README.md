@@ -24,7 +24,7 @@ ONNX 与 RKNN 文件都属于本地生成物，不提交到 Git。RKNN 转换脚
 环境中运行：
 
 ```bash
-python3 tools/convert_openseeface_rknn.py \
+python3 support/tools/convert_openseeface_rknn.py \
   --input-dir /path/to/openseeface-models \
   --output-dir models/openseeface
 ```
@@ -45,13 +45,13 @@ python3 tools/convert_openseeface_rknn.py \
 
 ```bash
 python3 -m venv build/openseeface-venv
-build/openseeface-venv/bin/python -m pip install -r requirements/openseeface-preview.txt
+build/openseeface-venv/bin/python -m pip install -r support/requirements/openseeface-preview.txt
 ```
 
 运行摄像头预览：
 
 ```bash
-build/openseeface-venv/bin/python tools/openseeface_3d_preview.py --capture 0
+build/openseeface-venv/bin/python support/tools/openseeface_3d_preview.py --capture 0
 ```
 
 预览窗口只显示整体置信度和 66 个拟合后的三维点。摄像头原始图像仅作为模型输入，不会被复制到预览画布。需要显示官方人脸拓扑连线时增加 `--show-lines`。

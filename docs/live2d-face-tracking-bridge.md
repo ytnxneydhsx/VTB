@@ -7,16 +7,14 @@
 
 ```text
 V4L2 CameraSource (MMAP / DQBUF / QBUF)
-  → capacity-one LatestFrameSlot
-  → VideoFrameConsumer
-  → FaceFrameConsumer
+  → VideoCaptureStage
+  → capacity-one BoundedFifoChannel<DecodedFrameLease>
+  → FaceTrackingStage
   → RKNN detector (NPU core 0)
   → RKNN 66-point landmark model (NPU core 1)
   → OpenSeeFace-compatible C++ PnP / expression features
-  → optional latest-only FaceDiagnosticSession → NV12 DMA-BUF → MPP H.264
-      → host MediaOutputSession → OutputManager → /face3d RTSP
   → C++ Live2DFaceMapper
-  → LatestTrackingChannel versioned latest-only snapshot
+  → capacity-one BoundedFifoChannel<Live2DTrackingSnapshot>
   → openvt_libgodot_application_submit_live2d_frame()
   → Godot main thread parameter input
   → Ayagami model parameters
@@ -26,30 +24,31 @@ V4L2 CameraSource (MMAP / DQBUF / QBUF)
 ```
 
 Godot/Ayagami、DMA-BUF、RGA 和 MPP 保留原有资源链；输出协议移到宿主。`vtb-live2d` 可执行文件
-直接链接 V4L2 视频输入、OpenCV PnP 几何计算、RKNN 和 `Live2DTrackingSession`；LibGodot 共享库不再编译
+直接链接 V4L2 视频输入、OpenCV PnP 几何计算、RKNN 和两个流水线 Stage；LibGodot 共享库不再编译
 摄像头、RKNN 模型、几何估计、人脸管线、OutputManager 或 RTSP 源码，也不链接 FFmpeg。
 
 ## 模块边界
 
 - `CameraSource`：直接打开 V4L2 摄像头，管理 MMAP/DMA-BUF 缓冲区和
   `DQBUF/QBUF` 帧租约，当前输出 YUYV/NV12/NV21 原始帧。
-- `VideoProcessingRuntime`：只组合 `VideoSource`、`LatestFrameSlot` 和
-  `VideoFrameConsumer`，管理采集/消费线程、latest-only 覆盖、停止和异常传播。
-- `FaceFrameConsumer`：把统一帧消费接口适配到 `FacePipeline` 并发布人脸结果；结果
-  可由 Live2D mapper 与可选诊断观察者同时读取。
+- `VideoCaptureStage`：独占 `VideoSource` 和采集线程，把帧租约发布到容量一通道。
+- `Live2DTrackingPipeline`：构造时固定 `FacePipeline` 和 `Live2DFaceMapper` 配置，
+  同步完成单帧人脸处理与映射，不创建线程或持有消息通道。
+- `FaceTrackingStage`：只连接已配置任务主体、输入通道和输出通道；在自己的线程中
+  阻塞取得帧租约、调用主体并发布快照。
+- `VtbApplication`：直接拥有两个 Stage 和两条 `BoundedFifoChannel`，统一安排启动、停止
+  和错误传播。旧 `VideoProcessingRuntime` 只保留给独立协议测试。
 - `RknnFaceDetector` / `RknnLandmarkEstimator`：加载 `.rknn` 模型并固定到两个 NPU core。
 - `OpenSeeFaceGeometryEstimator`：保留 70 点模板、14 点 PnP、Euler 角、66 点反投影和
   Remedian 表情特征语义。
 - `Live2DFaceMapper`：中立姿态校准、限幅、参数映射和按单调时钟计算的一阶平滑。
-- `Live2DTrackingSession`：应用层组合类，创建 `FaceFrameConsumer`，在人脸消费线程完成
-  映射和校准，并管理运行时生命周期。
-- `LatestTrackingChannel`：只保存已经完成的映射、取景状态和版本号；互斥锁封装在内部，
-  Godot 所有者线程使用非阻塞读取，不清空最近状态。
-- `Live2DControlServer`：独立的 HTTP 控制组件，借用寿命更长的会话，序列化状态和转发命令。
+- 跟踪快照通道：容量一并采用 `drop_oldest`；Godot 所有者线程使用 `try_pop()`
+  非阻塞取得新快照。
+- `Live2DControlServer`：独立的 HTTP 控制组件，借用寿命更长的 `FaceTrackingStage`，
+  序列化状态和转发命令。
 - `MediaOutputSession`：宿主编码包接收器，复制回调中的借用字节，管理输出启动、排空和停止。
-- `FaceDiagnosticSession`：只复制最新 `FaceTrackingResult`，后台绘制黑底人脸框和
-  66 点 NV12 画面，并通过独立 MPP 编码器交付 `/face3d` 编码包。
-- `VtbApplication`：分别创建视频输入与模型管线，管理顶层启动、停止和错误传播。
+- `VtbApplication`：分别创建视频输入与模型管线，在组合根直接实例化通道和 Stage，
+  管理顶层启动、停止和错误传播。
 - `GodotRuntimeThread`：专用所有者线程；在该线程内创建、驱动和销毁 LibGodot，并
   读取最新参数快照提交给 Godot。
 - `Live2DParameters`：独立的十参数值对象；Godot 只编译这个数据类型，不编译
@@ -58,7 +57,8 @@ Godot/Ayagami、DMA-BUF、RGA 和 MPP 保留原有资源链；输出协议移到
   Live2D 参数、取景状态、结果产生时间戳和 snapshot_generation；通过 C linkage 函数提交。
 - `EmbeddedLive2DApplication`：Godot 内部渲染/编码编排，只消费参数帧并驱动 Ayagami。
 
-推理回调不访问 Godot 对象。它先完成 Live2D 映射，再把值快照发布到纯 C++ Channel；
+FaceTrackingStage 不访问 Godot 对象。它调用已配置的 `Live2DTrackingPipeline` 取得映射结果，
+再把值快照发布到纯 C++ Channel；
 Godot 所有者线程通过固定桥接函数
 提交数值字段，跨边界不再传递 Godot `Dictionary`、摄像头对象或模型对象。
 
@@ -68,7 +68,7 @@ Godot 所有者线程通过固定桥接函数
 
 | C++ 跟踪结果 | Live2D 参数 | 规则 |
 |---|---|---|
-| yaw - neutral yaw | `ParamAngleX` | 默认限幅 ±30° |
+| yaw - neutral yaw | `ParamAngleX` | 乘以 `angle_x_sign`；当前同向配置为 +1，再限幅 ±30° |
 | pitch - neutral pitch | `ParamAngleY` | 默认限幅 ±30° |
 | roll - neutral roll | `ParamAngleZ` | 默认限幅 ±30° |
 | 三个头部角度 | `ParamBodyAngleX/Y/Z` | 乘以 0.3 |
@@ -76,9 +76,11 @@ Godot 所有者线程通过固定桥接函数
 | `mouth_open` | `ParamMouthOpenY` | 归一化到 0～1 |
 | `mouth_wide` | `ParamMouthForm` | 限幅 -1～1 |
 
-`read_snapshot_if_changed()` 仅供 Godot 所有者线程消费；空值表示没有新快照。`snapshot_generation`
-随映射或取景变化递增，不能当作摄像头帧号；来源帧号保留在映射结果的 `frame_id()`。
-取景更新保持原映射时间戳。没有新快照时继续使用最近参数，不能立即触发衰减。
+Godot 所有者线程直接调用 `tracking_channel_.try_pop()` 非阻塞读取。取得快照时
+先 `submit()` 再执行本周期 `run_frame()`；通道暂无快照时继续使用最近参数。通道
+已 `finished()` 且队列已排空时直接退出渲染循环，该周期不执行 `run_frame()`。
+`snapshot_generation` 随映射或取景变化递增，来源帧号保留在映射结果的
+`frame_id()`。取景更新保持原映射时间戳。
 
 映射结果默认使用 50 ms 时间常数。距结果产生时间超过 150 ms 后，Godot 内部的
 `EmbeddedLive2DApplication` 以 250 ms 时间常数把模型恢复到默认值。
@@ -109,13 +111,6 @@ YUYV/NV12/NV21 原始格式。
 
 绑定地址、端口和浏览器来源由 JSON 的 `control` 段提供。控制口没有认证或加密，
 只适用于受信的直连本地网段。
-
-## 人脸诊断输出
-
-`face_diagnostic_output.enabled=true` 时，`vtb-live2d` 同时发布 `/face3d` 和
-`/live2d`。诊断分支接收已经完成推理的值对象，不重新打开摄像头、不重复执行 RKNN，
-也不保存 `DecodedFrameLease`。后台编码跟不上时只覆盖尚未消费的旧结果；
-`maximum_fps` 只限定诊断输出，Live2D 渲染帧率仍由 `render.output_fps` 控制。
 
 ## 构建依赖
 
@@ -167,6 +162,6 @@ RK3588 上运行。仍需完成新边界的板端回归、C++/Python 数值精�
 
 ## Python 文件的定位
 
-`tools/openseeface_3d_preview.py`、`tools/live2d_face_tracking.py` 和相关测试继续保留，
+`support/tools/openseeface_3d_preview.py`、`support/tools/live2d_face_tracking.py` 和相关测试继续保留，
 用于历史结果复核、模型转换和 C++/Python 数值对照。产品启动脚本、Godot 场景和
 实时 Live2D 链路不再导入或启动这些 Python 文件。

@@ -15,7 +15,7 @@
 把本目录复制到 Ayagami 测试项目的：
 
 ```text
-/home/huangnv/open-vt-test/thirdparty/ayagami/experiments/openvt-video-render/
+/home/huangnv/open-vt-test/support/third_party/ayagami/experiments/openvt-video-render/
 ```
 
 场景入口为：

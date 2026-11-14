@@ -4,10 +4,10 @@ set -eu
 
 script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 project_root=$(CDPATH= cd -- "$script_dir/.." && pwd)
-runtime_dir="$project_root/third_party/openseeface"
+runtime_dir="$project_root/support/third_party/openseeface"
 source_commit="e09301e6e0cd214cdf16334178b4d3c916c0ca69"
 source_tag="v1.20.5"
-patch_file="$project_root/patches/openseeface/0001-fix-modern-numpy-vector-shape.patch"
+patch_file="$project_root/support/patches/openseeface/0001-fix-modern-numpy-vector-shape.patch"
 
 if [ -f "$runtime_dir/.source-commit" ]; then
     installed_commit=$(cat "$runtime_dir/.source-commit")
@@ -40,6 +40,6 @@ git -C "$temporary_dir/repository" archive HEAD | tar -xf - -C "$temporary_dir/r
 patch -d "$temporary_dir/runtime" -p1 < "$patch_file"
 printf '%s\n' "$source_commit" > "$temporary_dir/runtime/.source-commit"
 
-mkdir -p "$project_root/third_party"
+mkdir -p "$project_root/support/third_party"
 mv "$temporary_dir/runtime" "$runtime_dir"
 printf 'Installed OpenSeeFace runtime %s at %s\n' "$source_tag" "$runtime_dir"

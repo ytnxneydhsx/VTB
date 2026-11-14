@@ -3,6 +3,11 @@
 This directory vendors the source used by the RK3588 Live2D experiments so the
 tested Godot extension and Ayagami core can be rebuilt together.
 
+The OpenSeeFace runtime is installed into `openseeface/` by
+`scripts/install-openseeface-runtime.sh`. That generated source tree is ignored
+by Git; its pinned upstream commit and the applied compatibility patch remain
+recorded by the installer and `support/patches/`.
+
 ## Ayagami
 
 - `ayagami/` originates from <https://github.com/AyagamiDev/ayagami-gd>.

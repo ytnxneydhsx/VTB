@@ -3,7 +3,7 @@ set -eu
 
 task_output_dir=${OPENVT_DMABUF_OUTPUT_DIR:-/home/huangnv/openvt-dmabuf-render-20261027-01}
 godot_bin=${OPENVT_GODOT_BIN:-/home/huangnv/tools/godot-ayagami-live2d-rtsp-4.7.1/godot-ayagami-live2d-rtsp-4.7.1-linux.arm64}
-project_dir=${OPENVT_GODOT_PROJECT_DIR:-/home/huangnv/open-vt-test/thirdparty/ayagami}
+project_dir=${OPENVT_GODOT_PROJECT_DIR:-/home/huangnv/open-vt-test/support/third_party/ayagami}
 scene_path=res://experiments/openvt-dmabuf-capture/render_dmabuf_video.tscn
 run_log="$task_output_dir/godot-render.log"
 runtime_log="$task_output_dir/runtime-metrics.txt"

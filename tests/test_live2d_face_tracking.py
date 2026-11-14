@@ -4,7 +4,7 @@ import socket
 import unittest
 from types import SimpleNamespace
 
-from tools.live2d_face_tracking import (
+from support.tools.live2d_face_tracking import (
     DEFAULT_PARAMETERS,
     Live2DFaceMapper,
     Live2DMappingConfig,

@@ -8,7 +8,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from tools.openseeface_3d_preview import (
+from support.tools.openseeface_3d_preview import (
     PerformanceStats,
     TIMED_FRAME_HEADER,
     TIMED_FRAME_MAGIC,
@@ -118,6 +118,7 @@ class PerformanceStatsTest(unittest.TestCase):
         fake_api.RKNNLite = object
         module_path = (
             Path(__file__).resolve().parents[1]
+            / "support"
             / "tools"
             / "openseeface_rknn_backend.py"
         )

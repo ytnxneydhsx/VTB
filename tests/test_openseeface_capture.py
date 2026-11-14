@@ -2,7 +2,7 @@ import sys
 import unittest
 from unittest.mock import patch
 
-from tools import openseeface_3d_preview
+from support.tools import openseeface_3d_preview
 
 
 class FakeCapture:
