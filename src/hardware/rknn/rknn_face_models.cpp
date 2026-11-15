@@ -673,6 +673,8 @@ std::optional<FaceDetection> RknnFaceDetector::detect(
         best_confidence < confidence_threshold_) {
         return std::nullopt;
     }
+    const float bounded_confidence =
+        std::clamp(best_confidence, 0.0F, 1.0F);
 
     const float radius = detection.value(1, best_y, best_x) * 112.0F;
     if (!std::isfinite(radius) || radius <= 0.0F) {
@@ -689,7 +691,7 @@ std::optional<FaceDetection> RknnFaceDetector::detect(
             static_cast<float>(source_crop.y()) + (center_y - radius) * scale_y,
             2.0F * radius * scale_x,
             2.0F * radius * scale_y),
-        best_confidence);
+        bounded_confidence);
 }
 
 RknnLandmarkEstimator::RknnLandmarkEstimator(

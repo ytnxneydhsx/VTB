@@ -23,8 +23,9 @@ class RknnModel;
  *
  * 模型输出契约为两个 2x56x56 张量：第一个的通道 0 是置信度，通道 1 是
  * 归一化半径；第二个的通道 0 是 max-pool 峰值。detect() 选取最高可信局部峰值，
- * 再使用 ModelInputView::source_crop() 恢复源帧坐标。DMA-BUF 输入为稳定缓冲区
- * 缓存 rknn_set_io_mem() 绑定；CPU 输入每次推理调用 rknn_inputs_set()。
+ * 再使用 ModelInputView::source_crop() 恢复源帧坐标，并把量化输出的微小越界夹取到
+ * [0,1]。DMA-BUF 输入为稳定缓冲区缓存 rknn_set_io_mem() 绑定；CPU 输入每次推理
+ * 调用 rknn_inputs_set()。
  *
  * @htmlonly
  * <div class="vtb-resource-card">
