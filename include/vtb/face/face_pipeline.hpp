@@ -6,8 +6,9 @@
 #include <vector>
 
 #include "vtb/face/face_types.hpp"
-#include "vtb/face/image_transformer.hpp"
 #include "vtb/face/model_input.hpp"
+#include "vtb/hardware/rga/rga_executor.hpp"
+#include "vtb/hardware/rga/rga_model_input_transformer.hpp"
 
 namespace vtb {
 
@@ -87,7 +88,7 @@ public:
  * @htmlonly
  * <div class="vtb-resource-card">
  *   <div class="vtb-resource-card__title">独占算法依赖与跨帧状态</div>
- *   产品创建入口在模块内部构造依赖；<span class="vtb-resource-owned">image_transformer_、detector_、
+ *   产品创建入口在模块内部构造依赖；<span class="vtb-resource-owned">model_input_transformer_、detector_、
  *   landmark_estimator_、geometry_estimator_</span> 由四个 unique_ptr 独占；
  *   tracked_box_、tracking_confidence_ 和 frames_since_detection_ 保存跟踪状态。
  *   析构使用默认实现并按成员逆序释放依赖，复制和移动均明确删除。
@@ -107,12 +108,14 @@ public:
      * 该入口在 FacePipeline 模块内部装配 RGA、RKNN 与几何估计器；调用方不需要
      * 了解模型 core 分配、Transformer 类型或硬件资源的所有权。
      */
-    static std::unique_ptr<FacePipeline> create(FacePipelineConfig config);
+    static std::unique_ptr<FacePipeline> create(
+        FacePipelineConfig config,
+        std::shared_ptr<RgaExecutor> rga_executor);
 
     /** @brief 依赖注入入口，供独立组件测试和替代后端使用。 */
     FacePipeline(
         FacePipelineConfig config,
-        std::unique_ptr<ImageTransformer> image_transformer,
+        std::unique_ptr<RgaModelInputTransformer> model_input_transformer,
         std::unique_ptr<FaceDetector> detector,
         std::unique_ptr<LandmarkEstimator> landmark_estimator,
         std::unique_ptr<FaceGeometryEstimator> geometry_estimator);
@@ -126,6 +129,7 @@ public:
     void begin_source(VideoStreamGeneration generation);
     std::optional<FaceTrackingResult> process(const FrameView& frame);
     void retire_source(VideoStreamGeneration generation) noexcept;
+    void finish() noexcept;
 
 private:
     CropRegion full_frame_crop(const FrameView& frame) const;
@@ -133,7 +137,7 @@ private:
     void reset_tracking() noexcept;
 
     FacePipelineConfig config_;
-    std::unique_ptr<ImageTransformer> image_transformer_;
+    std::unique_ptr<RgaModelInputTransformer> model_input_transformer_;
     std::unique_ptr<FaceDetector> detector_;
     std::unique_ptr<LandmarkEstimator> landmark_estimator_;
     std::unique_ptr<FaceGeometryEstimator> geometry_estimator_;

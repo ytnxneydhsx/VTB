@@ -13,7 +13,7 @@ option(VTB_ENABLE_ROCKCHIP_MPP_PUBLISHER
 option(VTB_ENABLE_RKNN_FACE
     "Build the RK3588 RKNN OpenSeeFace detector and landmark models" ON)
 option(VTB_ENABLE_RGA_FACE
-    "Build the Rockchip RGA face image transformer" ON)
+    "Build the Rockchip RGA face model-input transformer" ON)
 option(VTB_ENABLE_OPENCV_FACE_PIPELINE
     "Build the OpenCV-based OpenSeeFace geometry estimator" ON)
 option(VTB_ENABLE_EMBEDDED_GODOT
@@ -29,7 +29,8 @@ set(VTB_LIBGODOT_LIBRARY "" CACHE FILEPATH
 set(VTB_EMBEDDED_RPATH_LINK "" CACHE STRING
     "Semicolon-separated ARM64 dependency directories for the LibGodot host link")
 
-if(VTB_ENABLE_ROCKCHIP_MPP_PUBLISHER OR VTB_ENABLE_RGA_FACE)
+if(VTB_ENABLE_ROCKCHIP_MPP_PUBLISHER OR VTB_ENABLE_RGA_FACE OR
+   VTB_ENABLE_EMBEDDED_GODOT)
     if(VTB_ROCKCHIP_SYSROOT STREQUAL "")
         message(FATAL_ERROR
             "VTB_ROCKCHIP_SYSROOT is required for Rockchip RGA support")
@@ -230,8 +231,6 @@ vtb_configure_target(vtb_capture)
 
 add_library(vtb_face_core STATIC
     src/face/model_input.cpp
-    src/face/image_transformer.cpp
-    src/face/cpu_image_transformer.cpp
     src/face/face_types.cpp
 )
 add_library(vtb::face_core ALIAS vtb_face_core)
@@ -328,18 +327,35 @@ if(VTB_ENABLE_RKNN_FACE)
 
 endif()
 
+if(VTB_ENABLE_RGA_FACE OR VTB_ENABLE_EMBEDDED_GODOT)
+    add_library(vtb_rga_core STATIC
+        src/hardware/rga/rga_device.cpp
+        src/hardware/rga/rga_executor.cpp
+        src/hardware/rga/rga_nv12_frame_transformer.cpp
+        src/hardware/rga/rga_transform_session.cpp
+        src/hardware/rga/rga_transformer.cpp
+    )
+    add_library(vtb::rga_core ALIAS vtb_rga_core)
+    target_include_directories(vtb_rga_core PUBLIC include)
+    target_include_directories(vtb_rga_core
+        SYSTEM PRIVATE "${VTB_RGA_INCLUDE_DIR}")
+    target_link_libraries(vtb_rga_core
+        PRIVATE
+            vtb_instrumentation
+            Threads::Threads
+            "${VTB_RGA_LIBRARY}"
+    )
+    vtb_configure_target(vtb_rga_core)
+endif()
+
 if(VTB_ENABLE_RGA_FACE)
     add_library(vtb_face_rga STATIC
-        src/hardware/rga/rga_device.cpp
-        src/hardware/rga/rga_image_transformer.cpp
+        src/hardware/rga/rga_model_input_transformer.cpp
     )
     add_library(vtb::face_rga ALIAS vtb_face_rga)
     target_include_directories(vtb_face_rga PUBLIC include)
-    target_include_directories(vtb_face_rga
-        SYSTEM PRIVATE "${VTB_RGA_INCLUDE_DIR}")
     target_link_libraries(vtb_face_rga
-        PUBLIC vtb_face_core
-        PRIVATE "${VTB_RGA_LIBRARY}"
+        PUBLIC vtb_face_core vtb_rga_core
     )
     vtb_configure_target(vtb_face_rga)
 endif()
@@ -463,6 +479,11 @@ add_executable(camera-info examples/camera-info/main.cpp)
 vtb_configure_target(camera-info)
 
 if(BUILD_TESTING)
+    add_executable(rga-type-contract-test tests/rga_type_contract_test.cpp)
+    target_include_directories(rga-type-contract-test PRIVATE include)
+    vtb_configure_target(rga-type-contract-test)
+    add_test(NAME rga-type-contract COMMAND rga-type-contract-test)
+
     add_executable(bounded-fifo-channel-test
         tests/messaging/bounded_fifo_channel_test.cpp)
     target_link_libraries(bounded-fifo-channel-test

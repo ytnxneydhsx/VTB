@@ -33,6 +33,7 @@ public:
     void reset_calibration() noexcept;
     std::size_t calibration_required() const noexcept;
     void retire_source(VideoStreamGeneration generation) noexcept;
+    void finish() noexcept;
 
 private:
     std::unique_ptr<FacePipeline> face_pipeline_;

@@ -169,6 +169,7 @@ void FaceTrackingStage::thread_main() noexcept {
     if (source_began) {
         tracking_pipeline_->retire_source(generation_);
     }
+    tracking_pipeline_->finish();
     if (completed) {
         output_channel_.finish();
     } else {

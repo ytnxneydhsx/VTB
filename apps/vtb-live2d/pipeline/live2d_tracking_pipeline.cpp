@@ -49,4 +49,8 @@ void Live2DTrackingPipeline::retire_source(
     face_pipeline_->retire_source(generation);
 }
 
+void Live2DTrackingPipeline::finish() noexcept {
+    face_pipeline_->finish();
+}
+
 }  // namespace vtb

@@ -7,8 +7,7 @@
 #include <utility>
 
 #include "vtb/face/openseeface_geometry_estimator.hpp"
-#include "vtb/hardware/rga/rga_device.hpp"
-#include "vtb/hardware/rga/rga_image_transformer.hpp"
+#include "vtb/hardware/rga/rga_model_input_transformer.hpp"
 #include "vtb/hardware/rknn/rknn_face_models.hpp"
 
 namespace vtb {
@@ -30,11 +29,11 @@ void require_unit_interval(float value, const char* description) {
 }  // namespace
 
 std::unique_ptr<FacePipeline> FacePipeline::create(
-    FacePipelineConfig config) {
-    std::shared_ptr<RgaDevice> rga_device =
-        std::make_shared<RgaDevice>(config.rga_dma_heap);
-    auto image_transformer =
-        std::make_unique<RgaImageTransformer>(std::move(rga_device));
+    FacePipelineConfig config,
+    std::shared_ptr<RgaExecutor> rga_executor) {
+    auto model_input_transformer =
+        std::make_unique<RgaModelInputTransformer>(
+            std::move(rga_executor));
     auto detector = std::make_unique<RknnFaceDetector>(
         config.detector_model, RknnCore::core0);
     auto landmark = std::make_unique<RknnLandmarkEstimator>(
@@ -43,7 +42,7 @@ std::unique_ptr<FacePipeline> FacePipeline::create(
 
     return std::make_unique<FacePipeline>(
         std::move(config),
-        std::move(image_transformer),
+        std::move(model_input_transformer),
         std::move(detector),
         std::move(landmark),
         std::move(geometry));
@@ -51,16 +50,16 @@ std::unique_ptr<FacePipeline> FacePipeline::create(
 
 FacePipeline::FacePipeline(
     FacePipelineConfig config,
-    std::unique_ptr<ImageTransformer> image_transformer,
+    std::unique_ptr<RgaModelInputTransformer> model_input_transformer,
     std::unique_ptr<FaceDetector> detector,
     std::unique_ptr<LandmarkEstimator> landmark_estimator,
     std::unique_ptr<FaceGeometryEstimator> geometry_estimator)
     : config_(config),
-      image_transformer_(std::move(image_transformer)),
+      model_input_transformer_(std::move(model_input_transformer)),
       detector_(std::move(detector)),
       landmark_estimator_(std::move(landmark_estimator)),
       geometry_estimator_(std::move(geometry_estimator)) {
-    if (!image_transformer_ || !detector_ || !landmark_estimator_ ||
+    if (!model_input_transformer_ || !detector_ || !landmark_estimator_ ||
         !geometry_estimator_) {
         throw std::invalid_argument("FacePipeline dependencies must not be null");
     }
@@ -82,7 +81,7 @@ FacePipeline::FacePipeline(
 
 void FacePipeline::begin_source(VideoStreamGeneration generation) {
     reset_tracking();
-    image_transformer_->begin_source(generation);
+    model_input_transformer_->begin_source(generation);
 }
 
 std::optional<FaceTrackingResult> FacePipeline::process(const FrameView& frame) {
@@ -96,7 +95,7 @@ std::optional<FaceTrackingResult> FacePipeline::process(const FrameView& frame) 
     }
 
     if (must_detect) {
-        ModelInputLease detector_input = image_transformer_->prepare(
+        ModelInputLease detector_input = model_input_transformer_->prepare(
             frame, full_frame_crop(frame), detector_->input_spec());
         std::optional<FaceDetection> detection =
             detector_->detect(detector_input.view());
@@ -110,7 +109,7 @@ std::optional<FaceTrackingResult> FacePipeline::process(const FrameView& frame) 
         frames_since_detection_ = 0;
     }
 
-    ModelInputLease landmark_input = image_transformer_->prepare(
+    ModelInputLease landmark_input = model_input_transformer_->prepare(
         frame,
         face_crop(frame, *tracked_box_),
         landmark_estimator_->input_spec());
@@ -138,7 +137,12 @@ std::optional<FaceTrackingResult> FacePipeline::process(const FrameView& frame) 
 }
 
 void FacePipeline::retire_source(VideoStreamGeneration generation) noexcept {
-    image_transformer_->retire_source(generation);
+    model_input_transformer_->retire_source(generation);
+    reset_tracking();
+}
+
+void FacePipeline::finish() noexcept {
+    model_input_transformer_->finish();
     reset_tracking();
 }
 

@@ -95,7 +95,7 @@ private:
  * <div class="vtb-resource-card vtb-resource-card--borrowed">
  *   <div class="vtb-resource-card__title">借用模型输入存储</div>
  *   <span class="vtb-resource-borrowed">frame_</span> 中的 CPU 地址和 fd 由创建它的
- *   ImageTransformer 及 ModelInputLease 保持有效。ModelInputView 析构时只销毁
+ *   RgaModelInputTransformer 及 ModelInputLease 保持有效。ModelInputView 析构时只销毁
  *   按值保存的元数据，实际存储由对应的所有者管理。
  * </div>
  * @endhtmlonly
@@ -128,8 +128,8 @@ private:
  *
  * 租约不可复制，可以 noexcept 移动；移动会转移保活动作和 valid_ 状态，并把来源
  * 对象重置为可安全析构的无效状态。析构或移动赋值覆盖旧值时执行一次该动作。
- * 当前 RgaImageTransformer 路径把 KeepRgaBufferAlive 保存为该动作；调用体为空，
- * std::function 销毁时释放其中的 shared_ptr，从而延长 RgaBuffer 生命周期。
+ * 当前 RgaModelInputTransformer 路径把 KeepRgaTransformAlive 保存为该动作；
+ * std::function 销毁时释放其中的 RgaTransformLease，从而归还目标池槽位。
  *
  * @htmlonly
  * <div class="vtb-resource-card">

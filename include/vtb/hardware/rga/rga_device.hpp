@@ -12,6 +12,7 @@ enum class RgaPixelFormat {
     nv12,
     nv21,
     rgb888,
+    rgba8888,
 };
 
 class RgaBufferDescription final {
@@ -105,24 +106,27 @@ private:
 };
 
 /**
- * @brief 可由同一业务模块内多个 RGA 适配器共享的执行资源。
+ * @brief 由一个 RgaExecutor Worker 独占的 librga 同步执行端。
  *
- * Buffer 对象分别拥有导入 handle、复制 fd 或 DMA heap 分配。设备对象保存 DMA heap
- * 配置并串行保护 librga 提交入口；它不创建工作线程。
+ * RgaBuffer 对象拥有导入 handle、复制 fd 或 DMA heap 分配。缓冲区导入和分配是
+ * 与 RGA 核心无关的资源操作，因此由静态成员供 RgaTransformSession 使用；实例
+ * 方法只执行已经解析好的同步 RGA 命令。每个实例只由一个 Worker 调用，无需再用
+ * 粗粒度互斥锁包围 IM_SYNC。
  */
 class RgaDevice final {
 public:
-    explicit RgaDevice(std::string dma_heap_path);
-    ~RgaDevice();
+    RgaDevice() = default;
+    ~RgaDevice() = default;
 
     RgaDevice(const RgaDevice&) = delete;
     RgaDevice& operator=(const RgaDevice&) = delete;
     RgaDevice(RgaDevice&&) = delete;
     RgaDevice& operator=(RgaDevice&&) = delete;
 
-    std::shared_ptr<RgaBuffer> register_dma_buf(
+    static std::shared_ptr<RgaBuffer> register_dma_buf(
         const RgaBufferDescription& description);
-    std::shared_ptr<RgaBuffer> allocate_buffer(
+    static std::shared_ptr<RgaBuffer> allocate_buffer(
+        const std::string& dma_heap_path,
         std::uint32_t width,
         std::uint32_t height,
         std::uint32_t horizontal_stride,
@@ -134,10 +138,9 @@ public:
         const RgaBuffer& source,
         const RgaRectangle& source_rectangle,
         const RgaBuffer& destination);
-
-private:
-    class Impl;
-    std::unique_ptr<Impl> impl_;
+    void convert_rgba_to_nv12(
+        const RgaBuffer& source,
+        const RgaBuffer& destination);
 };
 
 }  // namespace vtb

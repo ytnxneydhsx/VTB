@@ -4,7 +4,6 @@
 #include <cerrno>
 #include <climits>
 #include <fcntl.h>
-#include <mutex>
 #include <stdexcept>
 #include <system_error>
 #include <sys/ioctl.h>
@@ -41,6 +40,9 @@ int native_format(RgaPixelFormat format) {
     }
     if (format == RgaPixelFormat::rgb888) {
         return RK_FORMAT_RGB_888;
+    }
+    if (format == RgaPixelFormat::rgba8888) {
+        return RK_FORMAT_RGBA_8888;
     }
     throw std::invalid_argument("Unsupported RGA pixel format");
 }
@@ -172,34 +174,6 @@ private:
     rga_buffer_t buffer_{};
 };
 
-class RgaDevice::Impl final {
-public:
-    explicit Impl(std::string dma_heap_path)
-        : dma_heap_path_(std::move(dma_heap_path)) {
-        if (dma_heap_path_.empty()) {
-            throw std::invalid_argument("RGA DMA heap path must not be empty");
-        }
-    }
-    ~Impl() = default;
-
-    Impl(const Impl&) = delete;
-    Impl& operator=(const Impl&) = delete;
-    Impl(Impl&&) = delete;
-    Impl& operator=(Impl&&) = delete;
-
-    const std::string& dma_heap_path() const noexcept {
-        return dma_heap_path_;
-    }
-
-    std::mutex& submission_mutex() noexcept {
-        return submission_mutex_;
-    }
-
-private:
-    std::string dma_heap_path_;
-    std::mutex submission_mutex_;
-};
-
 RgaBufferDescription::RgaBufferDescription(
     int dma_buf_fd,
     std::size_t size_bytes,
@@ -249,10 +223,6 @@ std::uint32_t RgaBuffer::height() const noexcept { return impl_->height(); }
 std::uint32_t RgaBuffer::stride_bytes() const noexcept { return impl_->stride_bytes(); }
 RgaPixelFormat RgaBuffer::format() const noexcept { return impl_->format(); }
 
-RgaDevice::RgaDevice(std::string dma_heap_path)
-    : impl_(std::make_unique<Impl>(std::move(dma_heap_path))) {}
-RgaDevice::~RgaDevice() = default;
-
 std::shared_ptr<RgaBuffer> RgaDevice::register_dma_buf(
     const RgaBufferDescription& description) {
     if (description.dma_buf_fd() < 0 || description.size_bytes() == 0) {
@@ -279,6 +249,7 @@ std::shared_ptr<RgaBuffer> RgaDevice::register_dma_buf(
 }
 
 std::shared_ptr<RgaBuffer> RgaDevice::allocate_buffer(
+    const std::string& dma_heap_path,
     std::uint32_t width,
     std::uint32_t height,
     std::uint32_t horizontal_stride,
@@ -293,10 +264,12 @@ std::shared_ptr<RgaBuffer> RgaDevice::allocate_buffer(
         throw std::invalid_argument("RGA output buffer size is invalid");
     }
 
-    UniqueFd heap(open(
-        impl_->dma_heap_path().c_str(), O_RDONLY | O_CLOEXEC));
+    if (dma_heap_path.empty()) {
+        throw std::invalid_argument("RGA DMA heap path must not be empty");
+    }
+    UniqueFd heap(open(dma_heap_path.c_str(), O_RDONLY | O_CLOEXEC));
     if (heap.get() < 0) {
-        throw_errno("open RGA DMA heap " + impl_->dma_heap_path());
+        throw_errno("open RGA DMA heap " + dma_heap_path);
     }
     dma_heap_allocation_data allocation{};
     allocation.len = size_bytes;
@@ -362,7 +335,6 @@ void RgaDevice::crop_scale_convert(
     rga_buffer_t pattern_buffer{};
     im_rect pattern_rect{};
 
-    std::lock_guard<std::mutex> lock(impl_->submission_mutex());
     require_rga_success(
         imcheck_t(
             source_buffer,
@@ -383,6 +355,25 @@ void RgaDevice::crop_scale_convert(
             pattern_rect,
             IM_SYNC),
         "RGA crop/scale/color conversion");
+}
+
+void RgaDevice::convert_rgba_to_nv12(
+    const RgaBuffer& source,
+    const RgaBuffer& destination) {
+    if (source.format() != RgaPixelFormat::rgba8888 ||
+        destination.format() != RgaPixelFormat::nv12) {
+        throw std::invalid_argument(
+            "RGA RGBA-to-NV12 conversion requires RGBA8888 and NV12 buffers");
+    }
+    require_rga_success(
+        imcvtcolor_t(
+            source.impl_->buffer(),
+            destination.impl_->buffer(),
+            RK_FORMAT_RGBA_8888,
+            RK_FORMAT_YCbCr_420_SP,
+            IM_RGB_TO_YUV_BT601_LIMIT,
+            1),
+        "RGA RGBA-to-NV12 conversion");
 }
 
 }  // namespace vtb
