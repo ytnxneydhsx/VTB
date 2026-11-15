@@ -28,6 +28,8 @@ set(VTB_LIBGODOT_LIBRARY "" CACHE FILEPATH
     "ARM64 LibGodot shared library containing the OpenVT bridge")
 set(VTB_EMBEDDED_RPATH_LINK "" CACHE STRING
     "Semicolon-separated ARM64 dependency directories for the LibGodot host link")
+set(VTB_GSTREAMER_ROOT "" CACHE PATH
+    "Staged GStreamer 1.28.9 root containing /opt/vtb/gstreamer-1.28.9")
 
 if(VTB_ENABLE_ROCKCHIP_MPP_PUBLISHER OR VTB_ENABLE_RGA_FACE OR
    VTB_ENABLE_EMBEDDED_GODOT)
@@ -333,7 +335,6 @@ endif()
 if(VTB_ENABLE_RGA_FACE OR VTB_ENABLE_EMBEDDED_GODOT)
     add_library(vtb_rga_core STATIC
         src/hardware/rga/rga_device.cpp
-        src/hardware/rga/rga_executor.cpp
         src/hardware/rga/rga_nv12_frame_transformer.cpp
         src/hardware/rga/rga_transform_session.cpp
         src/hardware/rga/rga_transformer.cpp
@@ -344,7 +345,6 @@ if(VTB_ENABLE_RGA_FACE OR VTB_ENABLE_EMBEDDED_GODOT)
         SYSTEM PRIVATE "${VTB_RGA_INCLUDE_DIR}")
     target_link_libraries(vtb_rga_core
         PRIVATE
-            vtb_instrumentation
             Threads::Threads
             "${VTB_RGA_LIBRARY}"
     )
@@ -412,23 +412,15 @@ target_link_libraries(vtb_application_video_input
     PRIVATE vtb_capture)
 vtb_configure_target(vtb_application_video_input)
 
-add_library(vtb_media_output_session STATIC apps/vtb-live2d/media_output_session.cpp)
-target_include_directories(vtb_media_output_session PUBLIC apps/vtb-live2d)
-target_link_libraries(vtb_media_output_session
-    PUBLIC vtb_output_core
-    PRIVATE vtb_instrumentation)
-vtb_configure_target(vtb_media_output_session)
-
 add_executable(vtb src/main.cpp)
 target_link_libraries(vtb PRIVATE vtb_capture)
 vtb_configure_target(vtb)
 
 if(VTB_ENABLE_EMBEDDED_GODOT)
     if(NOT VTB_ENABLE_OPENCV_FACE_PIPELINE OR NOT VTB_ENABLE_RKNN_FACE OR
-       NOT VTB_ENABLE_RGA_FACE OR NOT VTB_ENABLE_RTSP_OUTPUT OR
-       NOT VTB_ENABLE_UVC_OUTPUT)
+       NOT VTB_ENABLE_RGA_FACE)
         message(FATAL_ERROR
-            "VTB_ENABLE_EMBEDDED_GODOT requires OpenCV, RKNN, RGA face backends, RTSP and UVC output")
+            "VTB_ENABLE_EMBEDDED_GODOT requires OpenCV, RKNN and RGA face backends")
     endif()
     if(VTB_GODOT_SOURCE_ROOT STREQUAL "")
         message(FATAL_ERROR
@@ -438,6 +430,10 @@ if(VTB_ENABLE_EMBEDDED_GODOT)
         message(FATAL_ERROR
             "VTB_LIBGODOT_LIBRARY is required for the embedded Godot host")
     endif()
+    if(VTB_GSTREAMER_ROOT STREQUAL "")
+        message(FATAL_ERROR
+            "VTB_GSTREAMER_ROOT is required for the embedded Godot host")
+    endif()
     if(NOT EXISTS "${VTB_GODOT_SOURCE_ROOT}/core/extension/libgodot.h")
         message(FATAL_ERROR "VTB_GODOT_SOURCE_ROOT does not contain LibGodot headers")
     endif()
@@ -445,19 +441,78 @@ if(VTB_ENABLE_EMBEDDED_GODOT)
         message(FATAL_ERROR "VTB_LIBGODOT_LIBRARY does not exist")
     endif()
 
-    add_library(vtb_media_encode_session STATIC
-        apps/vtb-live2d/media_encode_session.cpp
+    set(VTB_GSTREAMER_PREFIX
+        "${VTB_GSTREAMER_ROOT}/opt/vtb/gstreamer-1.28.9")
+    find_path(VTB_GSTREAMER_INCLUDE_DIR gst/gst.h
+        PATHS "${VTB_GSTREAMER_PREFIX}/include/gstreamer-1.0"
+        NO_DEFAULT_PATH REQUIRED)
+    find_path(VTB_GLIB_INCLUDE_DIR glib.h
+        PATHS
+            "${VTB_GSTREAMER_ROOT}/usr/include/glib-2.0"
+            "${VTB_ROCKCHIP_SYSROOT}/usr/include/glib-2.0"
+        NO_DEFAULT_PATH REQUIRED)
+    find_path(VTB_GLIB_CONFIG_INCLUDE_DIR glibconfig.h
+        PATHS
+            "${VTB_GSTREAMER_ROOT}/usr/lib/aarch64-linux-gnu/glib-2.0/include"
+            "${VTB_GSTREAMER_ROOT}/usr/lib64/glib-2.0/include"
+            "${VTB_ROCKCHIP_SYSROOT}/usr/lib/aarch64-linux-gnu/glib-2.0/include"
+        NO_DEFAULT_PATH REQUIRED)
+    find_library(VTB_GSTREAMER_LIBRARY gstreamer-1.0
+        PATHS "${VTB_GSTREAMER_PREFIX}/lib/aarch64-linux-gnu"
+        NO_DEFAULT_PATH REQUIRED)
+    find_library(VTB_GSTAPP_LIBRARY gstapp-1.0
+        PATHS "${VTB_GSTREAMER_PREFIX}/lib/aarch64-linux-gnu"
+        NO_DEFAULT_PATH REQUIRED)
+    find_library(VTB_GSTALLOCATORS_LIBRARY gstallocators-1.0
+        PATHS "${VTB_GSTREAMER_PREFIX}/lib/aarch64-linux-gnu"
+        NO_DEFAULT_PATH REQUIRED)
+    find_library(VTB_GSTVIDEO_LIBRARY gstvideo-1.0
+        PATHS "${VTB_GSTREAMER_PREFIX}/lib/aarch64-linux-gnu"
+        NO_DEFAULT_PATH REQUIRED)
+    find_library(VTB_GSTBASE_LIBRARY gstbase-1.0
+        PATHS "${VTB_GSTREAMER_PREFIX}/lib/aarch64-linux-gnu"
+        NO_DEFAULT_PATH REQUIRED)
+    set(VTB_GSTREAMER_LIBRARIES
+        "${VTB_GSTREAMER_LIBRARY}"
+        "${VTB_GSTAPP_LIBRARY}"
+        "${VTB_GSTALLOCATORS_LIBRARY}"
+        "${VTB_GSTVIDEO_LIBRARY}"
+        "${VTB_GSTBASE_LIBRARY}")
+    find_library(VTB_GOBJECT_LIBRARY gobject-2.0
+        PATHS
+            "${VTB_GSTREAMER_ROOT}/usr/lib/aarch64-linux-gnu"
+            "${VTB_GSTREAMER_ROOT}/usr/lib64"
+            "${VTB_ROCKCHIP_SYSROOT}/usr/lib/aarch64-linux-gnu"
+        NO_DEFAULT_PATH REQUIRED)
+    find_library(VTB_GLIB_LIBRARY glib-2.0
+        PATHS
+            "${VTB_GSTREAMER_ROOT}/usr/lib/aarch64-linux-gnu"
+            "${VTB_GSTREAMER_ROOT}/usr/lib64"
+            "${VTB_ROCKCHIP_SYSROOT}/usr/lib/aarch64-linux-gnu"
+        NO_DEFAULT_PATH REQUIRED)
+
+    add_library(vtb_gstreamer_media_session STATIC
+        apps/vtb-live2d/gstreamer_media_session.cpp
         apps/vtb-live2d/mpp_encoder_session.cpp
     )
-    target_include_directories(vtb_media_encode_session
+    target_include_directories(vtb_gstreamer_media_session
         PUBLIC apps/vtb-live2d
-        SYSTEM PRIVATE "${VTB_MPP_INCLUDE_DIR}"
+        SYSTEM PRIVATE
+            "${VTB_MPP_INCLUDE_DIR}"
+            "${VTB_GSTREAMER_INCLUDE_DIR}"
+            "${VTB_GLIB_INCLUDE_DIR}"
+            "${VTB_GLIB_CONFIG_INCLUDE_DIR}"
     )
-    target_link_libraries(vtb_media_encode_session
-        PUBLIC vtb_instrumentation
-        PRIVATE "${VTB_MPP_LIBRARY}"
+    target_link_libraries(vtb_gstreamer_media_session
+        PUBLIC vtb_instrumentation vtb_rga_core
+        PRIVATE
+            Threads::Threads
+            "${VTB_MPP_LIBRARY}"
+            ${VTB_GSTREAMER_LIBRARIES}
+            "${VTB_GOBJECT_LIBRARY}"
+            "${VTB_GLIB_LIBRARY}"
     )
-    vtb_configure_target(vtb_media_encode_session)
+    vtb_configure_target(vtb_gstreamer_media_session)
 
     add_executable(vtb-live2d
         apps/vtb-live2d/libgodot_instance.cpp
@@ -476,10 +531,7 @@ if(VTB_ENABLE_EMBEDDED_GODOT)
             vtb_live2d_stages
             vtb_live2d_control
             vtb_rga_core
-            vtb_media_encode_session
-            vtb_media_output_session
-            vtb_output_rtsp
-            vtb_output_uvc
+            vtb_gstreamer_media_session
             vtb_application_config
             vtb_application_video_input
             vtb_face_pipeline
@@ -492,10 +544,10 @@ if(VTB_ENABLE_EMBEDDED_GODOT)
             "-Wl,-rpath-link,${dependency_directory}")
     endforeach()
     set_target_properties(vtb-live2d PROPERTIES
-        BUILD_RPATH "$ORIGIN"
+        BUILD_RPATH "$ORIGIN;/opt/vtb/gstreamer-1.28.9/lib/aarch64-linux-gnu"
         BUILD_RPATH_USE_ORIGIN TRUE
         BUILD_WITH_INSTALL_RPATH TRUE
-        INSTALL_RPATH "$ORIGIN"
+        INSTALL_RPATH "$ORIGIN;/opt/vtb/gstreamer-1.28.9/lib/aarch64-linux-gnu"
     )
     vtb_configure_target(vtb-live2d)
 endif()

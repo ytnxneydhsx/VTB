@@ -11,9 +11,8 @@
 #include <utility>
 #include <vector>
 
+#include "gstreamer_media_session.hpp"
 #include "live2d_control_server.hpp"
-#include "media_encode_session.hpp"
-#include "media_output_session.hpp"
 #include "pipeline/face_tracking_stage.hpp"
 #include "pipeline/godot_render_pipeline.hpp"
 #include "pipeline/godot_render_stage.hpp"
@@ -21,9 +20,6 @@
 #include "pipeline/video_capture_stage.hpp"
 #include "vtb/config/config_file_reader.hpp"
 #include "vtb/config/vtb_application_config.hpp"
-#include "vtb/hardware/rga/rga_executor.hpp"
-#include "vtb/output/rtsp_output.hpp"
-#include "vtb/output/gstreamer_uvc_output.hpp"
 #include "video_input_factory.hpp"
 
 namespace vtb {
@@ -161,53 +157,23 @@ public:
         Live2DTrackingChannel tracking_channel(
             1, messaging::ChannelOverflowPolicy::drop_oldest);
 
-        const std::string output_metrics_path = metrics_path(
-            config_.instrumentation,
-            "vtb-live2d-output.metrics.jsonl");
         const std::string render_metrics_path = metrics_path(
             config_.instrumentation,
             "vtb-live2d-render.metrics.jsonl");
-        const std::string encode_metrics_path = metrics_path(
+        const std::string media_metrics_path = metrics_path(
             config_.instrumentation,
-            "vtb-live2d-encode.metrics.jsonl");
-        const std::string rga_metrics_path = metrics_path(
-            config_.instrumentation,
-            "vtb-live2d-rga.metrics.jsonl");
-        std::unique_ptr<Output> uvc_output;
-        if (config_.output.uvc_enabled) {
-            GstreamerUvcOutputConfig uvc_config;
-            uvc_config.gst_launch_path = config_.output.gst_launch_path;
-            uvc_config.device_path = config_.output.uvc_device;
-            uvc_config.library_path = config_.output.gstreamer_library_path;
-            uvc_config.plugin_path = config_.output.gstreamer_plugin_path;
-            uvc_output = std::make_unique<GstreamerUvcOutput>(
-                std::move(uvc_config));
-        }
-        MediaOutputSessionConfig media_output_config;
-        media_output_config.metrics_path = output_metrics_path;
-        media_output_config.metrics_report_interval = metrics_report_interval;
-        MediaOutputSession media_output(
-            std::make_unique<RtspOutput>(config_.output.rtsp_url),
-            std::move(uvc_output),
-            std::move(media_output_config));
-        MediaEncodeSessionConfig media_encode_config;
-        media_encode_config.uvc_fps = config_.output.uvc_fps;
-        media_encode_config.metrics_path = encode_metrics_path;
-        media_encode_config.metrics_report_interval = metrics_report_interval;
-        MediaEncodeSession media_encode(
-            media_output.sink(), std::move(media_encode_config));
-        RgaExecutorConfig rga_executor_config;
-        rga_executor_config.dma_heap_path =
-            config_.face_pipeline.rga_dma_heap;
-        rga_executor_config.worker_count = 2;
-        rga_executor_config.queue_capacity = 4;
-        rga_executor_config.metrics_path = rga_metrics_path;
-        rga_executor_config.metrics_report_interval = metrics_report_interval;
-        std::shared_ptr<RgaExecutor> rga_executor =
-            std::make_shared<RgaExecutor>(std::move(rga_executor_config));
-
+            "vtb-live2d-gstreamer-media.metrics.jsonl");
+        GStreamerMediaSessionConfig media_config;
+        media_config.rtsp_url = config_.output.rtsp_url;
+        media_config.uvc_enabled = config_.output.uvc_enabled;
+        media_config.uvc_device = config_.output.uvc_device;
+        media_config.uvc_fps = config_.output.uvc_fps;
+        media_config.plugin_path = config_.output.gstreamer_plugin_path;
+        media_config.metrics_path = media_metrics_path;
+        media_config.metrics_report_interval = metrics_report_interval;
+        GStreamerMediaSession media(std::move(media_config));
         std::unique_ptr<FacePipeline> face_pipeline =
-            FacePipeline::create(config_.face_pipeline, rga_executor);
+            FacePipeline::create(config_.face_pipeline);
         std::unique_ptr<Live2DTrackingPipeline> tracking_pipeline =
             std::make_unique<Live2DTrackingPipeline>(
                 std::move(face_pipeline), config_.mapping);
@@ -222,10 +188,12 @@ public:
         Live2DControlServer control_server(
             config_.control, face_tracking_stage);
 
-        // create() 装配渲染、共享 RGA Executor 与 NV12 同步接收器。Stage 的所有者
-        // 线程负责 LibGodot；RGA 命令由 Executor Worker 执行，结果返回后同步进入 MPP。
+        // create() 装配渲染、线程内同步 RGA 转换与异步 GStreamer 接收器。
+        // Godot 所有者线程移动交付 Nv12FrameLease；编码和输出由 GStreamer 分支完成。
         GodotRenderPipelineConfig godot_render_config;
         godot_render_config.render = config_.render;
+        godot_render_config.rga_dma_heap_path =
+            config_.face_pipeline.rga_dma_heap;
         godot_render_config.metrics_path = render_metrics_path;
         godot_render_config.metrics_report_interval = metrics_report_interval;
         std::unique_ptr<GodotRenderPipeline> godot_render_pipeline =
@@ -233,8 +201,7 @@ public:
                 command_line_.passthrough_arguments(),
                 command_line_.iteration_limit(),
                 std::move(godot_render_config),
-                rga_executor,
-                media_encode.sink());
+                media.sink());
         GodotRenderStage godot_render_stage(
             std::move(godot_render_pipeline),
             tracking_channel,
@@ -282,17 +249,7 @@ public:
             remember_first_failure(first_failure, std::current_exception());
         }
         try {
-            rga_executor->finish();
-        } catch (...) {
-            remember_first_failure(first_failure, std::current_exception());
-        }
-        try {
-            media_encode.finish();
-        } catch (...) {
-            remember_first_failure(first_failure, std::current_exception());
-        }
-        try {
-            media_output.finish();
+            media.finish();
         } catch (...) {
             remember_first_failure(first_failure, std::current_exception());
         }

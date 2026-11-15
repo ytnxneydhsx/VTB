@@ -39,7 +39,7 @@ private:
     RgaRectangle source_rectangle_{0, 0, 0, 0};
 };
 
-/** @brief 一个 RgaExecutor Worker 独占的同步命令解释器。 */
+/** @brief 一个业务线程独占的同步 RGA 命令解释器。 */
 class RgaTransformer final {
 public:
     RgaTransformer() = default;

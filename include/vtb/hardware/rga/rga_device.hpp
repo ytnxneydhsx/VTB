@@ -106,7 +106,7 @@ private:
 };
 
 /**
- * @brief 由一个 RgaExecutor Worker 独占的 librga 同步执行端。
+ * @brief 由一个业务线程的 RgaTransformer 独占的 librga 同步执行端。
  *
  * RgaBuffer 对象拥有导入 handle、复制 fd 或 DMA heap 分配。缓冲区导入和分配是
  * 与 RGA 核心无关的资源操作，因此由静态成员供 RgaTransformSession 使用；实例

@@ -19,12 +19,11 @@ public:
         const std::vector<std::string>& passthrough_arguments,
         unsigned long iteration_limit,
         GodotRenderPipelineConfig config,
-        std::shared_ptr<RgaExecutor> rga_executor,
         Nv12FrameSink nv12_sink)
         : passthrough_arguments_(passthrough_arguments),
           iteration_limit_(iteration_limit),
           config_(std::move(config)),
-          rga_transformer_(std::move(rga_executor)),
+          rga_transformer_(config_.rga_dma_heap_path),
           nv12_sink_(nv12_sink),
           prepare_timer_(timers_.register_timer("live2d.parameter_prepare")),
           iteration_timer_(timers_.register_timer("live2d.godot_iteration")),
@@ -43,6 +42,10 @@ public:
         if (config_.render.output_fps == 0) {
             throw std::invalid_argument(
                 "Godot render output FPS must be positive");
+        }
+        if (config_.rga_dma_heap_path.empty()) {
+            throw std::invalid_argument(
+                "Godot render RGA DMA heap path must not be empty");
         }
         if (config_.metrics_report_interval.count() <= 0) {
             throw std::invalid_argument(
@@ -122,9 +125,9 @@ public:
         Nv12FrameLease nv12 = transform_rgba(rgba_frame);
         {
             auto publish_scope = nv12_publish_timer_.scope();
-            if (nv12_sink_.submit(nv12_sink_.context, &nv12.view()) != 0) {
+            if (nv12_sink_.submit(nv12_sink_.context, &nv12) != 0) {
                 throw std::runtime_error(
-                    "NV12 sink rejected an RGA output frame");
+                    "NV12 sink rejected an RGA output frame lease");
             }
         }
         return iteration_finished || godot.should_stop();
@@ -225,14 +228,12 @@ std::unique_ptr<GodotRenderPipeline> GodotRenderPipeline::create(
     const std::vector<std::string>& passthrough_arguments,
     unsigned long iteration_limit,
     GodotRenderPipelineConfig config,
-    std::shared_ptr<RgaExecutor> rga_executor,
     Nv12FrameSink nv12_sink) {
     return std::unique_ptr<GodotRenderPipeline>(
         new GodotRenderPipeline(std::make_unique<Impl>(
             passthrough_arguments,
             iteration_limit,
             std::move(config),
-            std::move(rga_executor),
             nv12_sink)));
 }
 

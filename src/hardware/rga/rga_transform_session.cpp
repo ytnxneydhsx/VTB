@@ -430,16 +430,15 @@ std::uint64_t RgaTransformLease::buffer_id() const noexcept {
 class RgaTransformSession::Impl final {
 public:
     Impl(
-        std::shared_ptr<RgaExecutor> executor,
+        std::string dma_heap_path,
         std::size_t destination_pool_capacity)
-        : executor_(std::move(executor)),
-          destination_pool_capacity_(destination_pool_capacity) {
-        if (!executor_ || destination_pool_capacity_ < 2) {
+        : destination_pool_capacity_(destination_pool_capacity) {
+        if (dma_heap_path.empty() || destination_pool_capacity_ < 2) {
             throw std::invalid_argument(
-                "RGA transform session requires an executor and at least two output slots");
+                "RGA transform session requires a DMA heap and at least two output slots");
         }
         destination_pool_ = std::make_shared<DestinationPool>(
-            executor_->dma_heap_path(), destination_pool_capacity_);
+            std::move(dma_heap_path), destination_pool_capacity_);
     }
 
     ~Impl() {
@@ -493,9 +492,7 @@ public:
             source_buffer,
             destination.buffer(),
             spec.source_rectangle());
-        RgaTaskHandle task = executor_->submit(
-            RgaCommand(std::move(request)));
-        static_cast<void>(task.get());
+        transformer_.transform(request);
         const std::uint64_t buffer_id = destination.buffer_id();
         std::shared_ptr<RgaBuffer> buffer = destination.buffer();
         std::shared_ptr<void> token = destination.take_token();
@@ -560,7 +557,7 @@ private:
         return buffer;
     }
 
-    std::shared_ptr<RgaExecutor> executor_;
+    RgaTransformer transformer_;
     std::size_t destination_pool_capacity_ = 0;
     std::shared_ptr<DestinationPool> destination_pool_;
     std::mutex operation_mutex_;
@@ -570,10 +567,10 @@ private:
 };
 
 RgaTransformSession::RgaTransformSession(
-    std::shared_ptr<RgaExecutor> executor,
+    std::string dma_heap_path,
     std::size_t destination_pool_capacity)
     : impl_(std::make_unique<Impl>(
-          std::move(executor), destination_pool_capacity)) {}
+          std::move(dma_heap_path), destination_pool_capacity)) {}
 
 RgaTransformSession::~RgaTransformSession() = default;
 

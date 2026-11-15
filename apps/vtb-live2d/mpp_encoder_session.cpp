@@ -58,6 +58,58 @@ bool contains_idr(const std::uint8_t* bytes, std::size_t size) {
     return false;
 }
 
+class ImportedInputBuffer final {
+public:
+    ImportedInputBuffer(
+        int dma_buf_fd,
+        std::size_t size,
+        std::uint64_t buffer_id,
+        std::uint64_t stream_generation,
+        MppBuffer buffer) noexcept
+        : dma_buf_fd_(dma_buf_fd),
+          size_(size),
+          buffer_id_(buffer_id),
+          stream_generation_(stream_generation),
+          buffer_(buffer) {}
+
+    ~ImportedInputBuffer() {
+        if (buffer_ != nullptr) {
+            mpp_buffer_put(buffer_);
+        }
+    }
+
+    ImportedInputBuffer(const ImportedInputBuffer&) = delete;
+    ImportedInputBuffer& operator=(const ImportedInputBuffer&) = delete;
+    ImportedInputBuffer(ImportedInputBuffer&&) = delete;
+    ImportedInputBuffer& operator=(ImportedInputBuffer&&) = delete;
+
+    bool matches(
+        int dma_buf_fd,
+        std::size_t size,
+        std::uint64_t buffer_id,
+        std::uint64_t stream_generation) const noexcept {
+        return dma_buf_fd_ == dma_buf_fd && size_ == size &&
+            buffer_id_ == buffer_id &&
+            stream_generation_ == stream_generation;
+    }
+
+    bool same_identity(
+        std::uint64_t buffer_id,
+        std::uint64_t stream_generation) const noexcept {
+        return buffer_id_ == buffer_id &&
+            stream_generation_ == stream_generation;
+    }
+
+    MppBuffer buffer() const noexcept { return buffer_; }
+
+private:
+    int dma_buf_fd_ = -1;
+    std::size_t size_ = 0;
+    std::uint64_t buffer_id_ = 0;
+    std::uint64_t stream_generation_ = 0;
+    MppBuffer buffer_ = nullptr;
+};
+
 }  // namespace
 
 MppEncodedPacket::MppEncodedPacket(
@@ -150,8 +202,6 @@ public:
 
     void initialize(
         MppVideoCodec selected_codec,
-        int input_fd,
-        std::size_t input_size,
         std::uint32_t width,
         std::uint32_t height,
         std::uint32_t horizontal_stride,
@@ -160,10 +210,6 @@ public:
         if (context_ != nullptr) {
             throw std::logic_error("MPP encoder is already initialized");
         }
-        if (input_fd < 0 || input_size == 0) {
-            throw std::invalid_argument("MPP input DMA-BUF is invalid");
-        }
-
         const RK_S32 mpp_width = checked_dimension(width, "width");
         const RK_S32 mpp_height = checked_dimension(height, "height");
         const RK_S32 mpp_horizontal_stride =
@@ -273,16 +319,6 @@ public:
                 }
             }
 
-            MppBufferInfo input_info{};
-            input_info.type = MPP_BUFFER_TYPE_EXT_DMA;
-            input_info.size = input_size;
-            input_info.fd = input_fd;
-            input_info.index = -1;
-            result = mpp_buffer_import(&input_buffer_, &input_info);
-            if (result != MPP_OK) {
-                throw_mpp_error("mpp_buffer_import NV12 DMA-BUF", result);
-            }
-
             result = mpp_frame_init(&frame_);
             if (result != MPP_OK) {
                 throw_mpp_error("mpp_frame_init", result);
@@ -292,7 +328,6 @@ public:
             mpp_frame_set_hor_stride(frame_, mpp_horizontal_stride);
             mpp_frame_set_ver_stride(frame_, mpp_vertical_stride);
             mpp_frame_set_fmt(frame_, MPP_FMT_YUV420SP);
-            mpp_frame_set_buffer(frame_, input_buffer_);
             codec_ = selected_codec;
         } catch (...) {
             shutdown();
@@ -334,11 +369,25 @@ public:
     }
 
     MppEncodedPacket encode(
+        int input_fd,
+        std::size_t input_size,
+        std::uint64_t buffer_id,
+        std::uint64_t stream_generation,
         std::uint64_t pts_ns,
         bool end_of_stream) {
         if (context_ == nullptr || frame_ == nullptr) {
             throw std::logic_error("MPP encoder is not initialized");
         }
+        if (input_fd < 0 || input_size == 0 || buffer_id == 0 ||
+            stream_generation == 0) {
+            throw std::invalid_argument("MPP input DMA-BUF is invalid");
+        }
+        MppBuffer input_buffer = input_buffer_for(
+            input_fd,
+            input_size,
+            buffer_id,
+            stream_generation);
+        mpp_frame_set_buffer(frame_, input_buffer);
         mpp_frame_set_pts(frame_, static_cast<RK_S64>(pts_ns));
         RK_U32 eos = 0;
         if (end_of_stream) {
@@ -385,15 +434,24 @@ public:
             packet, packet_pts_ns, packet_dts_ns, keyframe);
     }
 
+    void request_idr() {
+        if (context_ == nullptr || codec_ != MppVideoCodec::h264) {
+            throw std::logic_error(
+                "IDR can only be requested from an initialized H.264 encoder");
+        }
+        const MPP_RET result =
+            api_->control(context_, MPP_ENC_SET_IDR_FRAME, nullptr);
+        if (result != MPP_OK) {
+            throw_mpp_error("MPP_ENC_SET_IDR_FRAME", result);
+        }
+    }
+
     void shutdown() noexcept {
         if (frame_ != nullptr) {
             mpp_frame_deinit(&frame_);
             frame_ = nullptr;
         }
-        if (input_buffer_ != nullptr) {
-            mpp_buffer_put(input_buffer_);
-            input_buffer_ = nullptr;
-        }
+        input_buffers_.clear();
         if (config_ != nullptr) {
             mpp_enc_cfg_deinit(config_);
             config_ = nullptr;
@@ -410,6 +468,49 @@ public:
     }
 
 private:
+    MppBuffer input_buffer_for(
+        int input_fd,
+        std::size_t input_size,
+        std::uint64_t buffer_id,
+        std::uint64_t stream_generation) {
+        for (const auto& input : input_buffers_) {
+            if (input->matches(
+                    input_fd,
+                    input_size,
+                    buffer_id,
+                    stream_generation)) {
+                return input->buffer();
+            }
+            if (input->same_identity(buffer_id, stream_generation)) {
+                throw std::invalid_argument(
+                    "MPP DMA-BUF identity changed without stream reconfiguration");
+            }
+        }
+
+        MppBufferInfo input_info{};
+        input_info.type = MPP_BUFFER_TYPE_EXT_DMA;
+        input_info.size = input_size;
+        input_info.fd = input_fd;
+        input_info.index = -1;
+        MppBuffer imported = nullptr;
+        const MPP_RET result = mpp_buffer_import(&imported, &input_info);
+        if (result != MPP_OK || imported == nullptr) {
+            throw_mpp_error("mpp_buffer_import NV12 DMA-BUF", result);
+        }
+        try {
+            input_buffers_.push_back(std::make_unique<ImportedInputBuffer>(
+                input_fd,
+                input_size,
+                buffer_id,
+                stream_generation,
+                imported));
+        } catch (...) {
+            mpp_buffer_put(imported);
+            throw;
+        }
+        return imported;
+    }
+
     void set_config(const char* name, RK_S32 value) {
         const MPP_RET result = mpp_enc_cfg_set_s32(config_, name, value);
         if (result != MPP_OK) {
@@ -421,7 +522,7 @@ private:
     MppCtx context_ = nullptr;
     MppApi* api_ = nullptr;
     MppEncCfg config_ = nullptr;
-    MppBuffer input_buffer_ = nullptr;
+    std::vector<std::unique_ptr<ImportedInputBuffer>> input_buffers_;
     MppFrame frame_ = nullptr;
     std::size_t encoded_bytes_ = 0;
     MppVideoCodec codec_ = MppVideoCodec::h264;
@@ -434,8 +535,6 @@ MppEncoderSession::~MppEncoderSession() = default;
 
 void MppEncoderSession::initialize(
     MppVideoCodec codec,
-    int input_fd,
-    std::size_t input_size,
     std::uint32_t width,
     std::uint32_t height,
     std::uint32_t horizontal_stride,
@@ -443,8 +542,6 @@ void MppEncoderSession::initialize(
     std::uint32_t frames_per_second) {
     impl_->initialize(
         codec,
-        input_fd,
-        input_size,
         width,
         height,
         horizontal_stride,
@@ -458,9 +555,23 @@ MppEncoderSession::h264_codec_configuration() {
 }
 
 MppEncodedPacket MppEncoderSession::encode(
+    int input_fd,
+    std::size_t input_size,
+    std::uint64_t buffer_id,
+    std::uint64_t stream_generation,
     std::uint64_t pts_ns,
     bool end_of_stream) {
-    return impl_->encode(pts_ns, end_of_stream);
+    return impl_->encode(
+        input_fd,
+        input_size,
+        buffer_id,
+        stream_generation,
+        pts_ns,
+        end_of_stream);
+}
+
+void MppEncoderSession::request_idr() {
+    impl_->request_idr();
 }
 
 void MppEncoderSession::shutdown() noexcept {

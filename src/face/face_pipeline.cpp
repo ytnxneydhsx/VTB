@@ -29,11 +29,10 @@ void require_unit_interval(float value, const char* description) {
 }  // namespace
 
 std::unique_ptr<FacePipeline> FacePipeline::create(
-    FacePipelineConfig config,
-    std::shared_ptr<RgaExecutor> rga_executor) {
+    FacePipelineConfig config) {
     auto model_input_transformer =
         std::make_unique<RgaModelInputTransformer>(
-            std::move(rga_executor));
+            config.rga_dma_heap);
     auto detector = std::make_unique<RknnFaceDetector>(
         config.detector_model, RknnCore::core0);
     auto landmark = std::make_unique<RknnLandmarkEstimator>(

@@ -7,7 +7,6 @@
 
 #include "vtb/face/face_types.hpp"
 #include "vtb/face/model_input.hpp"
-#include "vtb/hardware/rga/rga_executor.hpp"
 #include "vtb/hardware/rga/rga_model_input_transformer.hpp"
 
 namespace vtb {
@@ -108,9 +107,7 @@ public:
      * 该入口在 FacePipeline 模块内部装配 RGA、RKNN 与几何估计器；调用方不需要
      * 了解模型 core 分配、Transformer 类型或硬件资源的所有权。
      */
-    static std::unique_ptr<FacePipeline> create(
-        FacePipelineConfig config,
-        std::shared_ptr<RgaExecutor> rga_executor);
+    static std::unique_ptr<FacePipeline> create(FacePipelineConfig config);
 
     /** @brief 依赖注入入口，供独立组件测试和替代后端使用。 */
     FacePipeline(

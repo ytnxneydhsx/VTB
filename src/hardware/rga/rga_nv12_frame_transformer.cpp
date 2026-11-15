@@ -7,6 +7,8 @@
 namespace vtb {
 namespace {
 
+constexpr std::size_t kNv12PoolCapacity = 4;
+
 std::size_t checked_size(std::uint64_t size) {
     if (size == 0 ||
         size > static_cast<std::uint64_t>(
@@ -41,8 +43,8 @@ void validate_frame(const RgbaFrameView& frame) {
 
 class RgaNv12FrameTransformer::Impl final {
 public:
-    explicit Impl(std::shared_ptr<RgaExecutor> executor)
-        : session_(std::move(executor), 2) {}
+    explicit Impl(std::string dma_heap_path)
+        : session_(std::move(dma_heap_path), kNv12PoolCapacity) {}
     ~Impl() { finish(); }
 
     Impl(const Impl&) = delete;
@@ -144,8 +146,8 @@ private:
 };
 
 RgaNv12FrameTransformer::RgaNv12FrameTransformer(
-    std::shared_ptr<RgaExecutor> executor)
-    : impl_(std::make_unique<Impl>(std::move(executor))) {}
+    std::string dma_heap_path)
+    : impl_(std::make_unique<Impl>(std::move(dma_heap_path))) {}
 
 RgaNv12FrameTransformer::~RgaNv12FrameTransformer() = default;
 

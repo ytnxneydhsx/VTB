@@ -3,8 +3,9 @@
 #include <cstddef>
 #include <cstdint>
 #include <memory>
+#include <string>
 
-#include "vtb/hardware/rga/rga_executor.hpp"
+#include "vtb/hardware/rga/rga_transformer.hpp"
 
 namespace vtb {
 
@@ -124,14 +125,15 @@ private:
 /**
  * @brief 一个业务生产者独占的 RGA 导入缓存、目标池和同步提交会话。
  *
- * Session 每次 transform() 只允许一个调用进入，但不同 Session 可同时向共享
- * RgaExecutor 提交。源注册按 fd、buffer_id、stream_generation、尺寸、stride 和
- * 格式缓存；目标池槽位由 RgaTransformLease 的寿命控制。
+ * Session 每次 transform() 只允许一个调用进入，并在所属业务线程直接同步调用
+ * RgaTransformer。不同 Session 可由不同业务线程并发向 librga 提交；硬件核心由
+ * RGA 驱动调度。源注册按 fd、buffer_id、stream_generation、尺寸、stride 和格式
+ * 缓存；目标池槽位由 RgaTransformLease 的寿命控制。
  */
 class RgaTransformSession final {
 public:
     explicit RgaTransformSession(
-        std::shared_ptr<RgaExecutor> executor,
+        std::string dma_heap_path,
         std::size_t destination_pool_capacity = 2);
     ~RgaTransformSession();
 

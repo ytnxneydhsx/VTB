@@ -223,8 +223,8 @@ void validate_request(
 
 class RgaModelInputTransformer::Impl final {
 public:
-    explicit Impl(std::shared_ptr<RgaExecutor> executor)
-        : session_(std::move(executor), 2) {}
+    explicit Impl(std::string dma_heap_path)
+        : session_(std::move(dma_heap_path), 2) {}
     ~Impl() { finish(); }
 
     Impl(const Impl&) = delete;
@@ -329,8 +329,8 @@ private:
 };
 
 RgaModelInputTransformer::RgaModelInputTransformer(
-    std::shared_ptr<RgaExecutor> executor)
-    : impl_(std::make_unique<Impl>(std::move(executor))) {}
+    std::string dma_heap_path)
+    : impl_(std::make_unique<Impl>(std::move(dma_heap_path))) {}
 
 RgaModelInputTransformer::~RgaModelInputTransformer() = default;
 

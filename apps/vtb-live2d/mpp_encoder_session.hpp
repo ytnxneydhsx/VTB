@@ -55,8 +55,6 @@ public:
 
     void initialize(
         MppVideoCodec codec,
-        int input_fd,
-        std::size_t input_size,
         std::uint32_t width,
         std::uint32_t height,
         std::uint32_t horizontal_stride,
@@ -64,8 +62,13 @@ public:
         std::uint32_t frames_per_second);
     std::vector<std::uint8_t> h264_codec_configuration();
     MppEncodedPacket encode(
+        int input_fd,
+        std::size_t input_size,
+        std::uint64_t buffer_id,
+        std::uint64_t stream_generation,
         std::uint64_t pts_ns,
         bool end_of_stream);
+    void request_idr();
     void shutdown() noexcept;
     std::size_t encoded_bytes() const noexcept;
 

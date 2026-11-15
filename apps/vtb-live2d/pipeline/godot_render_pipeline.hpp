@@ -8,7 +8,6 @@
 
 #include "live2d_tracking_snapshot.hpp"
 #include "vtb/config/vtb_application_config.hpp"
-#include "vtb/hardware/rga/rga_executor.hpp"
 #include "vtb/render/nv12_frame_sink.hpp"
 
 namespace vtb {
@@ -16,6 +15,7 @@ namespace vtb {
 class GodotRenderPipelineConfig final {
 public:
     RenderConfiguration render;
+    std::string rga_dma_heap_path;
     std::string metrics_path;
     std::chrono::milliseconds metrics_report_interval{60000};
 };
@@ -30,9 +30,9 @@ public:
  *
  * 本类不包含 LibGodot ABI、启动参数和资源清理实现，也不创建线程或持有消息通道。
  * 它编排独立的 LibGodotInstance 和 RgaNv12FrameTransformer，从实例取得同步借用的
- * RgbaFrameView，并在 Nv12FrameLease 有效期间同步调用 MediaEncodeSession 提供的
- * Nv12FrameSink。底层 RgbaFrameSink 回调只由 LibGodotInstance 内部接收；RGA Worker
- * 由共享 RgaExecutor 管理。
+ * RgbaFrameView，并把 Nv12FrameLease 移交给 GStreamer 媒体会话。底层
+ * RgbaFrameSink 回调只由 LibGodotInstance 内部接收；RGBA 到 NV12 的 RGA 转换在
+ * Godot 所有者线程同步执行，编码和协议输出由 GStreamer 分支异步完成。
  */
 class GodotRenderPipeline final {
 public:
@@ -40,7 +40,6 @@ public:
         const std::vector<std::string>& passthrough_arguments,
         unsigned long iteration_limit,
         GodotRenderPipelineConfig config,
-        std::shared_ptr<RgaExecutor> rga_executor,
         Nv12FrameSink nv12_sink);
 
     ~GodotRenderPipeline();

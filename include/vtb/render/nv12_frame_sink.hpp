@@ -6,12 +6,7 @@
 
 namespace vtb {
 
-/**
- * @brief 在一次同步回调期间借用的 NV12 DMA-BUF 帧描述。
- *
- * dma_buf_fd 指向的内容只保证在 Nv12FrameSink::submit 回调返回前保持不变。
- * 消费者如需异步持有帧，必须先引入显式槽位租约和归还协议。
- */
+/** @brief NV12 DMA-BUF 帧描述。 */
 class Nv12FrameView final {
 public:
     int dma_buf_fd = -1;
@@ -55,13 +50,16 @@ private:
 };
 
 /**
- * @brief LibGodot 向宿主同步交付 NV12 DMA-BUF 的稳定 ABI 回调。
+ * @brief 把 NV12 DMA-BUF 槽位租约移动给异步媒体消费者的宿主回调。
+ *
+ * submit 成功后消费者必须从 frame 移走租约；最后一个异步消费者释放租约时，
+ * RGA 目标槽位才重新可用。失败时调用方仍拥有 frame，可按正常析构路径归还。
  */
 class Nv12FrameSink final {
 public:
     void* context = nullptr;
     std::int32_t (*submit)(
-        void* context, const Nv12FrameView* frame) noexcept = nullptr;
+        void* context, Nv12FrameLease* frame) noexcept = nullptr;
 };
 
 }  // namespace vtb
