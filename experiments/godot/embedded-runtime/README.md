@@ -2,7 +2,8 @@
 
 This directory contains the product path where `vtb-live2d` owns the process
 entry point, frame clock, face tracking, Godot iteration, Live2D rendering,
-DMA-BUF capture, RGA conversion, host-side MPP encoding, RTSP output, and shutdown order.
+DMA-BUF capture, RGA conversion, GStreamer-managed MPP branches, RTSP/UVC output,
+and shutdown order.
 
 The product bootstrap project contains one empty scene and no GDScript. C++
 creates the `SubViewport`, loads Ayagami, registers its three blend modes,
@@ -69,7 +70,8 @@ The patch boundary and verification requirements are documented in
 separate resource root with `--path`. The host CMake target is enabled with
 `VTB_ENABLE_EMBEDDED_GODOT=ON`, `VTB_ENABLE_OPENCV_FACE_PIPELINE=ON`,
 `VTB_ENABLE_RKNN_FACE=ON`, `VTB_ENABLE_RGA_FACE=ON`,
-`VTB_ENABLE_RTSP_OUTPUT=ON`, `VTB_ENABLE_UVC_OUTPUT=ON`, `VTB_GODOT_SOURCE_ROOT`, and
+`VTB_ENABLE_RTSP_OUTPUT=ON`, `VTB_ENABLE_UVC_OUTPUT=ON`, `VTB_GSTREAMER_ROOT`,
+`VTB_GODOT_SOURCE_ROOT`, and
 `VTB_LIBGODOT_LIBRARY`. `VTB_EMBEDDED_RPATH_LINK` contains the pinned OpenCV,
 FFmpeg, Rockchip, and RKNN ARM64 library directories used while linking the host.
 OpenCV supplies only the PnP geometry implementation; camera capture uses the
@@ -82,23 +84,25 @@ The Godot module is installed from
 - `OPENVT_VTB_SOURCE_ROOT`
 - `OPENVT_BOARD_SYSROOT`
 
-OpenCV core/calib, RKNN, RGA, MPP, FFmpeg and OutputManager are host executable dependencies. They are absent
-from the LibGodot module source list and link list. The module compiles only the
+OpenCV core/calib, RKNN, RGA, MPP and GStreamer are host executable dependencies. They are
+absent from the LibGodot module source list and link list. The module compiles only the
 `Live2DParameters` value object; `Live2DFaceMapper` remains on the host side.
 
 The application directly owns the pipeline stages, their bounded channels,
-`Live2DControlServer`, `MediaEncodeSession`, and `MediaOutputSession`. The module
+`Live2DControlServer`, and `GStreamerMediaSession`. The module
 receives parameters, renders, obtains the Viewport texture, submits the GPU blit, waits for
 GPU completion, and returns a borrowed RGBA DMA-BUF through `RgbaFrameSink`. The host
-submits it through the Godot-owned `RgaNv12FrameTransformer` session to the shared
-two-worker `RgaExecutor`, waits synchronously, feeds the leased NV12 result to two MPP
-sessions, and copies their borrowed encoded packets before enqueueing. Face preprocessing
-uses a separate session and target pool on the same executor.
+submits it through the Godot-owned `RgaNv12FrameTransformer` session, calls librga
+synchronously on the Godot owner thread, and moves the leased NV12 result into a GStreamer
+DMA-BUF `GstBuffer`. A tee and two bounded leaky queues drive independent H.264 and MJPEG
+MPP sessions; their encoded packets are copied into GStreamer-owned buffers for RTSP and
+UVC output. Face preprocessing uses a
+separate session, target pool, and synchronous RGA execution object on the face thread.
 
 Bridge ABI v6 carries only the RGBA sink and output geometry in the versioned initialize
 contract, with version/size checks. Render metrics and all persistence are owned by the host.
-The optional UVC frame rate belongs to
-the host encoder configuration. Rebuild and deploy the host and LibGodot together.
+The optional UVC frame rate belongs to the host media configuration. Rebuild and deploy the
+host and LibGodot together.
 `output.rtsp_url` configures the H.264 network branch; optional `output.uvc` configures
 the host MPP MJPEG and GStreamer 1.28.9 UVC branch. Source and
 verification details are in

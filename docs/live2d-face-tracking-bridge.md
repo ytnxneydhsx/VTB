@@ -11,7 +11,7 @@ V4L2 CameraSource (MMAP / DQBUF / QBUF)
   → capacity-one BoundedFifoChannel<DecodedFrameLease>
   → FaceTrackingStage
   → RgaModelInputTransformer → Face RgaTransformSession
-  → shared RgaExecutor (2 workers)
+  → 人脸处理线程直接同步调用 RgaTransformer
   → RKNN detector (NPU core 0)
   → RKNN 66-point landmark model (NPU core 1)
   → OpenSeeFace-compatible C++ PnP / expression features
@@ -22,17 +22,17 @@ V4L2 CameraSource (MMAP / DQBUF / QBUF)
   → Ayagami model parameters
   → SubViewport → RGBA DMA-BUF
   → RgbaFrameSink → host RgaNv12FrameTransformer → Godot RgaTransformSession
-  → shared RgaExecutor (2 workers) → NV12
-  → Nv12FrameSink
-  → MediaEncodeSession
-      ├─ MPP H.264 → EncodedVideoSink → OutputManager → RTSP
-      └─ MPP MJPEG → EncodedVideoSink → OutputManager → GStreamer uvcsink → UVC
+  → Godot 所有者线程直接同步调用 RgaTransformer → NV12
+  → Nv12FrameSink（移动 Nv12FrameLease）
+  → GStreamer appsrc → tee
+      ├─ leaky queue → appsink → MPP H.264 → h264 appsrc → RTSP/MediaMTX
+      └─ leaky queue → appsink → MPP MJPEG → jpeg appsrc → uvcsink/UVC
 ```
 
 Godot/Ayagami、Viewport 纹理访问和 GPU copy 位于 LibGodot/OpenVT；RGA、MPP 与输出协议
 位于宿主。`vtb-live2d` 可执行文件直接链接 V4L2 视频输入、OpenCV PnP 几何计算、RKNN、
 Rockchip RGA/MPP 和三个流水线 Stage；LibGodot 共享库不编译摄像头、RKNN 模型、几何估计、
-人脸管线、RGA、MPP、指标报告、OutputManager 或 RTSP 源码，也不链接 RGA/MPP/FFmpeg。
+人脸管线、RGA、MPP、GStreamer、指标报告或输出源码，也不链接 RGA/MPP/GStreamer。
 
 ## 模块边界
 
@@ -43,13 +43,10 @@ Rockchip RGA/MPP 和三个流水线 Stage；LibGodot 共享库不编译摄像头
   同步完成单帧人脸处理与映射，不创建线程或持有消息通道。
 - `FaceTrackingStage`：只连接已配置任务主体、输入通道和输出通道；在自己的线程中
   阻塞取得帧租约、调用主体并发布快照。
-- `VtbApplication`：直接拥有三个 Stage、两条 `BoundedFifoChannel` 和共享
-  `RgaExecutor`，统一安排启动、停止和错误传播。旧 `VideoProcessingRuntime` 只保留给
-  独立协议测试。
-- `RgaExecutor`：容量四的 FIFO 和两个 Worker；每个 Worker 独占一个
-  `RgaTransformer/RgaDevice`，不绑定 RGA 核心。
+- `VtbApplication`：直接拥有三个 Stage 和两条 `BoundedFifoChannel`，统一安排启动、
+  停止和错误传播。旧 `VideoProcessingRuntime` 只保留给独立协议测试。
 - `RgaModelInputTransformer`：FacePipeline 直接持有的模型输入适配器；通过 Face 私有
-  Session 管理摄像头源注册缓存和 RGB888 目标池。
+  Session 管理摄像头源注册缓存和 RGB888 目标池，并在人脸处理线程同步调用 RGA。
 - `RknnFaceDetector` / `RknnLandmarkEstimator`：加载 `.rknn` 模型并固定到两个 NPU core。
 - `OpenSeeFaceGeometryEstimator`：保留 70 点模板、14 点 PnP、Euler 角、66 点反投影和
   Remedian 表情特征语义。
@@ -58,13 +55,12 @@ Rockchip RGA/MPP 和三个流水线 Stage；LibGodot 共享库不编译摄像头
   非阻塞取得新快照。
 - `Live2DControlServer`：独立的 HTTP 控制组件，借用寿命更长的 `FaceTrackingStage`，
   序列化状态和转发命令。
-- `MediaOutputSession`：宿主编码包接收器，按 H.264/MJPEG 类型复制回调中的借用字节，
-  管理 RTSP/UVC 两个输出的启动、排空和停止。
-- `MediaEncodeSession`：同步借用 Godot/OpenVT 交付的 NV12 DMA-BUF，独占 H.264/MJPEG
-  两个 MPP 会话，并把编码包发布给 `MediaOutputSession`；当前不创建线程或帧队列。
+- `GStreamerMediaSession`：取得 NV12 Lease，把 DMA-BUF 和租约绑定到 `GstBuffer`，通过
+  tee、两条有界 leaky queue 与两个 appsink 管理双输出的线程和背压；两个分支各自独占
+  一个 MPP 会话，再把编码包推入 RTSP 与 UVC pipeline。
 - `RgaNv12FrameTransformer`：同步借用 LibGodot 交付的 RGBA DMA-BUF，通过 Godot 私有
-  Session 向共享 Executor 提交 RGBA→NV12 命令，等待完成后把 NV12 Lease 借给
-  `MediaEncodeSession`。
+  Session 在 Godot 所有者线程直接执行 RGBA→NV12，完成后把 NV12 Lease 移动给
+  `GStreamerMediaSession`；RGA 硬件核心由驱动调度。
 - `VtbApplication`：分别创建视频输入、人脸跟踪管线与 Godot 渲染管线，在组合根直接实例化通道和 Stage，
   管理顶层启动、停止和错误传播。
 - `GodotRenderPipeline`：同步渲染任务主体；`create()` 只装配配置与依赖，随后在调用它的

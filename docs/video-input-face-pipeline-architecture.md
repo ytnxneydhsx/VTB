@@ -140,7 +140,7 @@ DecodedFrameLease
         v
 RgaModelInputTransformer::prepare()
         |
-        | RgaTransformSession → shared RgaExecutor
+        | RgaTransformSession → 当前人脸线程同步调用 RgaTransformer
         v
 ModelInputLease
         |
@@ -150,13 +150,13 @@ FaceDetector / LandmarkEstimator
 
 `RgaModelInputTransformer` 可以根据输入和输出规格选择最短路径。例如 YUYV 可以由一次 RGA 操作同时完成 ROI 裁剪、缩放和 RGB 转换。MPP 输出的 NV12 也直接交给 RGA，无需提前生成完整分辨率 RGB 中间帧。
 
-`VtbApplication` 创建共享 `RgaExecutor`，`FacePipeline::create()` 把它注入
-`RgaModelInputTransformer`。转换器独占一个 `RgaTransformSession`；同一源代次首次出现
+`FacePipeline::create()` 使用配置中的 DMA heap 创建 `RgaModelInputTransformer`。转换器
+独占一个 `RgaTransformSession`；同一源代次首次出现
 某个 V4L2 DMA-BUF 时，Session 创建 `RgaBuffer` 租约，复制 fd、导入 RGA handle 并按
 fd、缓冲标识、流代次、尺寸、stride 与格式缓存，后续帧复用该租约。消费线程处理完该代
-最后一帧并调用 `retire_source` 后，统一释放输入 handle 和复制的 fd。每次预处理向有界
-FIFO 提交一个同步等待的 `RgaCommand`，Worker 使用自己独占的 `RgaTransformer` 和
-`RgaDevice` 完成 ROI 裁剪、缩放和 BT.601 limited YUV 到 RGB888 转换。目标 DMA-BUF
+最后一帧并调用 `retire_source` 后，统一释放输入 handle 和复制的 fd。每次预处理由人脸
+处理线程通过 Session 独占的 `RgaTransformer` 和 `RgaDevice` 直接同步完成 ROI 裁剪、
+缩放和 BT.601 limited YUV 到 RGB888 转换。目标 DMA-BUF
 池属于 Face Session，移动 Lease 阻止在途输出槽位被复用。`RgaModelInputTransformer`
 通过 `ModelInputView` 同时
 交付 DMA-BUF fd、CPU 映射地址、缓冲区大小和行步长，不包含 RKNN 头文件，也不创建或
@@ -182,7 +182,7 @@ RKNN Runtime 在内部把模型原生输出转换为 FP32，因此不等同于 N
 并让 CPU 后处理读取模型原生输出类型。
 
 `FacePipeline` 直接持有具体的 `RgaModelInputTransformer`，当前产品没有另一种模型输入
-转换后端，也没有隐式回退。RGA 失败通过任务 future 精确回传到人脸处理线程。该路径解决
+转换后端，也没有隐式回退。RGA 失败沿同步调用栈回传到人脸处理线程。该路径解决
 CPU 预处理开销和整帧 CPU 读取问题；它不会改变检测与关键点模型的调用顺序，也不会自行
 降低 RKNN 推理耗时。验证指标应分别记录 RGA 排队、执行和总延迟、DMA-BUF 首次导入、
 `rknn_run()` 以及完整消费帧耗时。
@@ -497,8 +497,8 @@ FaceTrackingResult
   `LatestFrameSlot` 保留给独立协议测试与旧通用运行时，不再参与产品主链路。
 - `VtbApplication` 直接拥有采集 Stage、Face Stage 和两条容量一通道，并负责停止顺序
   与异常转交；Stage 之间只通过消息通道协作。
-- `VtbApplication` 创建共享 `RgaExecutor`；`FacePipeline::create()` 注入执行器并直接创建
-  `RgaModelInputTransformer`。它的独立 `RgaTransformSession` 缓存摄像头源注册和 RGB888
+- `FacePipeline::create()` 使用配置中的 DMA heap 直接创建 `RgaModelInputTransformer`。
+  它的独立 `RgaTransformSession` 缓存摄像头源注册和 RGB888
   目标池，并在一次任务中完成 YUYV/NV12/NV21 ROI 裁剪、缩放和 224x224 RGB888 转换。
 - `RknnFaceDetector` 与 `RknnLandmarkEstimator`，分别封装 RKNN context、
   NPU core 选择、输入输出张量检查、推理资源释放以及 OpenSeeFace 检测框和
@@ -518,9 +518,9 @@ FaceTrackingResult
   和校准重置。
 - `VtbApplication` 通过 ABI v6 提交参数快照和 `RgbaFrameSink`；Godot/OpenVT 完成
   渲染、GPU copy 和 GPU wait 后同步借出 RGBA DMA-BUF。宿主 `RgaNv12FrameTransformer`
-  完成 RGA 并借出 NV12，随后
-  `MediaEncodeSession` 管理 H.264/MJPEG 两个 MPP 会话，再由 `MediaOutputSession`
-  拷贝编码包并交给 `OutputManager` 的独立 RTSP/UVC 队列。UVC 帧率和协议配置位于
+  完成 RGA 并移动交付 NV12 Lease，随后 `GStreamerMediaSession` 通过 tee 与两条
+  leaky queue 管理 H.264/MJPEG 两个 MPP 分支，并输出到独立 RTSP/UVC pipeline。UVC
+  帧率和协议配置位于
   `output` 段。
 
 MPP 摄像头 MJPEG 解码仍属于后续按测量引入的硬件优化。当前 C++ Live2D 主路径直接

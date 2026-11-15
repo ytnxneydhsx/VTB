@@ -9,7 +9,7 @@
  * 1. @ref face_tracking_coordination "接入与编排"：VtbApplication 组合根、
  *    VideoCaptureStage、FaceTrackingStage、GodotRenderStage、Live2DTrackingPipeline、
  *    GodotRenderPipeline、FacePipeline。
- * 2. @ref face_tracking_model_input "模型输入资源"：RgaExecutor、RgaTransformSession、
+ * 2. @ref face_tracking_model_input "模型输入资源"：RgaTransformSession、RgaTransformer、
  *    RgaDevice、RgaModelInputTransformer、ModelInputLease。
  * 3. @ref face_tracking_inference "检测与关键点"：RknnFaceDetector、RknnLandmarkEstimator。
  * 4. @ref face_tracking_geometry_output "几何与结果"：OpenSeeFaceGeometryEstimator、
@@ -223,8 +223,7 @@
  *     Mapper["Live2DFaceMapper<br/>值成员"]
  *     RGA["RgaModelInputTransformer<br/>图像预处理"]
  *     Session["RgaTransformSession<br/>Face 私有缓存与目标池"]
- *     Executor["RgaExecutor<br/>容量四 FIFO + 两个 Worker"]
- *     Device["Worker 私有 RgaTransformer / RgaDevice"]
+ *     Device["Session 私有 RgaTransformer / RgaDevice"]
  *     Detector["RknnFaceDetector<br/>Core0"]
  *     DetectorModel["RknnModel<br/>检测实例"]
  *     Landmark["RknnLandmarkEstimator<br/>Core1"]
@@ -232,7 +231,6 @@
  *     Geometry["OpenSeeFaceGeometryEstimator<br/>姿态与表情"]
  *
  *     App -->|"红色：局部对象生命期覆盖 run()"| Stage
- *     App -->|"蓝色：shared_ptr 注入两个业务 Pipeline"| Executor
  *     Stage -->|"红色：拥有 std::thread"| Worker
  *     Stage -->|"红色：unique_ptr tracking_pipeline_"| Tracking
  *     Stage -.->|"黄色：input_channel_ 引用"| InputChannel
@@ -245,20 +243,19 @@
  *     Face -->|"红色：unique_ptr landmark_estimator_"| Landmark
  *     Face -->|"红色：unique_ptr geometry_estimator_"| Geometry
  *     RGA -->|"红色：独占业务 Session"| Session
- *     Session -->|"蓝色：shared_ptr 共享执行端"| Executor
- *     Executor -->|"红色：Worker 独占执行资源"| Device
+ *     Session -->|"红色：当前线程直接调用"| Device
  *     Detector -->|"红色：unique_ptr model_"| DetectorModel
  *     Landmark -->|"红色：unique_ptr model_"| LandmarkModel
  *
  *     classDef neutral fill:#161b22,stroke:#8b949e,color:#ffffff
- *     class App,Stage,Worker,InputChannel,OutputChannel,Tracking,Face,Mapper,RGA,Session,Executor,Device,Detector,DetectorModel,Landmark,LandmarkModel,Geometry neutral
+ *     class App,Stage,Worker,InputChannel,OutputChannel,Tracking,Face,Mapper,RGA,Session,Device,Detector,DetectorModel,Landmark,LandmarkModel,Geometry neutral
  * @endmermaid
  *
  * 对象构造与缓存建立发生在不同时机：
  *
  * | 时机 | 执行上下文 | 建立的对象或状态 |
  * | --- | --- | --- |
- * | `VtbApplication::run()` 构造阶段 | 启动工作线程前的调用线程 | 创建共享 RgaExecutor；`FacePipeline::create()` 创建具体模型输入 Transformer、Face 私有 Session、两个 RKNN 模型实例和几何估计器。Executor 启动两个 Worker，每个 Worker 独占 RgaTransformer/RgaDevice。 |
+ * | `VtbApplication::run()` 构造阶段 | 启动工作线程前的调用线程 | `FacePipeline::create()` 创建具体模型输入 Transformer、Face 私有 Session、Session 私有 RgaTransformer/RgaDevice、两个 RKNN 模型实例和几何估计器。 |
  * | `FaceTrackingStage::start()` | 启动调用线程 | 创建 `worker_`，并等待工作线程完成源初始化。 |
  * | `thread_main()` 进入接收循环前 | 人脸工作线程 | `begin_source()` 重置跟踪状态，记录当前 `VideoStreamGeneration`，并以空的 RGA 源注册缓存开始。 |
  * | 首次处理具体输入 Buffer | 人脸工作线程 | RGA 注册源 DMA-BUF、分配模型输入 Buffer；每个 RknnModel 首次收到自己的 DMA-BUF 时建立 `RknnInputBinding`。 |
@@ -280,9 +277,10 @@
  *     Godot["LibGodotInstance 独立模块<br/>LibGodot ABI 与资源"]
  *     Convert["RgaNv12FrameTransformer<br/>宿主 RGBA→NV12"]
  *     GodotSession["RgaTransformSession<br/>Godot 私有缓存与 NV12 池"]
- *     Executor["RgaExecutor<br/>共享两个 Worker"]
- *     Encode["MediaEncodeSession<br/>宿主双路 MPP"]
- *     Output["MediaOutputSession<br/>协议输出接收器"]
+ *     RgaDevice["RgaTransformer / RgaDevice<br/>Godot线程同步调用"]
+ *     Media["GStreamerMediaSession<br/>tee、分支与输出"]
+ *     H264["H.264 分支<br/>queue → appsink → MPP"]
+ *     Mjpeg["MJPEG 分支<br/>queue → appsink → MPP"]
  *
  *     App -->|"红色：局部对象生命期覆盖 run()"| Stage
  *     Stage -->|"红色：拥有 std::thread"| Worker
@@ -293,24 +291,24 @@
  *     Impl -->|"红色：initialize() 后 unique_ptr godot_"| Godot
  *     Impl -->|"红色：直接持有"| Convert
  *     Convert -->|"红色：独占业务 Session"| GodotSession
- *     GodotSession -->|"蓝色：shared_ptr"| Executor
- *     Convert -.->|"黄色：Nv12FrameSink 同步回调"| Encode
- *     Encode -.->|"黄色：EncodedVideoSink 同步回调"| Output
+ *     GodotSession -->|"红色：直接同步调用"| RgaDevice
+ *     App -->|"红色：run() 局部对象"| Media
+ *     Convert -.->|"黄色：Nv12FrameSink 移动 Lease"| Media
+ *     Media -->|"红色：GStreamer 分支资源"| H264
+ *     Media -->|"红色：GStreamer 分支资源"| Mjpeg
  *
  *     classDef neutral fill:#161b22,stroke:#8b949e,color:#ffffff
- *     class App,Stage,Worker,Channel,Pipeline,Impl,Godot,Convert,GodotSession,Executor,Encode,Output neutral
+ *     class App,Stage,Worker,Channel,Pipeline,Impl,Godot,Convert,GodotSession,RgaDevice,Media,H264,Mjpeg neutral
  * @endmermaid
  *
  * Pipeline 对象可以在启动调用线程构造，因为 create() 不接触 LibGodot。Stage 工作线程
  * 调用 initialize() 后，同一线程继续执行 submit()、run_frame()、finish()，并在退出
  * thread_main() 前析构 Pipeline。当前同步输出路径中，run_frame() 触发 Godot 渲染、
  * GPU copy 后从 LibGodotInstance 取得同步借用的 RgbaFrameView，再调用宿主
- * RgaNv12FrameTransformer，向共享 Executor
- * 提交一次命令并同步等待 Worker 完成 RGA，再通过
- * Nv12FrameSink 进入宿主 MediaEncodeSession；MPP H.264、
- * 可选 MPP MJPEG 和 EncodedVideoSink 发布仍在该所有者线程按帧顺序完成。两边均不创建
- * 额外的业务帧线程。RGA Executor 固定拥有两个命令 Worker；RTSP 与 UVC 协议写出位于
- * 宿主 OutputManager 的独立工作线程。
+ * RgaNv12FrameTransformer，通过私有 Session 在所有者线程直接同步完成 RGA，再通过
+ * Nv12FrameSink 把 Nv12FrameLease 移动到 GStreamer GstBuffer。tee 后的两个 leaky queue
+ * 分别进入 H.264 与 MJPEG appsink；两个 MPP 会话由对应 GStreamer 分支流线程独占，
+ * 编码包继续进入 RTSP 与 UVC pipeline。
  * 该顺序使异常路径中的 LibGodot RAII 清理也留在所有者线程。
  *
  * @par 三、RGA 源 Buffer 注册缓存的资源结构
@@ -330,8 +328,8 @@
  *     OwnedFd["UniqueFd<br/>F_DUPFD_CLOEXEC 复制 fd"]
  *     Handle["RGA handle<br/>importbuffer_fd()"]
  *     Frame["DecodedFrameLease / FramePlaneView<br/>当前源 fd"]
- *     Command["RgaCommand<br/>按值持有 source shared_ptr"]
- *     Worker["Executor Worker<br/>improcess(..., IM_SYNC)"]
+ *     Request["RgaTransformRequest<br/>按值持有 source shared_ptr"]
+ *     Device["Session 私有 RgaTransformer<br/>improcess(..., IM_SYNC)"]
  *     Retire["retire_source(generation)<br/>source_buffers_.clear()"]
  *
  *     Transformer -->|"红色：独占"| Session
@@ -342,13 +340,13 @@
  *     Registration -->|"蓝色：shared_ptr 保活"| Buffer
  *     Buffer -->|"红色：独占复制 fd"| OwnedFd
  *     Buffer -->|"红色：独占导入 handle"| Handle
- *     Frame -.->|"黄色：同步调用期间保持源槽位"| Command
- *     Registration -->|"蓝色：source shared_ptr"| Command
- *     Command -->|"灰色：有界 FIFO 提交"| Worker
+ *     Frame -.->|"黄色：同步调用期间保持源槽位"| Request
+ *     Registration -->|"蓝色：source shared_ptr"| Request
+ *     Request -->|"灰色：当前线程直接调用"| Device
  *     Retire -->|"灰色：清空当前代次的注册项"| Cache
  *
  *     classDef neutral fill:#161b22,stroke:#8b949e,color:#ffffff
- *     class Transformer,Session,Impl,Generation,Cache,Registration,Buffer,OwnedFd,Handle,Frame,Command,Worker,Retire neutral
+ *     class Transformer,Session,Impl,Generation,Cache,Registration,Buffer,OwnedFd,Handle,Frame,Request,Device,Retire neutral
  * @endmermaid
  *
  * `begin_source()` 设置 Session 的 `active_generation_`。首次看到一个源 DMA-BUF 时，
@@ -544,9 +542,6 @@
  * @ingroup face_tracking_coordination
  */
 /** @class vtb::RgaDevice
- * @ingroup face_tracking_model_input
- */
-/** @class vtb::RgaExecutor
  * @ingroup face_tracking_model_input
  */
 /** @class vtb::RgaTransformer

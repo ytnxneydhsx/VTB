@@ -57,20 +57,18 @@
 `YUYV`、`NV12` 和 `NV21` 原始帧。`MJPG`、H.264 等压缩格式需要先接入解码器，
 配置解析器会在启动时明确拒绝这些格式，避免把压缩字节当成像素帧。
 
-`face_pipeline.rga_dma_heap` 指定共享 RGA Executor 下各业务 Session 的目标缓冲区所用
+`face_pipeline.rga_dma_heap` 指定 Face 与 Godot 各自 RGA Session 的目标缓冲区所用
 DMA heap，例如 `/dev/dma_heap/system-uncached`。路径由 JSON 提供；
 `RgaModelInputTransformer` 与 `RgaNv12FrameTransformer` 不在代码中猜测设备节点。
 启动时无法打开该 heap、摄像头缓冲区无法导出 DMA-BUF，或
 RGA 不支持请求的格式、stride、ROI 与缩放比例时，模型管线会明确报错并停止。
 
 `instrumentation.metrics_directory` 启用项目自有的指标持久化。目录会在启动时创建，
-`report_interval_ms` 接受 1000～3600000 ms。渲染、共享 RGA 执行器、编码与输出统计分别追加到：
+`report_interval_ms` 接受 1000～3600000 ms。渲染、编码与输出统计分别追加到：
 
 ```text
 <metrics_directory>/vtb-live2d-render.metrics.jsonl
-<metrics_directory>/vtb-live2d-rga.metrics.jsonl
-<metrics_directory>/vtb-live2d-encode.metrics.jsonl
-<metrics_directory>/vtb-live2d-output.metrics.jsonl
+<metrics_directory>/vtb-live2d-gstreamer-media.metrics.jsonl
 ```
 
 每次启动保留历史行；当前不自动轮转。格式和查看命令见

@@ -1,7 +1,10 @@
 # ADR 0004：在一个所有者线程同步串联渲染与编码模块
 
-状态：已接受；2026-11-15 的共享 RGA Executor 重构修订了 RGA 执行线程边界，仍待 RK3588 运行时验证
+状态：已由 ADR 0005 取代；本文保留同步编码基线的设计背景
 日期：2026-11-14
+
+当前代码把 NV12 Lease 移交给 GStreamer，并在两个分支流线程分别执行 H.264 与
+MJPEG MPP 编码。
 
 ## 背景
 
@@ -25,7 +28,7 @@ Godot / Ayagami 渲染
   → glBlitFramebuffer
   → glFinish
   → RgbaFrameSink::submit
-  → 宿主 RgaNv12FrameTransformer / 提交到共享 RgaExecutor 并同步等待
+  → 宿主 RgaNv12FrameTransformer / 所有者线程直接同步调用 RGA
   → Nv12FrameSink::submit
   → MediaEncodeSession
   → MPP H.264
@@ -33,14 +36,14 @@ Godot / Ayagami 渲染
 ```
 
 OpenVT 只保留一个 RGBA FrameSlot。ABI v6 将获取纹理、GPU blit、GPU wait 和 RGBA
-发布拆成四个语义操作；最后一个同步回调返回时，宿主 RGA Worker 与编码模块已经完成处理并把
+发布拆成四个语义操作；最后一个同步回调返回时，宿主 RGA 调用与编码模块已经完成处理并把
 编码包复制到 `OutputManager` 队列。
 RTSP/FFmpeg 输出线程继续独立，因此网络写入不会进入 Godot 所有者线程。
 
 ## 为什么现在这样做
 
 - 线程归属明确，Godot 输出侧只有一个所有者线程；渲染、RGA、编码各自具有独立模块边界；
-- RGA future、MPP 和输出回调失败可以沿当前帧调用栈同步返回；
+- RGA、MPP 和输出回调失败可以沿当前帧调用栈同步返回；
 - 去除 READY/FREE 信号量、队列、三槽状态和媒体线程 join，先形成可解释的同步基线；
 - 后续若引入 Actor/Active Object 控制面，可以从现有模块明确哪些命令属于 Godot、MPP
   和协议输出，再依据实测决定是否重新拆出独立编码 Actor。

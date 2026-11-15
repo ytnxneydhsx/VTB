@@ -1,88 +1,92 @@
-# ADR 0005：从同一 NV12 帧分出 H.264 网络流和 MJPEG UVC 流
+# ADR 0005：用 GStreamer 管理 Live2D 的网络与 UVC 双输出
 
 ## 状态
 
-已实现双编码和双输出。ABI v4 的模块内 MPP 版本完成过 RK3588 版本化部署：板端验证了
-GStreamer 1.28.9 插件、`/dev/video2` 的 UVC Video Output + Streaming 能力和双 MPP
-持续编码；Mac 完成 RTSP 连续解码；树莓派 USB 主机完成 MJPEG 1920×1080@30 枚举、
-连续抓帧、关闭后重新打开和与 RTSP 同时取流。ABI v6 已把 RGA 与 MPP 都移到宿主的
-`RgaNv12FrameTransformer`、`MediaEncodeSession`，需要重新完成 ARM64 构建与板端回归后才能
-继承运行验收结论。
+已实现。当前宿主把带槽位租约的 NV12 DMA-BUF 移交给 GStreamer；GStreamer 负责
+分支、线程、背压和协议输出，两个分支分别使用独立的 Rockchip MPP 编码会话。
 
 ## 背景
 
-Live2D 渲染链已经在 Godot 所有者线程内完成 GPU 复制和一次 RGA RGBA→NV12 转换。
-RTSP 输出需要 H.264。Linux UVC Gadget 的 GStreamer `uvcsink` 路径接受已经编码的
-MJPEG 或未压缩 YUYV；当前选用 MJPEG，以控制 USB 带宽和 CPU 拷贝量。
+Godot/LibGodot 完成 Live2D 渲染、Viewport 纹理取得、GPU blit 与 GPU 完成等待，随后
+把 RGBA DMA-BUF 同步借给宿主。宿主 RGA 只执行一次 RGBA 到 NV12 转换。网络输出需要
+H.264，UVC Gadget 当前协商 MJPEG，因此两个输出不能直接共享同一份编码数据。
 
-把 H.264 包直接交给 `uvcsink` 无法满足当前插件的输入协商。把 H.264 解码后再编码
-MJPEG也会增加一次无意义的解码。因此使用两个独立 MPP 编码会话，共享同一张只读
-NV12 DMA-BUF，并在同一所有者线程内顺序调用。
+原有实现让 Godot 所有者线程同步执行两个 MPP 编码，再把编码包交给两个自建输出队列。
+这种结构会让渲染线程承担编码等待，也重复实现了 GStreamer 已具备的分支、线程和背压
+机制。
 
 ## 决策
 
 ```text
 Godot / GPU
     ↓ RGBA DMA-BUF
-RGA（每帧一次 RGBA → NV12）
-    ↓ 同一张只读 NV12 DMA-BUF
-    ├─ MPP H.264（渲染帧率）→ OutputManager → FFmpeg RTSP
-    └─ MPP MJPEG（默认 30 fps）→ OutputManager → GStreamer 1.28.9 uvcsink → UVC Gadget
+RgaNv12FrameTransformer（四槽 NV12 DMA-BUF 池）
+    ↓ move Nv12FrameLease
+GStreamer appsrc（GstBuffer 持有 DMA-BUF 与 Lease）
+    ↓
+   tee
+    ├─ queue（容量 2，满时丢旧帧）→ appsink → MPP H.264
+    │                                      ↓
+    │                              H.264 appsrc → h264parse
+    │                                      ↓
+    │                         rtspclientsink/TCP → MediaMTX
+    │
+    └─ queue（容量 2，满时丢旧帧）→ appsink → MPP MJPEG
+                                           ↓
+                                   MJPEG appsrc → jpegparse
+                                           ↓
+                                   uvcsink → /dev/video2
 ```
 
-- 两个 MPP 会话分别拥有自己的 `MppCtx`、配置、输入 DMA-BUF 导入和输出包租约。
-- RGA 业务适配属于宿主 `RgaNv12FrameTransformer`，实际命令由共享 Executor 的 Worker
-  执行；H.264 MPP 和 MJPEG MPP 属于宿主 `MediaEncodeSession`。LibGodot 只交付 GPU 已完成
-  写入的 RGBA DMA-BUF。Godot 所有者线程同步等待 RGA future，再顺序调用两个 MPP；没有
-  增加 NV12 帧队列或编码工作线程。
-- ABI v6 先通过 `RgbaFrameSink` 借用 RGBA DMA-BUF，再由宿主通过 `Nv12FrameSink`
-  借用转换结果；宿主 `EncodedVideoSink` 用
-  `EncodedVideoCodec` 区分 H.264 和 MJPEG，并按编码格式
-  注册两个流并绑定到两个独立输出工作队列。
-- UVC 分支按整数时间表从渲染帧率降采样。例如 60 fps 渲染、30 fps UVC 时每两帧编码
-  一张 MJPEG，不复制或缓存第二张 NV12 图像。
-- GStreamer 只负责 MJPEG 解析、UVC 协商和 V4L2 Output 写出，不参与 MPP 编码。
-- GStreamer 1.28.9 以 `/opt/vtb/gstreamer-1.28.9` 为前缀并行安装；应用通过显式的
-  `gst-launch-1.0`、库目录和插件目录选择该版本，不覆盖板端发行版的 1.24.2。
-- 板端 5.10 gadget 节点不实现 `VIDIOC_ENUM_FMT`。项目构建为 `uvcsink` 应用兼容
-  补丁，直接从 ConfigFS 读取 MJPEG、1920×1080 和 30 fps 描述完成 caps 协商。
-- ACM+UVC 复合设备的 UVC 接口编号为 2/3。兼容补丁使用 ConfigFS 中的实际接口
-  编号，按主机 `wLength` 响应 UVC 1.0 的 26 字节 Probe/Commit 控制。
-- `v4l2sink` 的兼容路径只在 `g_uvc` Video Output 返回 `ENOTTY` 时补充 MJPEG 格式，
-  其他 V4L2 设备继续使用原始枚举逻辑。
+- `Nv12FrameSink::submit()` 接收可移动的 `Nv12FrameLease`。提交成功后，媒体会话取得
+  所有权。
+- `GstDmaBufAllocator` 用复制后的 DMA-BUF fd 创建 `GstMemory`。Lease 绑定到同一个
+  `GstBuffer` 的 qdata；tee 两侧共享其引用计数，最后一个引用释放时 Lease 析构并把
+  RGA 槽位归还目标池。
+- 原始 NV12 不进入项目自建帧队列。`appsrc`、`tee`、两条 `queue` 和 `appsink` 提供
+  异步传递、线程调度与有界背压。
+- 每个分支的 appsink 回调独占一个 `MppEncoderSession`。MPP 输入导入按
+  `buffer_id + stream_generation` 缓存；两个编码上下文互不共享码控、GOP 或包状态。
+- MPP 编码包复制到 GStreamer 自有的编码 `GstBuffer` 后，原 MPP packet 可以立即释放。
+- H.264 下游的 ForceKeyUnit 事件转换为 `request_idr()`，由 H.264 分支线程实际调用
+  `mpp_control()`。网络队列溢出时也会请求新的 IDR。
+- RTSP 发布固定使用 AVP/TCP，避免 UDP 传输协商失败后进入不兼容的 profile 重试。
+- UVC 低于渲染帧率时按帧序号做整数时间表降采样。例如 60 fps 渲染和 30 fps UVC
+  会每两帧编码一张 MJPEG。
+- RGA 与 MPP 的硬件核心由 Rockchip 驱动调度；应用不做 CPU 或硬件核心亲和性绑定。
+
+## 并发与背压
+
+Godot 所有者线程只完成渲染、GPU 同步、RGA 转换和一次非阻塞 appsrc 提交。H.264 与
+MJPEG 的编码回调分别由 GStreamer 分支流线程调用。两条 raw queue 都是容量 2 的
+downstream-leaky 队列，慢分支丢弃自己的旧帧，不等待另一分支。
+
+RGA NV12 池包含四个槽位，用于覆盖 appsrc 与两个分支中的少量在途帧。GStreamer 最终
+释放 Lease 是槽位可复用的唯一通知，因此无需另写“消费完成”消息或归还队列。
 
 ## 代价与边界
 
-- 每个 UVC 帧增加一次 MPP MJPEG 编码，占用第二个编码上下文和额外内存带宽。
-- 两次 MPP 调用目前串行执行。是否拆成独立线程由 `live2d.mpp_h264`、
-  `live2d.mpp_mjpeg` 和总帧周期的实测结果决定。
-- UVC 输出阻塞被限制在 `OutputManager` 的 UVC 工作线程和有界队列内；它不会在
-  `uvcsink` 写入阻塞时直接卡住 Godot 所有者线程。
-- UVC Gadget 描述符、UDC 绑定和 Mac 枚举属于板端部署阶段。完成交叉编译不代表 USB
-  摄像头已经在 Mac 上可用。
-- 当前 BSP 的 ACM+NCM 组合无法再分配 UVC streaming endpoint。UVC 模式保留 ACM，
-  暂时从配置中取消 NCM 链接。
-- 当前 Linux 5.10.110 BSP 重复解绑并绑定同一个 UVC function 会在
-  `uvc_function_bind()`/`uvc_unbind()` 路径触发内核异常。配置脚本对已激活实例直接
-  返回；解绑后需要重启并重新创建 function。
-- 该 BSP 在绑定 UDC 前不创建 `/dev/video2`，同时不支持 UDC `soft_connect`。
-  `uvcsink` 无法在主机第一次枚举前预先打开节点。启动应用后需要连接或重新连接
-  一次 USB 主机，使 UVC `GET_CUR(PROBE)` 请求由已运行的 userspace 响应器处理。
+- 编码包进入协议 pipeline 时有一次内存复制；原始 NV12 像素保持 DMA-BUF 传递。
+- MPP 通过 appsink 回调接入，当前没有实现通用的 GStreamer MPP encoder plugin。这个
+  边界让现有 `MppEncoderSession` 可以复用，同时让 GStreamer 拥有分支和背压。
+- 动态改变分辨率、stride、帧率或 stream generation 需要显式重建 pipeline；运行中
+  未协商的契约变化会被拒绝。
+- UVC Gadget 描述符、UDC 绑定和 USB 主机枚举属于部署阶段。板端持续产生 MJPEG 并不
+  等价于 Mac 或树莓派已经成功打开摄像头。
+- 当前 ACM+UVC 组合保留 UVC endpoint。NCM 会与 UVC streaming endpoint 竞争，未在
+  本决策中重新加入。
 
-## 验证要求
+## 本轮验证（2026-11-16）
 
-以下 1～8 项是 ABI v4 路径的历史验收记录。ABI v6 必须重新执行相同验证，并增加
-LibGodot 不再链接 `librga`、`librockchip_mpp`，宿主直接链接两者的 ELF 依赖检查。
-
-1. 在 RK3588 上确认两个 MPP 会话能够同时初始化并持续编码。
-2. 已确认 GStreamer 1.28.9 的 `coreelements`、`jpegparse`、`v4l2sink` 和 `uvcsink` 插件可加载。
-3. 已确认 `/dev/video2` UVC Gadget 节点具有 Video Output + Streaming 能力。
-4. 已验证一轮 14480 帧 H.264、7240 帧 MJPEG：两个输出队列均为零丢帧、零错误；
-   媒体总吞吐约 57.1 fps。
-5. 已在 Mac 通过 RTSP/TCP 连续解码 5 秒，识别为 H.264 1920×1080、约 60 fps。
-6. 已在树莓派主机枚举为 MJPEG 1920×1080@30；第一次抓取 30 帧，关闭后第二次
-   抓取 150 帧，两次均由 FFprobe 读出全部帧，第二次的 150 帧由 FFmpeg 完整解码。
-7. 第二次 UVC 抓帧期间，Mac 同时通过 RTSP/TCP 解码 H.264 五秒，两条输出分支均
-   正常完成。
-8. 最终正常模式进程持续运行超过 100 秒，并再次通过 30 帧 UVC 与三秒 RTSP 并发
-   烟雾测试；运行期间未再触发 RKNN 检测置信度越界终止。
+1. 使用固定 ARM64 Buildroot/Godot SDK、Rockchip sysroot 与定制 GStreamer 1.28.9
+   sysroot 完成交叉编译；产物经 `file` 确认为 AArch64 ELF。
+2. 定制运行时包含 appsrc、appsink、tee、queue、h264parse、rtspclientsink、jpegparse
+   和 uvcsink 所需插件。
+3. RK3588 上双分支持续运行超过 7500 个渲染帧；H.264 与 MJPEG 指标持续增长，未出现
+   GStreamer pipeline error。
+4. Mac 端 `ffprobe` 识别 `rtsp://192.168.77.2:8554/live2d` 为 H.264、1920×1080、
+   60 fps；双流监看页面中的 Live2D video 达到 `readyState=4` 并持续播放。
+5. 板端 `/sys/class/udc/fc000000.usb/state` 为 `configured`，`/dev/video2` 对应
+   `dwc3-gadget` 的 `uvc.usb0`；MJPEG 分支持续编码和提交。
+6. 本轮 USB 主机连接在树莓派，公网 SSH 隧道当前会断开，Mac 也未直接接入 OTG，
+   因此尚未在 USB 主机侧重新完成实际抓帧。该项保持为待验收，不沿用旧版本抓帧结果。

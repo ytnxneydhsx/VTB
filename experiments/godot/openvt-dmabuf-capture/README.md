@@ -12,12 +12,12 @@ Ayagami / Godot SubViewport GL texture
 RGBA DMA-BUF
     ↓ LibGodotInstance 返回 RgbaFrameView（同步借用）
 宿主 RgaNv12FrameTransformer / Godot RgaTransformSession
-    ↓ shared RgaExecutor Worker
+    ↓ Godot 所有者线程直接同步调用 RgaTransformer
 NV12 DMA-BUF
-    ↓ Nv12FrameSink（同步借用）
-宿主 MediaEncodeSession
-    ├─ MPP H.264 → EncodedVideoSink → OutputManager → RtspOutput → MediaMTX
-    └─ MPP MJPEG → EncodedVideoSink → OutputManager → GStreamer uvcsink → UVC
+    ↓ Nv12FrameSink（移动 Lease 到 GstBuffer）
+GStreamer appsrc → tee
+    ├─ leaky queue → appsink → MPP H.264 → rtspclientsink → MediaMTX
+    └─ leaky queue → appsink → MPP MJPEG → uvcsink → UVC
 ```
 
 ## 为什么先使用 GPU 内部复制
@@ -38,14 +38,14 @@ Godot 直接渲染到外部颜色附件。
   `RgbaFrameSink::submit`；`LibGodotInstance` 保存帧描述，Pipeline 在下一次帧获取前
   同步等待RGA完成；
 - 宿主 `RgaNv12FrameTransformer` 通过 Godot 私有 Session 缓存 DMA-BUF 导入和 NV12
-  目标池，向共享双 Worker Executor 提交一次 RGA 命令并同步等待结果；
-- 宿主 `MediaEncodeSession` 在同一个 Godot 所有者线程中同步执行 MPP H.264、可选
-  MPP MJPEG 和 `EncodedVideoSink::publish` 回调；
-- 当前没有 READY 帧队列和模块内部媒体流水线；共享 RGA Executor 有容量四的命令 FIFO
-  与两个 Worker。`GodotRenderPipeline::run_frame()` 在返回前完成当前帧转换、编码与发布；
+  目标池，并在 Godot 所有者线程直接同步调用 RGA；
+- 宿主 `GStreamerMediaSession` 把 NV12 Lease 绑定到 `GstBuffer`，由 tee 和两条容量 2
+  的 leaky queue 分发给独立的 H.264/MJPEG 分支线程；
+- 当前没有项目自建 READY 帧队列或 RGA 命令 Worker。`GodotRenderPipeline::run_frame()`
+  在返回前完成当前帧转换和 raw appsrc 提交；MPP 编码异步执行；
 - MPP 的 SPS/PPS 在输出启动前注册到 H.264 流描述；H.264/MJPEG 包都携带单调时钟
   PTS/DTS、帧序号和关键帧标记；
-- 宿主的 `RtspOutput` 与 `GstreamerUvcOutput` 使用独立输出线程和容量 16 的有界队列；
+- RTSP 与 UVC 使用独立 GStreamer pipeline；慢分支通过自己的 leaky queue 丢旧帧；
 - Godot 与外部 EGLImage 的纹理方向一致，GPU copy 不执行 Y 翻转；
 - 使用 `/dev/dma_heap/system-uncached`；
 - 仍保留 X11，只验证人物到硬件编码的共享缓冲链路；
@@ -63,13 +63,11 @@ Live2D H.264 使用 MPP FIXQP、QP 18，以固定量化质量替代 CBR 的目�
 
 当前版本仍保留 `glFinish` 作为 GPU 写入完成边界。连续产品版本还需显式 fence、实时场景的最新帧丢弃策略、异常注入和长时间稳定性验证。
 
-## 为什么直接接入 OutputManager
+## 为什么让 GStreamer 管理双输出
 
-原先的最短替代方案是把 Annex-B 文件路径换成 FIFO，再启动独立 publisher 进程。
-当前宿主复用项目内的 `OutputManager + RtspOutput`，让 MPP 包的时间戳、关键帧、
-重连和有界队列策略留在同一进程内，减少额外进程和 FFmpeg 再探测。该改造没有消除
-编码包到 `MediaPacket`、再到 FFmpeg `AVPacket` 的内存复制，也不保证网络断连时零丢帧。
-是否继续优化复制次数，以端到端 P95/P99、CPU、队列深度和丢帧数为依据。
+当前宿主把原始 NV12 DMA-BUF 交给进程内 GStreamer。GStreamer 负责分支、线程、背压、
+RTSP 发布和 UVC 协商，项目只在 appsink 回调里复用已验证的 MPP 编码资源类。编码包复制
+到 GStreamer 自有缓冲后即可释放 MPP packet；未压缩像素不做 CPU 复制。
 
 内置模块构建需要 VTB 源码与 Rockchip 板端 sysroot：
 
