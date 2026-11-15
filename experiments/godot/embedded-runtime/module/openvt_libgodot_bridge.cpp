@@ -67,7 +67,7 @@ extern "C" int openvt_libgodot_iteration(void *p_instance) {
 	return 0;
 }
 
-extern "C" int openvt_libgodot_application_initialize_v3(
+extern "C" int openvt_libgodot_application_initialize_v6(
 		const OpenVTEmbeddedApplicationConfig *p_config) {
 	if (application != nullptr) {
 		application_error = "Embedded Live2D application is already initialized";
@@ -76,28 +76,23 @@ extern "C" int openvt_libgodot_application_initialize_v3(
 	if (p_config == nullptr || p_config->live2d_model == nullptr ||
 			p_config->abi_version != OPENVT_LIBGODOT_ABI_VERSION ||
 			p_config->config_size != sizeof(OpenVTEmbeddedApplicationConfig) ||
-			p_config->output_sink.context == nullptr ||
-			p_config->output_sink.configure_h264 == nullptr ||
-			p_config->output_sink.publish == nullptr ||
-			p_config->metrics_jsonl_path == nullptr ||
+			p_config->rgba_sink.context == nullptr ||
+			p_config->rgba_sink.submit == nullptr ||
 			p_config->output_width > static_cast<uint32_t>(std::numeric_limits<int>::max()) ||
 			p_config->output_height > static_cast<uint32_t>(std::numeric_limits<int>::max()) ||
 			p_config->output_fps > static_cast<uint32_t>(std::numeric_limits<int>::max()) ||
-			p_config->total_frames > static_cast<uint32_t>(std::numeric_limits<int>::max()) ||
-			p_config->metrics_report_interval_ms > static_cast<uint32_t>(std::numeric_limits<int>::max())) {
+			p_config->total_frames > static_cast<uint32_t>(std::numeric_limits<int>::max())) {
 		application_error = "Embedded application configuration or bridge ABI is invalid";
 		return static_cast<int>(ERR_INVALID_PARAMETER);
 	}
 	application = std::make_unique<vtb::EmbeddedLive2DApplication>();
 	vtb::EmbeddedLive2DApplicationConfig config;
 	config.live2d_model = String::utf8(p_config->live2d_model);
-	config.output_sink = p_config->output_sink;
+	config.rgba_sink = p_config->rgba_sink;
 	config.output_width = static_cast<int>(p_config->output_width);
 	config.output_height = static_cast<int>(p_config->output_height);
 	config.output_fps = static_cast<int>(p_config->output_fps);
 	config.total_frames = static_cast<int>(p_config->total_frames);
-	config.metrics_jsonl_path = String::utf8(p_config->metrics_jsonl_path);
-	config.metrics_report_interval_ms = static_cast<int>(p_config->metrics_report_interval_ms);
 	const Error error = application->initialize(config);
 	if (error != OK) {
 		const int result = remember_application_error(error);
@@ -155,12 +150,38 @@ extern "C" int openvt_libgodot_application_prepare_frame(uint64_t p_monotonic_ti
 	return remember_application_error(application->prepare_frame(p_monotonic_timestamp_ns));
 }
 
-extern "C" int openvt_libgodot_application_complete_frame(void) {
+extern "C" int openvt_libgodot_application_acquire_viewport_texture(void) {
 	if (application == nullptr) {
 		application_error = "Embedded Live2D application is unavailable";
 		return static_cast<int>(ERR_UNCONFIGURED);
 	}
-	return remember_application_error(application->complete_frame());
+	return remember_application_error(application->acquire_viewport_texture());
+}
+
+extern "C" int openvt_libgodot_application_blit_viewport_texture(void) {
+	if (application == nullptr) {
+		application_error = "Embedded Live2D application is unavailable";
+		return static_cast<int>(ERR_UNCONFIGURED);
+	}
+	return remember_application_error(application->blit_viewport_texture());
+}
+
+extern "C" int openvt_libgodot_application_wait_gpu_copy(void) {
+	if (application == nullptr) {
+		application_error = "Embedded Live2D application is unavailable";
+		return static_cast<int>(ERR_UNCONFIGURED);
+	}
+	return remember_application_error(application->wait_gpu_copy());
+}
+
+extern "C" int openvt_libgodot_application_publish_rgba_frame(
+		uint64_t p_ready_timestamp_ns) {
+	if (application == nullptr) {
+		application_error = "Embedded Live2D application is unavailable";
+		return static_cast<int>(ERR_UNCONFIGURED);
+	}
+	return remember_application_error(
+			application->publish_rgba_frame(p_ready_timestamp_ns));
 }
 
 extern "C" int openvt_libgodot_application_should_stop(void) {

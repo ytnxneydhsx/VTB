@@ -12,6 +12,12 @@ fi
 : "${CC:?Set CC to the pinned ARM64 C compiler}"
 : "${CXX:?Set CXX to the pinned ARM64 C++ compiler}"
 
+if [ "${OPENVT_EXPERIMENTAL_TRIMMED_LIBGODOT:-}" != "1" ]; then
+	echo "The trimmed LibGodot build is experimental and failed the Ayagami board startup check." >&2
+	echo "Use the full LibGodot product build, or set OPENVT_EXPERIMENTAL_TRIMMED_LIBGODOT=1 for size experiments." >&2
+	exit 2
+fi
+
 script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 vtb_source_root=$(CDPATH= cd -- "$script_dir/../../.." && pwd)
 godot_source=$1

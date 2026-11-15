@@ -1,21 +1,23 @@
-# Godot/Ayagami → DMA-BUF → RGA → MPP 人物验证
+# Godot/Ayagami → RGBA DMA-BUF 人物输出
 
 这个实验保留现有 Godot 4.7.1 + Ayagami + X11 + Mali-G610 人物渲染路径，
 并增加一个内置 Godot 模块。模块在 Godot render thread 内取得 SubViewport
 的 GLES texture native handle，使用 `glBlitFramebuffer` 把人物画面复制到
-外部分配的 RGBA DMA-BUF，再交给 RGA 转换 NV12 和 MPP 编码 H.264。
+外部分配的 RGBA DMA-BUF，等待 GPU 写入完成后，通过同步 `RgbaFrameSink` 把描述交给
+`LibGodotInstance`；Pipeline 随后取得借用视图并调用RGA。
 
 ```text
 Ayagami / Godot SubViewport GL texture
     ↓ same EGL context, GPU glBlitFramebuffer
 RGBA DMA-BUF
-    ↓ RGA
+    ↓ LibGodotInstance 返回 RgbaFrameView（同步借用）
+宿主 RgaNv12FrameTransformer / Godot RgaTransformSession
+    ↓ shared RgaExecutor Worker
 NV12 DMA-BUF
-    ↓ MPP
-H.264 packet
-    ↓ EncodedVideoSink 同步借用回调
-宿主 MediaOutputSession → OutputManager → RtspOutput
-RTSP/TCP → MediaMTX
+    ↓ Nv12FrameSink（同步借用）
+宿主 MediaEncodeSession
+    ├─ MPP H.264 → EncodedVideoSink → OutputManager → RtspOutput → MediaMTX
+    └─ MPP MJPEG → EncodedVideoSink → OutputManager → GStreamer uvcsink → UVC
 ```
 
 ## 为什么先使用 GPU 内部复制
@@ -31,12 +33,20 @@ Godot 直接渲染到外部颜色附件。
 ## 当前正确性版本
 
 - 1920×1080、30 FPS、300 帧；
-- 3 个 RGBA DMA-BUF FrameSlot，媒体线程独占 1 个 NV12 DMA-BUF；
-- Godot render thread 完成 `glBlitFramebuffer` 和 `glFinish` 后把 FrameSlot 放入有界 FIFO；
-- 一个常驻媒体线程按帧序执行 RGA、MPP 和同步 `EncodedVideoSink::publish` 回调；
-- MPP 的 SPS/PPS 在输出启动前注册到 H.264 流描述，编码包携带单调时钟 PTS/DTS、帧序号和 IDR 标记；
-- 宿主的 `RtspOutput` 在独立输出线程中通过 RTSP/TCP 发布，有界队列容量为 16；
-- 队列满时生产端阻塞形成背压；Godot 与外部 EGLImage 的纹理方向一致，GPU copy 不执行 Y 翻转；
+- 1 个 RGBA DMA-BUF FrameSlot；
+- Godot/OpenVT 按帧顺序执行获取 Viewport 纹理、`glBlitFramebuffer`、`glFinish` 和
+  `RgbaFrameSink::submit`；`LibGodotInstance` 保存帧描述，Pipeline 在下一次帧获取前
+  同步等待RGA完成；
+- 宿主 `RgaNv12FrameTransformer` 通过 Godot 私有 Session 缓存 DMA-BUF 导入和 NV12
+  目标池，向共享双 Worker Executor 提交一次 RGA 命令并同步等待结果；
+- 宿主 `MediaEncodeSession` 在同一个 Godot 所有者线程中同步执行 MPP H.264、可选
+  MPP MJPEG 和 `EncodedVideoSink::publish` 回调；
+- 当前没有 READY 帧队列和模块内部媒体流水线；共享 RGA Executor 有容量四的命令 FIFO
+  与两个 Worker。`GodotRenderPipeline::run_frame()` 在返回前完成当前帧转换、编码与发布；
+- MPP 的 SPS/PPS 在输出启动前注册到 H.264 流描述；H.264/MJPEG 包都携带单调时钟
+  PTS/DTS、帧序号和关键帧标记；
+- 宿主的 `RtspOutput` 与 `GstreamerUvcOutput` 使用独立输出线程和容量 16 的有界队列；
+- Godot 与外部 EGLImage 的纹理方向一致，GPU copy 不执行 Y 翻转；
 - 使用 `/dev/dma_heap/system-uncached`；
 - 仍保留 X11，只验证人物到硬件编码的共享缓冲链路；
 - 不修改 Xorg、驱动、内核、设备树、权限或开机服务。
@@ -51,7 +61,7 @@ Live2D H.264 使用 MPP FIXQP、QP 18，以固定量化质量替代 CBR 的目�
 它用于优先验证源画质与运动画质，不解决人脸输入帧率不足，也不保证 100 Mbps 链路和
 浏览器在最坏画面下不会拥塞。验证需要同时记录实际码率、浏览器丢帧和网络发送错误。
 
-当前版本仍保留 `glFinish` 作为 GPU/RGA 的正确性边界。连续产品版本还需显式 fence、实时场景的最新帧丢弃策略、异常注入和长时间稳定性验证。
+当前版本仍保留 `glFinish` 作为 GPU 写入完成边界。连续产品版本还需显式 fence、实时场景的最新帧丢弃策略、异常注入和长时间稳定性验证。
 
 ## 为什么直接接入 OutputManager
 
@@ -68,8 +78,9 @@ export OPENVT_VTB_SOURCE_ROOT=/path/to/VTB
 export OPENVT_BOARD_SYSROOT=/path/to/board-sysroot
 ```
 
-该 Godot 模块负责 Live2D 渲染帧的 DMA-BUF、RGA 和 MPP 编码；RTSP、OutputManager
-和 FFmpeg 移到宿主。同步回调后宿主拥有独立编码包副本，本次增加一次编码字节复制。
+该 Godot 模块负责 Live2D 渲染帧的 RGBA DMA-BUF 与 GPU 完成同步；RGA、MPP、RTSP、
+OutputManager、指标报告和 FFmpeg 位于宿主。同步编码回调后宿主拥有独立编码包副本，本次保留
+一次编码字节复制。
 V4L2/RKNN 以及仅用于 PnP 几何计算的 OpenCV 位于 `vtb-live2d` 宿主，不进入
 LibGodot 模块的源码和链接列表。
 
@@ -84,14 +95,16 @@ OPENVT_CONFIG=/path/to/deployment/config/vtb-live2d.json \
 ./experiments/godot/embedded-runtime/run_on_rk.sh
 ```
 
-宿主 `Live2DTrackingSession` 管理视频输入、模型和校准；`Live2DControlServer` 管理控制口；
+宿主 `VtbApplication` 直接装配视频输入、两个消息通道和两个 Stage；
+`Live2DControlServer` 通过 `FaceTrackingStage` 管理校准和控制口；
 配置来自 JSON，启动时会验证 V4L2 设备，并要求驱动回填参数与请求完全一致。
 Godot 通过固定 C ABI 只接收最终 Live2D 参数帧。完整边界见
 [`docs/live2d-face-tracking-bridge.md`](../../../docs/live2d-face-tracking-bridge.md)。
 
-## RK3588 实机结果
+## RK3588 历史流水线实机结果
 
-2026-10-27 使用阿芙洛狄忒模型完成同步基线和两轮两阶段流水实机运行。三次运行使用相同的当前 Ayagami 项目、模型、动画输入和验证脚本：
+2026-10-27 使用阿芙洛狄忒模型完成同步基线和两轮两阶段流水实机运行。三次运行使用相同的
+Ayagami 项目、模型、动画输入和验证脚本：
 
 | 配置 | 核心吞吐 | 脚本墙钟吞吐 | GPU copy | RGA | MPP |
 |---|---:|---:|---:|---:|---:|
@@ -102,6 +115,12 @@ Godot 通过固定 C ABI 只接收最终 Live2D 参数帧。完整边界见
 两轮流水平均核心吞吐为 `75.614 FPS`，相对同机同步对照提高约 `68.3%`。两轮均无生产端背压，最大 ready queue 深度为 1。第二轮媒体线程平均耗时 `5.327 ms`，P95 为 `5.506 ms`；queue wait 平均 `0.014 ms`。
 
 这里提升的是稳态处理吞吐：渲染下一帧时，媒体线程可以处理上一帧。单帧从参数更新到 H.264 可用的端到端延迟仍包含渲染、GPU copy、排队以及 RGA/MPP；不能把 `5.327 ms` 当作完整单帧延迟。对 30 FPS 输出而言，当前结果已经提供明显的处理余量。
+
+2026-11-14 当前产品源码移除 READY 帧队列、三槽背压和内部媒体流水线，并把 RGA、MPP
+分别移到宿主。2026-11-15 又将 Face 与 Godot 的 RGA 业务缓存分成两个 Session，并通过
+共享双 Worker Executor 执行命令；每个业务生产者仍同步等待自己的单个在途请求，MPP 继续
+由 Godot 所有者线程顺序调用。上表继续作为历史对照；
+当前 ABI v6 实现尚未在 RK3588 上重新测量吞吐、P95/P99、画面正确性和退出资源释放。
 
 以下结果来自改为 RTSP 之前的文件输出基线。三次输出均为 1920×1080、30 FPS、300 帧、9.9999 秒、H.264/yuv420p。`ffprobe` 统计 300 帧，FFmpeg 完整解码无错误。同步版和两轮流水版的 H.264、MP4 以及 6 个抽帧均逐字节相同；视觉检查确认方向、颜色、透明边缘和人物动作正确。新的 RTSP 路径仍需在 RK3588 上单独验证。
 

@@ -44,14 +44,12 @@ Error EmbeddedLive2DApplication::initialize(
 	if (initialized_) {
 		return fail(ERR_ALREADY_IN_USE, "Embedded Live2D application is already initialized");
 	}
-	if (p_config.live2d_model.is_empty() || p_config.output_sink.context == nullptr ||
-			p_config.output_sink.configure_h264 == nullptr || p_config.output_sink.publish == nullptr ||
+	if (p_config.live2d_model.is_empty() || p_config.rgba_sink.context == nullptr ||
+			p_config.rgba_sink.submit == nullptr ||
 			p_config.output_width < 2 || p_config.output_width > 8192 ||
 			p_config.output_height < 2 || p_config.output_height > 8192 ||
 			p_config.output_fps < 1 || p_config.output_fps > 240 ||
-			p_config.total_frames < 0 ||
-			(!p_config.metrics_jsonl_path.is_empty() &&
-					p_config.metrics_report_interval_ms < 1000)) {
+			p_config.total_frames < 0) {
 		return fail(ERR_INVALID_PARAMETER, "Embedded application configuration is invalid");
 	}
 	output_width_ = p_config.output_width;
@@ -59,13 +57,8 @@ Error EmbeddedLive2DApplication::initialize(
 	output_fps_ = p_config.output_fps;
 	output_frame_interval_ns_ = 1000000000ULL / static_cast<uint64_t>(output_fps_);
 	total_frames_ = p_config.total_frames;
-	metrics_jsonl_path_ = p_config.metrics_jsonl_path;
-	metrics_report_interval_ms_ = p_config.metrics_report_interval_ms;
 	live2d_model_ = p_config.live2d_model;
-	output_sink_ = p_config.output_sink;
-	if (output_width_ % 2 != 0 || output_height_ % 2 != 0) {
-		return fail(ERR_INVALID_PARAMETER, "Output dimensions must be even for NV12 encoding");
-	}
+	rgba_sink_ = p_config.rgba_sink;
 
 	Error error = configure_render_session();
 	if (error == OK) {
@@ -102,8 +95,7 @@ Error EmbeddedLive2DApplication::configure_render_session() {
 Error EmbeddedLive2DApplication::configure_output() {
 	capture_.instantiate();
 	const Error error = capture_->configure(
-			output_sink_, output_width_, output_height_, output_fps_, total_frames_,
-			metrics_jsonl_path_, metrics_report_interval_ms_);
+			rgba_sink_, output_width_, output_height_, output_fps_, total_frames_);
 	if (error != OK) {
 		return fail(error, "DMA-BUF output configuration failed: " + capture_->get_last_error());
 	}
@@ -206,35 +198,77 @@ Error EmbeddedLive2DApplication::apply_fallback_parameters(uint64_t p_monotonic_
 	return OK;
 }
 
-Error EmbeddedLive2DApplication::complete_frame() {
+Error EmbeddedLive2DApplication::acquire_viewport_texture() {
 	if (!initialized_ || capture_.is_null() || render_session_ == nullptr) {
 		return fail(ERR_UNCONFIGURED, "Embedded Live2D application is not initialized");
 	}
 	if (output_finished_) {
 		return OK;
 	}
+	if (output_frame_state_ != OutputFrameState::IDLE) {
+		return fail(ERR_BUSY, "Previous RGBA frame has not been published");
+	}
 	const uint64_t next_frame = completed_frames_ + 1;
-	bool end_of_stream = false;
+	current_frame_end_of_stream_ = false;
 	if (total_frames_ > 0 && next_frame >= static_cast<uint64_t>(total_frames_)) {
-		end_of_stream = true;
+		current_frame_end_of_stream_ = true;
 	}
-	const Error error = capture_->capture_frame(
-			render_session_->viewport_rid(), static_cast<int>(completed_frames_), end_of_stream);
+	const Error error = capture_->acquire_viewport_texture(
+			render_session_->viewport_rid(), static_cast<int>(completed_frames_),
+			current_frame_end_of_stream_);
 	if (error != OK) {
-		return fail(error, "DMA-BUF frame capture failed: " + capture_->get_last_error());
+		return fail(error, "Viewport texture acquisition failed: " + capture_->get_last_error());
 	}
-	completed_frames_ = next_frame;
+	output_frame_state_ = OutputFrameState::ACQUIRED;
+	return OK;
+}
+
+Error EmbeddedLive2DApplication::blit_viewport_texture() {
+	if (output_frame_state_ != OutputFrameState::ACQUIRED) {
+		return fail(ERR_UNCONFIGURED, "Viewport texture has not been acquired");
+	}
+	const Error error = capture_->blit_viewport_texture();
+	if (error != OK) {
+		return fail(error, "Viewport GPU blit failed: " + capture_->get_last_error());
+	}
+	output_frame_state_ = OutputFrameState::BLITTED;
+	return OK;
+}
+
+Error EmbeddedLive2DApplication::wait_gpu_copy() {
+	if (output_frame_state_ != OutputFrameState::BLITTED) {
+		return fail(ERR_UNCONFIGURED, "Viewport GPU blit has not been submitted");
+	}
+	const Error error = capture_->wait_gpu_copy();
+	if (error != OK) {
+		return fail(error, "GPU copy completion wait failed: " + capture_->get_last_error());
+	}
+	output_frame_state_ = OutputFrameState::READY;
+	return OK;
+}
+
+Error EmbeddedLive2DApplication::publish_rgba_frame(uint64_t p_ready_timestamp_ns) {
+	if (output_frame_state_ != OutputFrameState::READY || p_ready_timestamp_ns == 0) {
+		return fail(ERR_INVALID_PARAMETER, "RGBA frame is not ready for publication");
+	}
+	const Error error = capture_->publish_rgba_frame(p_ready_timestamp_ns);
+	if (error != OK) {
+		return fail(error, "RGBA DMA-BUF publication failed: " + capture_->get_last_error());
+	}
+	output_frame_state_ = OutputFrameState::IDLE;
+	++completed_frames_;
 	if (completed_frames_ == 1 || completed_frames_ % static_cast<uint64_t>(output_fps_) == 0) {
 		print_line("VTB_CPP_FRAME_CAPTURED frame=" + itos(static_cast<int64_t>(completed_frames_)) +
 				" snapshot_generation=" + itos(static_cast<int64_t>(last_snapshot_generation_)));
 	}
-	if (end_of_stream) {
+	if (current_frame_end_of_stream_) {
 		const Error finish_error = capture_->finish();
 		if (finish_error != OK) {
 			return fail(finish_error, "DMA-BUF output finish failed: " + capture_->get_last_error());
 		}
 		output_finished_ = true;
 	}
+	current_frame_end_of_stream_ = false;
 	return OK;
 }
 
@@ -253,6 +287,8 @@ Error EmbeddedLive2DApplication::shutdown() {
 		render_session_.reset();
 	}
 	parameter_interpolator_.reset();
+	output_frame_state_ = OutputFrameState::IDLE;
+	current_frame_end_of_stream_ = false;
 	initialized_ = false;
 	output_finished_ = true;
 	return result;

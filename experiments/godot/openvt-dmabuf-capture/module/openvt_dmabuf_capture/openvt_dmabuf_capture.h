@@ -4,9 +4,9 @@
 #include "core/os/semaphore.h"
 #include "core/string/ustring.h"
 #include "core/templates/rid.h"
-#include "vtb/output/encoded_video_sink.hpp"
+#include "vtb/render/rgba_frame_sink.hpp"
 
-class OpenVTDmaBufPipeline;
+class OpenVTRgbaFramePipeline;
 
 class OpenVTDmaBufCapture : public RefCounted {
 	GDCLASS(OpenVTDmaBufCapture, RefCounted);
@@ -21,14 +21,15 @@ public:
 	OpenVTDmaBufCapture &operator=(OpenVTDmaBufCapture &&) = delete;
 
 	Error configure(
-			const vtb::EncodedVideoSink &p_sink,
+			const vtb::RgbaFrameSink &p_sink,
 			int p_width,
 			int p_height,
 			int p_fps,
-			int p_total_frames,
-			const String &p_metrics_jsonl_path,
-			int p_metrics_report_interval_ms);
-	Error capture_frame(RID p_viewport, int p_frame_index, bool p_end_of_stream);
+			int p_total_frames);
+	Error acquire_viewport_texture(RID p_viewport, int p_frame_index, bool p_end_of_stream);
+	Error blit_viewport_texture();
+	Error wait_gpu_copy();
+	Error publish_rgba_frame(uint64_t p_timestamp_ns);
 	Error finish();
 	String get_last_error() const;
 
@@ -37,21 +38,22 @@ protected:
 
 private:
 	void _initialize_pipeline_render_thread();
-	void _capture_frame_render_thread(RID p_viewport, int p_slot_index, int p_frame_index, bool p_end_of_stream);
+	void _acquire_viewport_texture_render_thread(RID p_viewport, int p_frame_index, bool p_end_of_stream);
+	void _blit_viewport_texture_render_thread();
+	void _wait_gpu_copy_render_thread();
+	void _publish_rgba_frame_render_thread(uint64_t p_timestamp_ns);
 	void _finish_render_thread();
 	void _complete_operation(Error p_error, const String &p_message);
 
-	vtb::EncodedVideoSink output_sink;
+	vtb::RgbaFrameSink rgba_sink;
 	int width = 0;
 	int height = 0;
 	int fps = 0;
 	int total_frames = 0;
-	int metrics_report_interval_ms = 0;
-	String metrics_jsonl_path;
 	bool configured = false;
 	bool finished = false;
 
-	OpenVTDmaBufPipeline *pipeline = nullptr;
+	OpenVTRgbaFramePipeline *pipeline = nullptr;
 	Semaphore operation_finished;
 	Error operation_error = OK;
 	String operation_error_message;

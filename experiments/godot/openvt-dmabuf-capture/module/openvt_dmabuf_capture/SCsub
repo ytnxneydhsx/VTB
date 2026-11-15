@@ -12,8 +12,6 @@ env_openvt = env_modules.Clone()
 env_openvt.Append(
     CPPPATH=[
         board_sysroot + "/usr/include",
-        board_sysroot + "/usr/include/rockchip",
-        board_sysroot + "/usr/include/rga",
         vtb_source_root + "/include",
         Dir(".").abspath,
         vtb_source_root + "/experiments/godot/embedded-runtime/module",
@@ -23,8 +21,6 @@ env_openvt.Append(CXXFLAGS=["-fexceptions"])
 
 env_openvt.add_source_files(env.modules_sources, "openvt_dmabuf_capture.cpp")
 env_openvt.add_source_files(env.modules_sources, "register_types.cpp")
-env_openvt.add_source_files(env.modules_sources, vtb_source_root + "/src/instrumentation/metrics_jsonl_reporter.cpp")
-env_openvt.add_source_files(env.modules_sources, vtb_source_root + "/src/instrumentation/timer.cpp")
 env_openvt.add_source_files(
     env.modules_sources,
     vtb_source_root + "/src/live2d/live2d_parameter_interpolator.cpp",
@@ -41,16 +37,5 @@ env_openvt.add_source_files(
 env_openvt.add_source_files(
     env.modules_sources,
     vtb_source_root + "/experiments/godot/embedded-runtime/module/embedded_live2d_application.cpp",
-)
-
-env.Append(
-    LIBPATH=[
-        board_sysroot + "/usr/lib/aarch64-linux-gnu",
-    ],
-    LIBS=["rga", "rockchip_mpp"],
-    LINKFLAGS=[
-        "-Wl,-rpath-link," + board_sysroot + "/usr/lib/aarch64-linux-gnu",
-        "-Wl,--allow-shlib-undefined",
-    ],
 )
 

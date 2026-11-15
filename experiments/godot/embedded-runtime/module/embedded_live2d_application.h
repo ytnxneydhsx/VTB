@@ -8,7 +8,7 @@
 #include "core/string/ustring.h"
 #include "vtb/live2d/live2d_parameter_interpolator.hpp"
 #include "vtb/live2d/live2d_parameters.hpp"
-#include "vtb/output/encoded_video_sink.hpp"
+#include "vtb/render/rgba_frame_sink.hpp"
 
 class OpenVTDmaBufCapture;
 
@@ -19,13 +19,11 @@ class Live2DRenderSession;
 class EmbeddedLive2DApplicationConfig {
 public:
 	String live2d_model;
-	EncodedVideoSink output_sink;
+	RgbaFrameSink rgba_sink;
 	int output_width = 0;
 	int output_height = 0;
 	int output_fps = 0;
 	int total_frames = 0;
-	String metrics_jsonl_path;
-	int metrics_report_interval_ms = 0;
 };
 
 class EmbeddedLive2DApplication final {
@@ -47,7 +45,10 @@ public:
 			uint64_t p_produced_timestamp_ns,
 			uint64_t p_snapshot_generation);
 	Error prepare_frame(uint64_t p_monotonic_timestamp_ns);
-	Error complete_frame();
+	Error acquire_viewport_texture();
+	Error blit_viewport_texture();
+	Error wait_gpu_copy();
+	Error publish_rgba_frame(uint64_t p_ready_timestamp_ns);
 	Error shutdown();
 
 	bool should_stop() const noexcept;
@@ -55,6 +56,13 @@ public:
 	const String &last_error() const noexcept;
 
 private:
+	enum class OutputFrameState {
+		IDLE,
+		ACQUIRED,
+		BLITTED,
+		READY,
+	};
+
 	Error fail(Error p_error, const String &p_message);
 	Error configure_render_session();
 	Error configure_output();
@@ -80,15 +88,15 @@ private:
 	int output_height_ = 1080;
 	int output_fps_ = 30;
 	int total_frames_ = 0;
-	int metrics_report_interval_ms_ = 0;
 	String live2d_model_;
-	String metrics_jsonl_path_;
-	EncodedVideoSink output_sink_;
+	RgbaFrameSink rgba_sink_;
 	uint64_t maximum_parameter_age_ns_ = 150000000ULL;
 	uint64_t output_frame_interval_ns_ = 33333333ULL;
 	bool has_pending_parameters_ = false;
 	bool initialized_ = false;
 	bool output_finished_ = false;
+	bool current_frame_end_of_stream_ = false;
+	OutputFrameState output_frame_state_ = OutputFrameState::IDLE;
 };
 
 } // namespace vtb
