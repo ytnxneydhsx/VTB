@@ -36,7 +36,8 @@
 |       +-- FaceTrackingStage -- Live2DTrackingPipeline               |
 |       |                         +-- FacePipeline                     |
 |       |                         `-- Live2DFaceMapper                 |
-|       `-- Live2DTrackingChannel<Live2DTrackingSnapshot>             |
+|       +-- Live2DTrackingChannel<Live2DTrackingSnapshot>             |
+|       `-- GodotRenderStage -- GodotRenderPipeline -- LibGodot       |
 +---------------------------------------------------------------------+
 ```
 
@@ -46,7 +47,7 @@
 | --- | --- |
 | `VideoSource` | 从 V4L2 摄像头读取一帧并产出完整原始帧租约 |
 | `DecodedFrameLease` | 持有完整解码帧及其生命周期 |
-| `ImageTransformer` | 按模型要求完成 ROI 裁剪、缩放和颜色转换；RK3588 实现使用 RGA |
+| `RgaModelInputTransformer` | 按模型要求完成 ROI 裁剪、缩放和颜色转换；RK3588 实现使用 RGA |
 | `ModelInputSpec` | 描述模型所需宽高、像素格式、布局、数据类型和归一化约定 |
 | `ModelInputLease` | 持有已经满足模型要求的输入缓冲区 |
 | `FacePipeline` | 组织检测、跟踪、关键点和姿态计算 |
@@ -55,20 +56,24 @@
 | `VideoFrameChannel` | 容量一的通用 FIFO；满载时释放最旧帧租约 |
 | `FaceTrackingStage` | 阻塞消费帧、调用已配置任务主体，并发布完整快照 |
 | `Live2DTrackingChannel` | 容量一的通用 FIFO；渲染线程通过 `try_pop()` 非阻塞读取 |
-| `VtbApplication` | 直接实例化两个 Stage 和两条通道，管理启动、停止和错误传播 |
+| `GodotRenderPipeline` | 保存渲染配置与输出依赖，在调用线程同步驱动 LibGodot，不创建线程或持有通道 |
+| `GodotRenderStage` | 独占 Godot 所有者线程，消费跟踪快照并调用渲染任务主体 |
+| `VtbApplication` | 创建三个处理主体，实例化三个 Stage 和两条通道，管理启动、停止和错误传播 |
 
 人脸模块的 `face_types.hpp` 保存检测、关键点、姿态、表情和跟踪结果值类型；
-`face_pipeline.hpp` 保存单帧算法流程。应用层 `apps/vtb-live2d/pipeline` 保存两个 Stage
-和不含线程、通道的 `Live2DTrackingPipeline` 同步任务主体；
+`face_pipeline.hpp` 保存单帧算法流程。应用层 `apps/vtb-live2d/pipeline` 保存三个 Stage
+和不含线程、通道的 `Live2DTrackingPipeline`、`GodotRenderPipeline` 同步任务主体；
 `vtb_application.cpp` 直接装配 Stage 与通道，`live2d_tracking_snapshot.hpp`
 保存产品快照和取景状态，`live2d_control_server.hpp`
 负责 HTTP 控制。`include/vtb/live2d/live2d_mapping_result.hpp` 独立保存映射结果；
 值类型不包含算法、线程和 HTTP。完整依赖图见 [模块边界](module-boundaries.md)。
 
-`VtbApplication` 先启动 FaceTrackingStage；该线程完成 `begin_source()` 后，
-应用再启动 VideoCaptureStage。停止时先请求 VideoSource 退出并等待采集线程，
+`VtbApplication` 先启动 GodotRenderStage 并在其工作线程初始化 GodotRenderPipeline，
+随后启动 FaceTrackingStage；该线程完成 `begin_source()` 后，应用再启动 VideoCaptureStage。
+停止时先请求 VideoSource 退出并等待采集线程，
 采集线程关闭帧通道后唤醒 FaceTrackingStage；FaceTrackingStage 处理或释放剩余租约，
-调用 `retire_source()` 并结束跟踪通道。应用在释放通道前完成两个线程的 `join()`。
+调用 `retire_source()` 并结束跟踪通道。应用停止生产者后允许 GodotRenderStage 排空输出、
+销毁 LibGodot 并 join；两个通道析构前，三个 Stage 的工作线程均已回收。
 
 ## 5. 输入格式选择
 
@@ -133,10 +138,9 @@ DecodedFrameLease
         |
         | FrameView + CropRegion + ModelInputSpec
         v
-ImageTransformer::prepare()
+RgaModelInputTransformer::prepare()
         |
-        | 产品路径: RGA
-        | 对照路径: CPU
+        | RgaTransformSession → shared RgaExecutor
         v
 ModelInputLease
         |
@@ -144,20 +148,21 @@ ModelInputLease
 FaceDetector / LandmarkEstimator
 ```
 
-`ImageTransformer` 可以根据输入和输出规格选择最短路径。例如 YUYV 可以由一次 RGA 操作同时完成 ROI 裁剪、缩放和 RGB 转换。MPP 输出的 NV12 也直接交给 RGA，无需提前生成完整分辨率 RGB 中间帧。
+`RgaModelInputTransformer` 可以根据输入和输出规格选择最短路径。例如 YUYV 可以由一次 RGA 操作同时完成 ROI 裁剪、缩放和 RGB 转换。MPP 输出的 NV12 也直接交给 RGA，无需提前生成完整分辨率 RGB 中间帧。
 
-当前产品路径由 `FacePipeline::create()` 创建一份 `RgaDevice`，`RgaImageTransformer`
-通过 shared_ptr 保持该设备有效。
-同一源代次首次出现某个 V4L2 DMA-BUF 时，设备创建 `RgaBuffer` 租约，复制 fd、导入
-RGA handle 并由转换器缓存源描述；后续帧复用该租约。消费线程处理
-完该代最后一帧并收到 `retire_source` 后，统一释放输入 handle 和复制的 fd。每次预处理由一次
-同步 RGA 操作完成 ROI 裁剪、缩放和 BT.601 limited YUV 到 RGB888 转换。输出缓冲区
-由设备从 JSON 指定的 DMA heap 分配并复用。设备内部互斥量串行保护同步 librga 提交，
-不创建硬件工作线程。`RgaImageTransformer` 通过 `ModelInputView` 同时
+`VtbApplication` 创建共享 `RgaExecutor`，`FacePipeline::create()` 把它注入
+`RgaModelInputTransformer`。转换器独占一个 `RgaTransformSession`；同一源代次首次出现
+某个 V4L2 DMA-BUF 时，Session 创建 `RgaBuffer` 租约，复制 fd、导入 RGA handle 并按
+fd、缓冲标识、流代次、尺寸、stride 与格式缓存，后续帧复用该租约。消费线程处理完该代
+最后一帧并调用 `retire_source` 后，统一释放输入 handle 和复制的 fd。每次预处理向有界
+FIFO 提交一个同步等待的 `RgaCommand`，Worker 使用自己独占的 `RgaTransformer` 和
+`RgaDevice` 完成 ROI 裁剪、缩放和 BT.601 limited YUV 到 RGB888 转换。目标 DMA-BUF
+池属于 Face Session，移动 Lease 阻止在途输出槽位被复用。`RgaModelInputTransformer`
+通过 `ModelInputView` 同时
 交付 DMA-BUF fd、CPU 映射地址、缓冲区大小和行步长，不包含 RKNN 头文件，也不创建或
 配置 RKNN context。`RknnModel` 收到 DMA-BUF 输入后，在自己的 context 内复制 fd、建立
 独立映射，并调用 `rknn_create_mem_from_fd()` 和 `rknn_set_io_mem()`；后续帧直接执行
-`rknn_run()`。CPU 对照输入在每次推理前调用 `rknn_inputs_set()`。
+`rknn_run()`。
 
 `RknnModel` 查询输入属性后，通过 `ModelInputSpec` 声明最小缓冲区大小；RGA 只依据通用
 输入规格分配缓冲区。检测和关键点 context 分别创建自己的 `rknn_tensor_mem` 包装，
@@ -176,14 +181,11 @@ RKNN Runtime 在内部把模型原生输出转换为 FP32，因此不等同于 N
 零拷贝。若后续测量确认这段转换是瓶颈，需要改用 RKNN zero-copy IO memory API，
 并让 CPU 后处理读取模型原生输出类型。
 
-`CpuImageTransformer` 和 `RgaImageTransformer` 都实现同一个 `ImageTransformer`
-接口。CPU 实现保留用于依赖注入测试、功能对照和数值差异检查；当前
-`FacePipeline::create()` 固定组装 RGA 实现。RGA 失败会向上层报告，产品入口不配置
-隐式 CPU 回退，从而保持运行性能和内存路径可见。RGA 路径解决 CPU 预处理开销和
-整帧 CPU 读取问题；它不会改变检测与关键点
-模型的调用顺序，也不会自行降低 RKNN 推理耗时。验证指标应分别记录两种实现的
-`prepare()` 耗时、模型输入差异、DMA-BUF 绑定初始化耗时、`rknn_run()` 耗时以及完整
-消费帧耗时；基线构建继续记录 `rknn_inputs_set()` 耗时用于比较。
+`FacePipeline` 直接持有具体的 `RgaModelInputTransformer`，当前产品没有另一种模型输入
+转换后端，也没有隐式回退。RGA 失败通过任务 future 精确回传到人脸处理线程。该路径解决
+CPU 预处理开销和整帧 CPU 读取问题；它不会改变检测与关键点模型的调用顺序，也不会自行
+降低 RKNN 推理耗时。验证指标应分别记录 RGA 排队、执行和总延迟、DMA-BUF 首次导入、
+`rknn_run()` 以及完整消费帧耗时。
 
 第一版预处理把源图 ROI 直接缩放到模型尺寸，不加入未记录的 letterbox 或 padding。
 `ModelInputView` 保存本次预处理使用的源图 ROI。检测框、关键点和更新后的人脸框统一使用
@@ -388,10 +390,11 @@ Live2DTrackingChannel (capacity 1, drop_oldest)
      |
      | try_pop()
      v
-Godot owner thread
+GodotRenderStage owner thread
      |
-     +-- Live2D参数更新
-     `-- Godot渲染
+     | GodotRenderPipeline::submit()/run_frame()
+     v
+LibGodot参数更新与渲染
 ```
 
 当新帧替换尚未被模型线程取得的旧帧时：
@@ -418,7 +421,7 @@ FrameView
     | + CropRegion
     | + ModelInputSpec
     v
-ImageTransformer
+RgaModelInputTransformer
     |
     | prepare()
     v
@@ -441,7 +444,7 @@ FaceTrackingResult
 
 简单方案是让模型直接接收 `cv::Mat`，并由每个模型自行裁剪和转换。该方案便于快速验证，但会把输入来源、CPU 内存布局和模型实现绑定在一起，也无法表达 DMA-BUF 生命周期。
 
-本文选择 `DecodedFrameLease → ImageTransformer → ModelInputLease`，主要解决以下问题：
+本文选择 `DecodedFrameLease → RgaModelInputTransformer → ModelInputLease`，主要解决以下问题：
 
 - 将输入来源与模型推理解耦。
 - 明确跨线程和跨硬件组件的缓冲区所有权。
@@ -472,7 +475,7 @@ FaceTrackingResult
 
 1. 定义 `FrameView`、`DecodedFrameLease`、`ModelInputSpec` 和 `ModelInputLease` 的最小契约。
 2. 实现摄像头 `VideoSource`，读取并严格校验驱动回填值。
-3. 实现 RGA `ImageTransformer`，覆盖检测和关键点所需格式。
+3. 实现 RGA `RgaModelInputTransformer`，覆盖检测和关键点所需格式。
 4. 接入 MPP 摄像头 MJPEG 解码。
 5. 接入容量为一的 `VideoFrameChannel` 和 `FaceTrackingStage` 模型线程。
 6. 在 RK3588 上验证格式、缓冲区生命周期、复制次数和阶段延迟。
@@ -494,11 +497,9 @@ FaceTrackingResult
   `LatestFrameSlot` 保留给独立协议测试与旧通用运行时，不再参与产品主链路。
 - `VtbApplication` 直接拥有采集 Stage、Face Stage 和两条容量一通道，并负责停止顺序
   与异常转交；Stage 之间只通过消息通道协作。
-- `FacePipeline::create()` 负责创建 RGA、RKNN 和几何依赖；`RgaDevice` 负责 DMA heap
-  分配、DMA-BUF 注册租约和同步提交，`RgaImageTransformer` 共享持有设备，按源代次缓存 `RgaBuffer`，并在
-  一次同步 RGA 操作中完成 YUYV/NV12/NV21 ROI 裁剪、缩放和 224x224 RGB888 转换。
-- `CpuImageTransformer` 保留相同的 `ImageTransformer` 契约，用于依赖注入测试、
-  功能对照和数值差异检查；产品创建器固定组装 RGA 实现。
+- `VtbApplication` 创建共享 `RgaExecutor`；`FacePipeline::create()` 注入执行器并直接创建
+  `RgaModelInputTransformer`。它的独立 `RgaTransformSession` 缓存摄像头源注册和 RGB888
+  目标池，并在一次任务中完成 YUYV/NV12/NV21 ROI 裁剪、缩放和 224x224 RGB888 转换。
 - `RknnFaceDetector` 与 `RknnLandmarkEstimator`，分别封装 RKNN context、
   NPU core 选择、输入输出张量检查、推理资源释放以及 OpenSeeFace 检测框和
   66 点关键点后处理。
@@ -515,8 +516,12 @@ FaceTrackingResult
 - `Live2DFaceMapper` 的中立姿态校准、十个 Ayagami 参数映射和按单调时钟平滑。
 - 独立的 `Live2DControlServer` 直接借用 `FaceTrackingStage`，只调用状态查询、取景修改
   和校准重置。
-- `VtbApplication` 通过 ABI v3 提交参数快照和媒体指标持久化配置；Godot 返回编码包视图，由宿主
-  `MediaOutputSession` 拷贝并交给 `OutputManager`。协议配置位于 `output` 段。
+- `VtbApplication` 通过 ABI v6 提交参数快照和 `RgbaFrameSink`；Godot/OpenVT 完成
+  渲染、GPU copy 和 GPU wait 后同步借出 RGBA DMA-BUF。宿主 `RgaNv12FrameTransformer`
+  完成 RGA 并借出 NV12，随后
+  `MediaEncodeSession` 管理 H.264/MJPEG 两个 MPP 会话，再由 `MediaOutputSession`
+  拷贝编码包并交给 `OutputManager` 的独立 RTSP/UVC 队列。UVC 帧率和协议配置位于
+  `output` 段。
 
 MPP 摄像头 MJPEG 解码仍属于后续按测量引入的硬件优化。当前 C++ Live2D 主路径直接
 采集 YUYV/NV12/NV21，由 RGA 生成带 DMA-BUF fd 的模型输入；RKNN 在各自 context 中
@@ -542,5 +547,5 @@ Buildroot/Godot ARM64 GCC 13.2.0 构建。2026-10-30 的拆分前路径已在 RK
 摄像头真人画面也完成 30/30 校准，置信度为 0.904445；重新标定、视图控制以及
 H.264 WebRTC 浏览器播放均已验证。浏览器连续播放 121.6 秒时共显示 3651 帧、
 丢弃 11 帧且无媒体错误。当前仍未完成 C++/Python 数值精度对照、长时间稳定性和
-带关联时间戳的摄像头到浏览器端到端延迟测量。此前宿主/LibGodot 边界拆分的编译记录不覆盖 2026-11-03 的 ABI v3；
+带关联时间戳的摄像头到浏览器端到端延迟测量。此前宿主/LibGodot 边界拆分的编译记录不覆盖当前 ABI v6；
 本轮验证边界见 [模块边界](module-boundaries.md)，尚未进行 RK3588 板端回归。

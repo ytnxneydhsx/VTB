@@ -3,7 +3,7 @@
 状态：第一版实现完成，实机验收记录见 `godot-embedded-runtime-validation-2026-10-30.md`
 日期：2026-10-30；2026-11-03 增补当前模块边界。
 
-历史实机验收不覆盖 ABI v3。当前实现的模块职责与验证范围以
+历史实机验收不覆盖 ABI v6。当前实现的模块职责与验证范围以
 [模块边界](module-boundaries.md) 为准，下文保留尚未接入产品的接口设计。
 2026-11-03 的 Headless EGL 后续阶段由
 [ADR 0002](adr/0002-use-headless-egl-for-product-runtime.md) 管理；下文关于 X11 的
@@ -44,17 +44,22 @@ Godot main()
 ```text
 VTB C++ main()
   → VtbApplication
-  → VideoSource + VideoProcessingRuntime + VideoFrameConsumer
-  → FaceFrameConsumer + FacePipeline + Live2DTrackingSession
+  → VtbApplication 直接装配消息通道和 Stage
+  → VideoCaptureStage + VideoFrameChannel
+  → FaceTrackingStage + Live2DTrackingPipeline + Live2DTrackingChannel
+  → GodotRenderStage + GodotRenderPipeline
   → Live2D parameter frame C ABI
   → LibGodotInstance::start()
   → C++ 创建 SceneTree、SubViewport 和 Ayagami 模型
   → C++ 每帧向 Godot 提交已完成的 Live2D 参数并驱动 iteration
   → Headless EGL/GBM / Mali-G610 驱动 Godot RenderingServer 完成离屏绘制
   → C++ 取得已完成帧的 GPU 纹理
-  → RGBA DMA-BUF → RGA → MPP → EncodedVideoSink
+  → RGBA DMA-BUF → LibGodotInstance 返回同步借用 RgbaFrameView
+  → 宿主 RgaNv12FrameTransformer → Godot RgaTransformSession
+  → shared RgaExecutor Worker → NV12 DMA-BUF → Nv12FrameSink
+  → 宿主 MediaEncodeSession → MPP → EncodedVideoSink
   → 宿主 MediaOutputSession → OutputManager → RTSP
-  → LibGodotInstance::finish_application() → 输出排空 → shutdown()
+  → LibGodotInstance::finish() → 输出排空与实例销毁
 ```
 
 Godot 4.7.1 已提供实验性的 LibGodot Linux 静态库/共享库构建和
@@ -163,16 +168,24 @@ ADR 0002 在生命周期迁移完成后启动独立的显示后端迁移阶段�
 ```text
 VtbApplication
 ├── VideoInput
-├── VideoProcessingRuntime
-│   └── VideoFrameConsumer
-├── FacePipeline
-├── Live2DFaceMapper
+├── VideoFrameChannel
+├── VideoCaptureStage
+├── FaceTrackingStage
+│   └── Live2DTrackingPipeline
+│       ├── FacePipeline
+│       └── Live2DFaceMapper
+├── Live2DTrackingChannel
+├── GodotRenderStage
+│   └── GodotRenderPipeline
+│       └── LibGodotInstance     Pipeline 在所有者线程内创建并独占
+├── MediaEncodeSession
+│   ├── MppEncoderSession H.264
+│   └── MppEncoderSession MJPEG
 ├── GodotRuntime                 VTB-owned facade
 │   ├── LibGodotAdapter          only layer allowed to call LibGodot lifecycle API
 │   └── Live2DRenderSession      SceneTree/SubViewport/Ayagami ownership
 ├── DmaBufRenderBridge
 ├── RgaConverter
-├── MppEncoder
 ├── OutputManager
 └── ControlServer
 ```
@@ -192,14 +205,22 @@ VtbApplication
 `VtbApplication` 作为组合根选择具体的视频、RKNN、Godot 和输出实现，但不承载这些
 组件内部的采集、推理、渲染、编码或协议算法。
 
-视频输入和模型管线通过独立工厂函数构造。`VideoProcessingRuntime` 只组合
-`VideoSource` 与 `VideoFrameConsumer`；`FaceFrameConsumer` 在人脸模块内适配
-`FacePipeline`。`VtbApplication` 只拥有并排序这些边界的生命周期。
+视频输入、人脸模型管线和 Godot 渲染管线通过独立创建入口构造。`VtbApplication` 在组合根
+直接实例化采集 Stage、人脸 Stage、Godot 渲染 Stage 和两条容量一通道，并排序采集、
+推理、渲染和输出边界的生命周期。
+
+`GodotRenderPipeline::create()` 只装配配置、桥接参数与 NV12 输出借用，不调用 LibGodot；
+`GodotRenderStage` 绑定跟踪通道并拥有专用线程。工作线程接管 Pipeline 的独占所有权后，
+依次完成 LibGodot 初始化、快照提交、iteration、输出排空和销毁。
 
 ### 6.2 `GodotRuntime`
 
 `GodotRuntime` 是带替身后端的生命周期契约原型，目前仅由状态机单元测试使用。
-产品使用 `apps/vtb-live2d/vtb_application.cpp` 中的 `LibGodotInstance`。以下条目保留设计职责：
+产品使用 `apps/vtb-live2d/libgodot_instance.hpp/.cpp` 中独立定义的
+`LibGodotInstance`。该类独占 LibGodot ABI、启动参数和实例资源；`GodotRenderPipeline`
+只在 `GodotRenderStage` 工作线程中创建、持有、编排并销毁它。Pipeline 源码不包含
+LibGodot 或 OpenVT 桥接头文件，只依赖独立宿主类的公开接口。
+以下条目保留设计职责：
 
 - 初始化 Godot 全局运行环境；
 - 创建并持有 SceneTree；
@@ -246,14 +267,19 @@ VTB 模块不得包含 Godot `main/` 或 `core/` 私有头文件。
 
 ```text
 SubViewport native GL texture
+  → acquire_viewport_texture
   → glBlitFramebuffer
   → RGBA DMA-BUF slot
-  → RGA NV12
-  → MPP
+  → glFinish
+  → RgbaFrameSink
 ```
 
-该模块继续负责 DMA-BUF 槽位、GPU copy、队列背压和完成帧所有权。后续如实现外部颜色
-附件，应替换该模块内部实现，不能改变 `VtbApplication` 和 `GodotRuntime` 的接口。
+该模块负责单个 RGBA DMA-BUF 槽位、GPU copy、GPU 完成等待和同步借用交付。
+宿主 `RgaNv12FrameTransformer` 在回调内向共享 `RgaExecutor` 提交任务并等待 Worker
+完成，随后 `MediaEncodeSession` 在回调返回前完成 MPP。RGBA 由同步回调调用栈保持；
+NV12 由移动专属 Lease 保持到编码 Sink 返回。
+后续如实现外部颜色附件，应替换该模块内部实现，不能改变 `VtbApplication` 和
+`GodotRuntime` 的接口。
 
 ## 7. Runtime 生命周期和状态机
 
@@ -446,18 +472,18 @@ setup
 | 线程 | 允许职责 |
 |---|---|
 | VTB 进程主线程 | 组件装配、生命周期阶段控制、停止顺序和错误接收 |
-| Godot 所有者线程 | Runtime 生命周期、SceneTree、Ayagami、RenderingServer、参数应用 |
+| Godot 所有者线程 | Runtime 生命周期、SceneTree、Ayagami、RenderingServer、参数应用、GPU copy，以及同步调用宿主 RGA、MPP 和编码包发布 |
 | 摄像头线程 | 采集和最新帧发布 |
 | 推理线程 | RKNN、PnP、表情和 Live2D 参数生成 |
-| 媒体线程 | RGA、MPP、OutputManager 发布 |
+| 输出线程 | OutputManager 队列消费、FFmpeg/RTSP 写出 |
 | 控制线程 | HTTP 请求解析和向跟踪状态提交控制更新 |
 
 ### 10.2 约束
 
-- 推理、媒体和控制线程不得访问 Godot Object、RID、Variant 或 SceneTree；
+- 推理、输出和控制线程不得访问 Godot Object、RID、Variant 或 SceneTree；
 - 线程间只传递 VTB 自有值类型、资源租约或容量受限的快照；
 - 人脸参数继续使用容量一、最新值覆盖的交接方式；
-- 视频输出槽位必须有固定容量和明确背压；
+- 同步视频输出只允许一个在途 RGBA 槽位；若重新引入跨帧队列，必须具有固定容量和明确背压；
 - Godot 所有者线程调用 Godot API 时不能持有推理或输出线程需要的锁；
 - 关闭时先停止新输入，再排空或放弃有界队列，最后销毁 Godot；
 - signal handler 只设置原子停止标志或写入安全通知 fd，不直接调用 Godot API；
@@ -647,6 +673,9 @@ output_packet_id
 apps/vtb-live2d/
   main.cpp
   vtb_application.cpp
+  pipeline/
+    godot_render_pipeline.hpp/.cpp
+    godot_render_stage.hpp/.cpp
 
 include/vtb/render/
   godot_runtime.hpp
@@ -727,7 +756,7 @@ experiments/godot/embedded-runtime/
 
 实现：
 
-- 复用当前三槽 RGBA DMA-BUF 和媒体工作线程；
+- 使用当前单槽 RGBA DMA-BUF，并在 Godot 所有者线程同步执行后续处理；
 - RGA NV12；
 - MPP H.264；
 - OutputManager RTSP；
@@ -740,7 +769,7 @@ experiments/godot/embedded-runtime/
 实现：
 
 - 直接 V4L2 摄像头输入；
-- LatestFrameSlot；
+- 容量一 `VideoFrameChannel` 与 `Live2DTrackingChannel`；
 - RKNN detector/landmark；
 - PnP、表情、校准和映射；
 - 参数 mailbox；

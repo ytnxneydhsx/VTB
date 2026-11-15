@@ -6,6 +6,10 @@
 2026-11-11 保留的裁剪版 LibGodot，生成的宿主与动态库均为 AArch64 ELF。RK3588 上的
 启动、渲染、信号退出和资源释放仍待单独实机验证。
 
+2026-11-14 后续结构整理把本文验证时的 `GodotRuntimeThread` 拆成
+`GodotRenderStage + GodotRenderPipeline`。专用线程和 LibGodot 线程归属协议保持不变；
+本文“已完成验证”记录的构建哈希仍对应 2026-11-12 的旧类名版本，不能作为本次拆分的构建证据。
+
 ## Godot 线程归属依据
 
 保留的 Godot 4.7.1 源码给出以下调用关系：
@@ -27,7 +31,8 @@ GodotInstance::start()
 - `main/main.cpp`：`Main::setup()` 末尾释放主线程身份，`Main::setup2()` 把当前调用线程
   登记为 Godot 主线程。
 
-因此 `GodotRuntimeThread` 在线程入口内完成创建和 `start()` 后，该线程成为 Godot
+因此当前 `GodotRenderStage` 在线程入口调用 `GodotRenderPipeline::initialize()` 完成创建
+和 `start()` 后，该线程成为 Godot
 登记的主线程。后续 `submit`、`iteration`、application shutdown 和实例销毁也全部留在
 这个线程。
 
@@ -42,7 +47,7 @@ VTB 现在同时通过产品启动参数 `--render-thread safe` 和资源设置
 `rendering/driver/threads/thread_model=1` 固定 Safe 模式。在这个模式下：
 
 ```text
-GodotRuntimeThread
+GodotRenderStage 工作线程
   = Godot 主线程
   = RenderingServer server_thread
   = DMA-BUF OpenGL 捕获调用线程
@@ -57,8 +62,8 @@ GodotRuntimeThread
 ## VTB 交接边界
 
 - 进程主线程负责组件装配、启动阶段、停止顺序和异常接收；
-- 人脸消费线程完成映射后发布到 `LatestTrackingChannel`，Godot 所有者线程只读取已完成
-  的 latest-only 快照；
+- 人脸消费线程完成映射后发布到容量一的 `Live2DTrackingChannel`，Godot 所有者线程
+  只读取已完成的最新快照；
 - 生命周期阶段通过互斥锁和条件变量同步；
 - 停止请求使用原有原子标志；
 - Godot 与输出失败通过 `std::exception_ptr` 保存，生产者停止后由进程主线程重新抛出；

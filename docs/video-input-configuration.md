@@ -41,7 +41,9 @@
   `angle_x_sign` 为 `+1.0`，使水平转头与 `ParamAngleX` 保持同向。
 - `control`：HTTP 控制口。
 - `render`：Godot 工程、Live2D 模型、输出画面尺寸、帧率和帧数上限。
-- `output`：宿主输出协议配置，当前为 `rtsp_url`。
+- `output`：宿主输出协议配置；`rtsp_url` 必填，`uvc` 可选。启用 `uvc` 时必须提供
+  Gadget V4L2 Output 设备、GStreamer 1.28.9 可执行文件/库/插件路径和 MJPEG 帧率；
+  UVC 帧率不能超过渲染帧率。
 - `instrumentation`：可选的周期 JSONL 指标目录和报告间隔；缺失时关闭持久化。
 
 2026-11-03 起，将原 `render.rtsp_url` 移到 `output.rtsp_url`；保留旧字段会收到明确的
@@ -55,16 +57,19 @@
 `YUYV`、`NV12` 和 `NV21` 原始帧。`MJPG`、H.264 等压缩格式需要先接入解码器，
 配置解析器会在启动时明确拒绝这些格式，避免把压缩字节当成像素帧。
 
-`face_pipeline.rga_dma_heap` 指定 RGA 模型输入缓冲区使用的 DMA heap，例如
-`/dev/dma_heap/system-uncached`。路径由 JSON 提供；`RgaImageTransformer` 不在代码中
-猜测或固定设备节点。启动时无法打开该 heap、摄像头缓冲区无法导出 DMA-BUF，或
+`face_pipeline.rga_dma_heap` 指定共享 RGA Executor 下各业务 Session 的目标缓冲区所用
+DMA heap，例如 `/dev/dma_heap/system-uncached`。路径由 JSON 提供；
+`RgaModelInputTransformer` 与 `RgaNv12FrameTransformer` 不在代码中猜测设备节点。
+启动时无法打开该 heap、摄像头缓冲区无法导出 DMA-BUF，或
 RGA 不支持请求的格式、stride、ROI 与缩放比例时，模型管线会明确报错并停止。
 
 `instrumentation.metrics_directory` 启用项目自有的指标持久化。目录会在启动时创建，
-`report_interval_ms` 接受 1000～3600000 ms。媒体与输出统计分别追加到：
+`report_interval_ms` 接受 1000～3600000 ms。渲染、共享 RGA 执行器、编码与输出统计分别追加到：
 
 ```text
-<metrics_directory>/vtb-live2d-media.metrics.jsonl
+<metrics_directory>/vtb-live2d-render.metrics.jsonl
+<metrics_directory>/vtb-live2d-rga.metrics.jsonl
+<metrics_directory>/vtb-live2d-encode.metrics.jsonl
 <metrics_directory>/vtb-live2d-output.metrics.jsonl
 ```
 

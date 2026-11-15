@@ -2,13 +2,15 @@
 
 ## 结论
 
-当前 C++ 主链路只需要 Godot 的 2D 场景、动画、GLES3 离屏渲染、PNG、
-GDExtension、Headless EGL 和 OpenVT 定制模块。以这组运行能力作为裁剪边界后，
-LibGodot 从 81,685,296 字节降到 38,462,104 字节，减少 52.91%。当前完整
-`vtb-live2d` 宿主已能与裁剪库完成 ARM64 编译和链接。
+这份裁剪结果只通过了 ARM64 编译和链接验证，不能作为产品库。2026-11-14
+部署到 RK3588 后，Ayagami 在启动时解析了裁剪配置删除的
+`OpenXRExtensionWrapper::get_openxr_api`、`XRServer::get_world_scale` 和
+`FoldableContainer::fold`，随后 `AyagamiLoader` 单例不可用，应用在媒体链路启动前
+退出。
 
-这份结果属于构建验证。尚未把产物部署到 RK3588，也没有加载板端 Ayagami
-扩展和模型，因此不能替代实机渲染、帧率、长期稳定性和退出流程验收。
+当前产品部署改用完整 LibGodot。完整库在板端完成 Ayagami 加载、Live2D 渲染、
+RGA 转换、H.264/MJPEG 双 MPP 编码和 RTSP 输出验证。裁剪脚本要求显式设置
+`OPENVT_EXPERIMENTAL_TRIMMED_LIBGODOT=1`，用于后续逐项恢复模块并重新实机验证。
 
 ## 裁剪依据
 
@@ -101,13 +103,18 @@ fa8ce6aacc6d023c4c4784e056ea56c5223be37b81205a1022bdd46b0a866ef5
 build/remote-artifacts/vtb-libgodot-trim-20261111/
 ```
 
-## 实机验收项
+## 2026-11-14 实机结果
 
-进入替换基线之前，需要单独授权并在 RK3588 完成：
+裁剪库结果：
 
-1. Ayagami GDExtension 加载；
-2. 当前模型 PNG、MOC3、动作与物理文件加载；
-3. Live2D 画面、透明度和三种混合模式对照；
-4. submitted、encoded、written 帧数与帧时间对照；
-5. 连续运行和退出资源释放；
-6. `/proc/<pid>/maps` 中实际加载的是裁剪库。
+- Ayagami GDExtension 初始化失败；
+- Live2D 模型和媒体链路未进入可验收状态；
+- 不能替换完整库基线。
+
+完整库结果：
+
+- 13 个当前 LibGodot bridge ABI 导出均存在；
+- Ayagami 和当前模型完成加载；
+- 双 MPP 会话持续编码 14480 帧 H.264 和 7240 帧 MJPEG；
+- RTSP 与 UVC 输出队列报告零丢帧、零写入错误；
+- Mac 通过 RTSP/TCP 连续解码 5 秒，识别为 H.264 1920×1080、约 60 fps。

@@ -10,6 +10,8 @@ V4L2 CameraSource (MMAP / DQBUF / QBUF)
   → VideoCaptureStage
   → capacity-one BoundedFifoChannel<DecodedFrameLease>
   → FaceTrackingStage
+  → RgaModelInputTransformer → Face RgaTransformSession
+  → shared RgaExecutor (2 workers)
   → RKNN detector (NPU core 0)
   → RKNN 66-point landmark model (NPU core 1)
   → OpenSeeFace-compatible C++ PnP / expression features
@@ -18,14 +20,19 @@ V4L2 CameraSource (MMAP / DQBUF / QBUF)
   → openvt_libgodot_application_submit_live2d_frame()
   → Godot main thread parameter input
   → Ayagami model parameters
-  → SubViewport → DMA-BUF → RGA → MPP H.264
-  → EncodedVideoSink 同步编码包回调
-  → 宿主 MediaOutputSession → OutputManager → RTSP
+  → SubViewport → RGBA DMA-BUF
+  → RgbaFrameSink → host RgaNv12FrameTransformer → Godot RgaTransformSession
+  → shared RgaExecutor (2 workers) → NV12
+  → Nv12FrameSink
+  → MediaEncodeSession
+      ├─ MPP H.264 → EncodedVideoSink → OutputManager → RTSP
+      └─ MPP MJPEG → EncodedVideoSink → OutputManager → GStreamer uvcsink → UVC
 ```
 
-Godot/Ayagami、DMA-BUF、RGA 和 MPP 保留原有资源链；输出协议移到宿主。`vtb-live2d` 可执行文件
-直接链接 V4L2 视频输入、OpenCV PnP 几何计算、RKNN 和两个流水线 Stage；LibGodot 共享库不再编译
-摄像头、RKNN 模型、几何估计、人脸管线、OutputManager 或 RTSP 源码，也不链接 FFmpeg。
+Godot/Ayagami、Viewport 纹理访问和 GPU copy 位于 LibGodot/OpenVT；RGA、MPP 与输出协议
+位于宿主。`vtb-live2d` 可执行文件直接链接 V4L2 视频输入、OpenCV PnP 几何计算、RKNN、
+Rockchip RGA/MPP 和三个流水线 Stage；LibGodot 共享库不编译摄像头、RKNN 模型、几何估计、
+人脸管线、RGA、MPP、指标报告、OutputManager 或 RTSP 源码，也不链接 RGA/MPP/FFmpeg。
 
 ## 模块边界
 
@@ -36,8 +43,13 @@ Godot/Ayagami、DMA-BUF、RGA 和 MPP 保留原有资源链；输出协议移到
   同步完成单帧人脸处理与映射，不创建线程或持有消息通道。
 - `FaceTrackingStage`：只连接已配置任务主体、输入通道和输出通道；在自己的线程中
   阻塞取得帧租约、调用主体并发布快照。
-- `VtbApplication`：直接拥有两个 Stage 和两条 `BoundedFifoChannel`，统一安排启动、停止
-  和错误传播。旧 `VideoProcessingRuntime` 只保留给独立协议测试。
+- `VtbApplication`：直接拥有三个 Stage、两条 `BoundedFifoChannel` 和共享
+  `RgaExecutor`，统一安排启动、停止和错误传播。旧 `VideoProcessingRuntime` 只保留给
+  独立协议测试。
+- `RgaExecutor`：容量四的 FIFO 和两个 Worker；每个 Worker 独占一个
+  `RgaTransformer/RgaDevice`，不绑定 RGA 核心。
+- `RgaModelInputTransformer`：FacePipeline 直接持有的模型输入适配器；通过 Face 私有
+  Session 管理摄像头源注册缓存和 RGB888 目标池。
 - `RknnFaceDetector` / `RknnLandmarkEstimator`：加载 `.rknn` 模型并固定到两个 NPU core。
 - `OpenSeeFaceGeometryEstimator`：保留 70 点模板、14 点 PnP、Euler 角、66 点反投影和
   Remedian 表情特征语义。
@@ -46,16 +58,25 @@ Godot/Ayagami、DMA-BUF、RGA 和 MPP 保留原有资源链；输出协议移到
   非阻塞取得新快照。
 - `Live2DControlServer`：独立的 HTTP 控制组件，借用寿命更长的 `FaceTrackingStage`，
   序列化状态和转发命令。
-- `MediaOutputSession`：宿主编码包接收器，复制回调中的借用字节，管理输出启动、排空和停止。
-- `VtbApplication`：分别创建视频输入与模型管线，在组合根直接实例化通道和 Stage，
+- `MediaOutputSession`：宿主编码包接收器，按 H.264/MJPEG 类型复制回调中的借用字节，
+  管理 RTSP/UVC 两个输出的启动、排空和停止。
+- `MediaEncodeSession`：同步借用 Godot/OpenVT 交付的 NV12 DMA-BUF，独占 H.264/MJPEG
+  两个 MPP 会话，并把编码包发布给 `MediaOutputSession`；当前不创建线程或帧队列。
+- `RgaNv12FrameTransformer`：同步借用 LibGodot 交付的 RGBA DMA-BUF，通过 Godot 私有
+  Session 向共享 Executor 提交 RGBA→NV12 命令，等待完成后把 NV12 Lease 借给
+  `MediaEncodeSession`。
+- `VtbApplication`：分别创建视频输入、人脸跟踪管线与 Godot 渲染管线，在组合根直接实例化通道和 Stage，
   管理顶层启动、停止和错误传播。
-- `GodotRuntimeThread`：专用所有者线程；在该线程内创建、驱动和销毁 LibGodot，并
-  读取最新参数快照提交给 Godot。
+- `GodotRenderPipeline`：同步渲染任务主体；`create()` 只装配配置与依赖，随后在调用它的
+  Godot 所有者线程内创建、驱动和销毁 LibGodot，不持有消息通道。
+- `GodotRenderStage`：独占 `GodotRenderPipeline` 和 Godot 所有者线程，绑定跟踪快照通道，
+  负责非阻塞消费、帧调度、停止、join 与异常传播。
 - `Live2DParameters`：独立的十参数值对象；Godot 只编译这个数据类型，不编译
   `Live2DFaceMapper`。
 - `OpenVTLive2DFrameInput`：宿主与 LibGodot 之间的固定数值帧对象，只包含十个
   Live2D 参数、取景状态、结果产生时间戳和 snapshot_generation；通过 C linkage 函数提交。
-- `EmbeddedLive2DApplication`：Godot 内部渲染/编码编排，只消费参数帧并驱动 Ayagami。
+- `EmbeddedLive2DApplication`：Godot 内部渲染编排，只消费参数帧并驱动 Ayagami、Viewport
+  纹理取得、GPU blit、GPU wait 和 RGBA 交付。
 
 FaceTrackingStage 不访问 Godot 对象。它调用已配置的 `Live2DTrackingPipeline` 取得映射结果，
 再把值快照发布到纯 C++ Channel；
@@ -125,13 +146,14 @@ export OPENVT_OPENCV_ROOT=/path/to/arm64-opencv-sysroot
 export OPENVT_RKNN_ROOT=/path/to/arm64-rknn-sysroot
 ```
 
-Godot 内置模块只需要 `OPENVT_VTB_SOURCE_ROOT`、`OPENVT_BOARD_SYSROOT`。OpenCV、
-RKNN 和 FFmpeg 由宿主链接。产品构建启用 `VTB_ENABLE_EMBEDDED_GODOT`、
+Godot 内置模块只需要 `OPENVT_VTB_SOURCE_ROOT`、`OPENVT_BOARD_SYSROOT` 提供公共项目头文件
+和 Linux DMA-BUF/DRM 头文件。OpenCV、RKNN、RGA、MPP 和 FFmpeg 由宿主链接。产品构建启用 `VTB_ENABLE_EMBEDDED_GODOT`、
 `VTB_ENABLE_OPENCV_FACE_PIPELINE`、`VTB_ENABLE_RKNN_FACE`、`VTB_ENABLE_RGA_FACE`、
 `VTB_ENABLE_RTSP_OUTPUT`。两个推理后端关闭时，通用会话与消费适配仍可独立编译。
 
-ABI v3 使用 `openvt_libgodot_application_initialize_v3()`、版本查询和配置尺寸校验，
-并把媒体指标 JSONL 路径和报告周期从宿主传入 LibGodot。
+ABI v6 使用 `openvt_libgodot_application_initialize_v6()`、版本查询和配置尺寸校验，
+只把 `RgbaFrameSink` 和输出几何传入 LibGodot。渲染分段计时和 JSONL 报告器由宿主
+`GodotRenderPipeline` 持有。
 宿主和 LibGodot 必须成对构建、成对部署。回调契约与关闭顺序见 [模块边界](module-boundaries.md)。
 
 当前 60 FPS 输出路径保留 30 Hz 摄像头和人脸推理。LibGodot 主线程在应用参数前，
@@ -156,7 +178,7 @@ MPP 编码和 RTSP 写出均为 300，丢弃和错误均为 0，渲染吞吐为 
 该数值不包含摄像头曝光、编码、网络和浏览器解码，不能当作端到端延迟。取证完成后
 用 `SIGTERM` 停止持续运行，退出码 143 来自本次主动清理。
 
-历史构建记录不覆盖 ABI v3；本轮以 [模块边界](module-boundaries.md) 的验证范围为准，尚未在
+历史构建记录不覆盖 ABI v6；本轮以 [模块边界](module-boundaries.md) 的验证范围为准，尚未在
 RK3588 上运行。仍需完成新边界的板端回归、C++/Python 数值精度对照、长时间
 稳定性和摄像头到浏览器的关联时间戳端到端延迟测量。
 

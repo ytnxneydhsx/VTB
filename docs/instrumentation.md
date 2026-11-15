@@ -126,7 +126,7 @@ reporter.start();
 每行是独立 JSON 对象，当前 schema 版本为 1：
 
 ```json
-{"schema_version":1,"source":"vtb-live2d.output","process_id":1234,"sequence":1,"recorded_monotonic_ns":1000000,"recorded_unix_ns":1700000000000000000,"final":false,"metrics":[{"name":"live2d.output_write","sample_count":30,"latest_ns":100000,"total_ns":3000000,"minimum_ns":80000,"maximum_ns":150000,"average_ns":100000}]}
+{"schema_version":1,"source":"vtb-live2d.rga_executor","process_id":1234,"sequence":1,"recorded_monotonic_ns":1000000,"recorded_unix_ns":1700000000000000000,"final":false,"metrics":[{"name":"rga.execution","sample_count":30,"latest_ns":100000,"total_ns":3000000,"minimum_ns":80000,"maximum_ns":150000,"average_ns":100000}]}
 ```
 
 - `recorded_monotonic_ns` 来自 `MonotonicClock`，用于同一系统启动周期内的相对顺序、
@@ -146,29 +146,38 @@ reporter.start();
 }
 ```
 
-配置段缺失时关闭持久化，保留原有内存计时和退出汇总。启用后生成两个追加文件：
+配置段缺失时关闭持久化，保留原有内存计时和退出汇总。启用后生成四个追加文件：
 
 ```text
-vtb-live2d-media.metrics.jsonl
+vtb-live2d-render.metrics.jsonl
+vtb-live2d-rga.metrics.jsonl
+vtb-live2d-encode.metrics.jsonl
 vtb-live2d-output.metrics.jsonl
 ```
 
-当前媒体文件包含 `live2d.producer_wait`、`live2d.gpu_copy`、
-`live2d.media_queue_wait`、`live2d.rga`、`live2d.mpp`、
-`live2d.output_publish_call` 和 `live2d.media_total`；输出文件包含
-`live2d.output_write`。人脸检测、关键点 RKNN 和几何计算尚未注册到这个计时库，
-因此本轮持久化文件不包含这些阶段。
+渲染文件由宿主 `GodotRenderPipeline` 写入，包含 `live2d.parameter_prepare`、
+`live2d.godot_iteration`、`live2d.viewport_texture`、`live2d.gpu_blit`、
+`live2d.gpu_wait`、`live2d.rgba_publish`、`live2d.rga_transform`、
+`live2d.nv12_publish` 和 `live2d.render_total`。由于 RGBA sink 是同步回调，
+`rgba_publish` 也包含 RGA 等待和下游 MPP 调用时间；`rga_transform` 是 Godot 业务调用
+观察到的转换总耗时。共享执行器文件由两个 Worker 的宿主代码写入，包含
+`rga.queue_wait`、`rga.execution` 和 `rga.total_latency`。编码文件包含
+`live2d.mpp_h264`、`live2d.mpp_mjpeg`、`live2d.encoded_publish` 和
+`live2d.encode_total`。Face 和 Godot 都同步等待自己的 RGA future，队列等待由共享执行器
+统一记录；输出文件包含 `live2d.rtsp_write` 和 `live2d.uvc_write`。人脸检测、关键点 RKNN
+和几何计算尚未注册到这个计时库，因此
+本轮持久化文件不包含这些阶段。
 
 实时查看：
 
 ```bash
-tail -f /path/to/metrics/vtb-live2d-media.metrics.jsonl
+tail -f /path/to/metrics/vtb-live2d-rga.metrics.jsonl
 ```
 
 使用 `jq` 查看最后一条记录中的指标：
 
 ```bash
-tail -n 1 /path/to/metrics/vtb-live2d-media.metrics.jsonl | jq '.metrics[]'
+tail -n 1 /path/to/metrics/vtb-live2d-rga.metrics.jsonl | jq '.metrics[]'
 ```
 
 文件采用追加模式，当前版本不自动轮转或删除历史记录。部署方需要监控目录占用，并在明确

@@ -38,7 +38,8 @@
        |        |        |
    RTSP worker UVC worker UAC2 worker
        |        |        |
-   MediaMTX   V4L2 Out  ALSA PCM
+   MediaMTX  uvcsink/   ALSA PCM
+             V4L2 Out
 ```
 
 `publish()` 只校验、按出口取得共享缓冲区引用并入队。分叉时每个出口获得一份
@@ -54,15 +55,17 @@
 数据负载为不可变共享缓冲区。上游允许将结果复制一次进入共享缓冲区；多个出口共享
 同一份字节数据。移动 `MediaPacket` 只转移该引用和元数据，不复制 payload。
 
-当前 Live2D 硬件编码路径中，MPP packet 由媒体线程的 RAII 租约持有，并通过
-`EncodedVideoPacketView` 同步借给 `MediaOutputSession`。会话在回调返回前完成唯一一次
+当前 Live2D 硬件编码路径中，宿主 `MediaEncodeSession` 的 RAII 租约持有 MPP packet，
+并通过 `EncodedVideoPacketView` 同步借给 `MediaOutputSession`。会话在回调返回前完成唯一一次
 MPP packet 到共享 payload 的字节复制；回调返回后才释放 MPP packet。这个边界使编码器
 缓冲区寿命与异步输出队列解耦，也删除了编码模块内部的临时 `vector`。
 
 RTSP 分支使用只读 `AVBufferRef` 包装共享 payload 的地址，释放回调持有从
 `MediaPacket` 移入的 `shared_ptr`。因此 `MediaPacket` 到 `AVPacket` 不再复制字节；
-FFmpeg 最后释放 `AVBufferRef` 时才释放该分支的 payload 引用。UVC 当前仍复制到 V4L2
-MMAP buffer，DMA-BUF 输出属于后续依赖驱动能力的阶段。
+FFmpeg 最后释放 `AVBufferRef` 时才释放该分支的 payload 引用。Live2D 的 MJPEG UVC
+出口把包字节写入 GStreamer `fdsrc`，由 `jpegparse + uvcsink` 完成 Gadget 协商和 V4L2
+Output；这里存在一次用户态字节流写入。通用 `UvcOutput` 仍保留直接 V4L2 MMAP 后端。
+DMA-BUF 编码包输出属于后续依赖驱动能力的阶段。
 
 处理后音频与视频在进入 `OutputManager` 前由独立的 `AvSynchronizer` 按共同单调
 时钟交织；等待上限、迟到包和关键帧恢复策略见
@@ -72,7 +75,8 @@ MMAP buffer，DMA-BUF 输出属于后续依赖驱动能力的阶段。
 ## 出口与格式匹配
 
 - `RtspOutput` 可以绑定一路视频和一路音频，使用 libavformat 完成复用及 RTSP/RTP 发送；
-- `UvcOutput` 绑定一路视频，通过 V4L2 Video Output 发送当前 Gadget 已声明的格式；
+- `GstreamerUvcOutput` 绑定一路编码 MJPEG，通过 GStreamer 1.28.9 `uvcsink` 处理 UVC
+  事件并写入 Gadget V4L2 Video Output；通用 `UvcOutput` 仍可直接写 V4L2；
 - `Uac2Output` 绑定一路 PCM 音频，通过 ALSA 写入 Gadget 设备。
 
 每个出口在启动时验证描述符。格式不兼容时拒绝启动并报告原因。出口不会转码。
@@ -126,8 +130,11 @@ MMAP buffer，DMA-BUF 输出属于后续依赖驱动能力的阶段。
 
 ## 已知前置条件
 
-- 当前 C++ 主链还没有媒体包生产者，首版接口需要通过假数据源和后续真实编码链逐步校准；
-- 远端编译服务器当前未发现 ARM64 交叉编译器、目标 sysroot、FFmpeg 或 ALSA 目标开发文件；
-- UVC Host 枚举和真实帧传输尚未完成，UAC2 链路尚未建立。
+- Live2D 主链已经能够生产 MPP H.264 和 MJPEG 包；ABI v6 的宿主 RGA/编码边界仍需在
+  RK3588 上重新验证；
+- ARM64 媒体交叉编译环境和 FFmpeg sysroot 已固定；ALSA 目标开发文件仍需在 UAC2
+  首次构建前确认；
+- 板端 UVC Video Output 节点已经建立，UVC Host 枚举和真实帧传输尚未完成，UAC2
+  链路尚未建立。
 
 这些条件不会通过在 Mac 或 RK3588 本地编译来绕过，也不会在没有确认的情况下安装、降级或替换依赖。

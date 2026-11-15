@@ -194,8 +194,9 @@ OpenSeeFace 兼容 PnP/表情、校准和 Live2D 参数映射；Godot 只通过�
 Ayagami。产品路径不再启动 Python、JSON 或 UDP 参数桥接，浏览器校准和取景控制由
 宿主 `Live2DControlServer` 提供。
 
-输出由宿主 `MediaOutputSession` 管理，Godot 通过同步编码包回调交付 H.264 数据。
-ABI v2 要求宿主与 LibGodot 成对构建；配置将 `render.rtsp_url` 移到 `output.rtsp_url`。
+输出由宿主 `MediaOutputSession` 管理，Godot 通过同步编码包回调交付 H.264 和可选
+MJPEG 数据。ABI v4 要求宿主与 LibGodot 成对构建；`output.rtsp_url` 配置网络分支，
+可选 `output.uvc` 配置 GStreamer 1.28.9 UVC 分支。
 模块依赖、接口语义和构建边界见 [模块边界](docs/module-boundaries.md)。
 
 产品配置统一从 `--config` 指定的 JSON 文件读取。摄像头类型、设备、FourCC、尺寸、

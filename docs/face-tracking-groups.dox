@@ -7,14 +7,15 @@
  * 核心类按职责放入四个入口：
  *
  * 1. @ref face_tracking_coordination "接入与编排"：VtbApplication 组合根、
- *    VideoCaptureStage、FaceTrackingStage、Live2DTrackingPipeline、FacePipeline。
- * 2. @ref face_tracking_model_input "模型输入资源"：RgaDevice、RgaImageTransformer、
- *    ModelInputLease。
+ *    VideoCaptureStage、FaceTrackingStage、GodotRenderStage、Live2DTrackingPipeline、
+ *    GodotRenderPipeline、FacePipeline。
+ * 2. @ref face_tracking_model_input "模型输入资源"：RgaExecutor、RgaTransformSession、
+ *    RgaDevice、RgaModelInputTransformer、ModelInputLease。
  * 3. @ref face_tracking_inference "检测与关键点"：RknnFaceDetector、RknnLandmarkEstimator。
  * 4. @ref face_tracking_geometry_output "几何与结果"：OpenSeeFaceGeometryEstimator、
  *    FaceTrackingResult。
  *
- * ImageTransformer、FaceDetector、LandmarkEstimator、FaceGeometryEstimator、RgaBuffer、
+ * FaceDetector、LandmarkEstimator、FaceGeometryEstimator、RgaBuffer、
  * ModelInputView、ModelInputSpec、CropRegion、FaceBox、LandmarkEstimate、FacePose、
  * FaceExpression 以及实现文件内的 SourceRegistration、RknnModel 等资源包装类通过
  * 完整类页面或协作图提供进阶查询。
@@ -27,17 +28,17 @@
  *     -> FaceTrackingStage::wait_pop()
  *     -> Live2DTrackingPipeline::process(frame.view())
  *     -> FacePipeline::process(frame.view())
- *     -> RgaImageTransformer::prepare()
+ *     -> RgaModelInputTransformer::prepare()
  *     -> [按需] RknnFaceDetector::detect()
- *     -> RgaImageTransformer::prepare(face ROI)
+ *     -> RgaModelInputTransformer::prepare(face ROI)
  *     -> RknnLandmarkEstimator::estimate()
  *     -> OpenSeeFaceGeometryEstimator::estimate()
  *     -> optional<FaceTrackingResult>
  *     -> Live2DFaceMapper::update()
  *     -> Live2DTrackingChannel::publish(Live2DTrackingSnapshot)
- *     -> Godot 所有者线程 try_pop()
+ *     -> GodotRenderStage::try_pop()
  *     -> Live2DTrackingSnapshot
- *     -> LibGodotInstance::submit()
+ *     -> GodotRenderPipeline::submit()
  * @endcode
  *
  * FacePipeline 在没有历史框、跟踪置信度低于阈值，或达到非零周期重检间隔时执行
@@ -47,9 +48,9 @@
  *
  * Live2DTrackingPipeline 在构造时固定 FacePipeline 和 Live2DFaceMapper 配置，且不创建
  * 线程或持有通道。FaceTrackingStage 在自己的线程内调用该同步主体，再把完整
- * Live2DTrackingSnapshot 发布到容量一的跟踪通道。Godot 所有者线程在自身循环中调用
- * try_pop() 非阻塞取得新快照并提交给 LibGodotInstance；通道结束且没有剩余快照时
- * 退出渲染循环。通道满时释放旧快照，保留最新状态。
+ * Live2DTrackingSnapshot 发布到容量一的跟踪通道。GodotRenderStage 的所有者线程调用
+ * try_pop() 非阻塞取得新快照，再调用不持有通道的 GodotRenderPipeline；通道结束且没有
+ * 剩余快照时退出渲染循环。通道满时释放旧快照，保留最新状态。
  *
  * @par 建议阅读顺序
  *
@@ -67,14 +68,14 @@
  *     participant Consumer as FaceTrackingStage
  *     participant Subject as Live2DTrackingPipeline
  *     participant Pipeline as FacePipeline
- *     participant RGA as RgaImageTransformer
+ *     participant RGA as RgaModelInputTransformer
  *     participant Detector as RknnFaceDetector
  *     participant Landmark as RknnLandmarkEstimator
  *     participant Geometry as OpenSeeFaceGeometryEstimator
  *     participant Mapper as Live2DFaceMapper
  *     participant TrackingChannel as Live2DTrackingChannel<br/>BoundedFifoChannel，无独立线程
- *     participant Render as Godot所有者兼渲染执行线程
- *     participant Godot as LibGodotInstance
+ *     participant Render as GodotRenderStage<br/>所有者兼渲染执行线程
+ *     participant Godot as GodotRenderPipeline<br/>同步任务主体
  *
  *     Note over Pipeline,Landmark: 黄色曲线=控制判断或跨帧算法状态变化；紫色半透明背景=条件控制区域
  *     Note over Capture,Worker: 上游容量一通道采用 drop_oldest；处理线程无帧时在 wait_pop() 阻塞
@@ -175,14 +176,14 @@
  *             Note over InputSlot,Pipeline: 本帧结束；处理线程回到 wait_pop()
  *         end
  *
- *     and Godot所有者兼渲染执行线程：按固定渲染周期消费人脸线程发布的最新状态
+ *     and GodotRenderStage所有者兼渲染执行线程：按固定渲染周期消费人脸线程发布的最新状态
  *         loop 每个 output_fps 渲染周期
  *             Render->>TrackingChannel: try_pop()（非阻塞）
  *             TrackingChannel-->>Render: optional<Live2DTrackingSnapshot>
  *             alt 取得新快照
  *                 rect rgba(163, 113, 247, 0.07)
- *                     Render->>Godot: submit(snapshot)
- *                     Render->>Godot: run_frame()
+ *                     Render->>Godot: submit(snapshot)：同步提交给 LibGodot
+ *                     Render->>Godot: run_frame()：同步驱动 LibGodot
  *                     Render->>Render: sleep_until(next_frame_deadline)：只等待本周期剩余时间
  *                 end
  *             else 没有快照且 tracking_channel.finished() == true
@@ -193,7 +194,7 @@
  *             else 暂时没有快照且通道仍在运行
  *                 rect rgba(163, 113, 247, 0.07)
  *                     Note over Render: 保持 Godot 内最近参数，本周期跳过 submit()
- *                     Render->>Godot: run_frame()
+ *                     Render->>Godot: run_frame()：同步驱动 LibGodot
  *                     Render->>Render: sleep_until(next_frame_deadline)：只等待本周期剩余时间
  *                 end
  *             end
@@ -220,8 +221,10 @@
  *     Tracking["Live2DTrackingPipeline<br/>同步任务主体"]
  *     Face["FacePipeline<br/>人脸算法编排"]
  *     Mapper["Live2DFaceMapper<br/>值成员"]
- *     RGA["RgaImageTransformer<br/>图像预处理"]
- *     Device["RgaDevice<br/>同步 RGA 执行资源"]
+ *     RGA["RgaModelInputTransformer<br/>图像预处理"]
+ *     Session["RgaTransformSession<br/>Face 私有缓存与目标池"]
+ *     Executor["RgaExecutor<br/>容量四 FIFO + 两个 Worker"]
+ *     Device["Worker 私有 RgaTransformer / RgaDevice"]
  *     Detector["RknnFaceDetector<br/>Core0"]
  *     DetectorModel["RknnModel<br/>检测实例"]
  *     Landmark["RknnLandmarkEstimator<br/>Core1"]
@@ -229,6 +232,7 @@
  *     Geometry["OpenSeeFaceGeometryEstimator<br/>姿态与表情"]
  *
  *     App -->|"红色：局部对象生命期覆盖 run()"| Stage
+ *     App -->|"蓝色：shared_ptr 注入两个业务 Pipeline"| Executor
  *     Stage -->|"红色：拥有 std::thread"| Worker
  *     Stage -->|"红色：unique_ptr tracking_pipeline_"| Tracking
  *     Stage -.->|"黄色：input_channel_ 引用"| InputChannel
@@ -236,123 +240,171 @@
  *     Worker -.->|"黄色：在该线程同步调用"| Tracking
  *     Tracking -->|"红色：unique_ptr face_pipeline_"| Face
  *     Tracking -->|"红色：按值拥有 mapper_"| Mapper
- *     Face -->|"红色：unique_ptr image_transformer_"| RGA
+ *     Face -->|"红色：unique_ptr model_input_transformer_"| RGA
  *     Face -->|"红色：unique_ptr detector_"| Detector
  *     Face -->|"红色：unique_ptr landmark_estimator_"| Landmark
  *     Face -->|"红色：unique_ptr geometry_estimator_"| Geometry
- *     RGA -->|"蓝色：shared_ptr 保持设备有效"| Device
+ *     RGA -->|"红色：独占业务 Session"| Session
+ *     Session -->|"蓝色：shared_ptr 共享执行端"| Executor
+ *     Executor -->|"红色：Worker 独占执行资源"| Device
  *     Detector -->|"红色：unique_ptr model_"| DetectorModel
  *     Landmark -->|"红色：unique_ptr model_"| LandmarkModel
  *
  *     classDef neutral fill:#161b22,stroke:#8b949e,color:#ffffff
- *     class App,Stage,Worker,InputChannel,OutputChannel,Tracking,Face,Mapper,RGA,Device,Detector,DetectorModel,Landmark,LandmarkModel,Geometry neutral
- *     linkStyle 0,1,2,6,7,8,9,10,11,13,14 stroke:#ff5d5d,stroke-width:3px,color:#ff7b72
- *     linkStyle 12 stroke:#58a6ff,stroke-width:3px,color:#58a6ff
- *     linkStyle 3,4,5 stroke:#e3b341,stroke-width:2px,stroke-dasharray:6 4,color:#e3b341
+ *     class App,Stage,Worker,InputChannel,OutputChannel,Tracking,Face,Mapper,RGA,Session,Executor,Device,Detector,DetectorModel,Landmark,LandmarkModel,Geometry neutral
  * @endmermaid
  *
  * 对象构造与缓存建立发生在不同时机：
  *
  * | 时机 | 执行上下文 | 建立的对象或状态 |
  * | --- | --- | --- |
- * | `VtbApplication::run()` 构造阶段 | 启动工作线程前的调用线程 | `FacePipeline::create()` 创建 RgaDevice、RgaImageTransformer、两个 RKNN 模型实例和几何估计器；RKNN 构造期建立 context、张量属性和预分配输出存储。 |
+ * | `VtbApplication::run()` 构造阶段 | 启动工作线程前的调用线程 | 创建共享 RgaExecutor；`FacePipeline::create()` 创建具体模型输入 Transformer、Face 私有 Session、两个 RKNN 模型实例和几何估计器。Executor 启动两个 Worker，每个 Worker 独占 RgaTransformer/RgaDevice。 |
  * | `FaceTrackingStage::start()` | 启动调用线程 | 创建 `worker_`，并等待工作线程完成源初始化。 |
  * | `thread_main()` 进入接收循环前 | 人脸工作线程 | `begin_source()` 重置跟踪状态，记录当前 `VideoStreamGeneration`，并以空的 RGA 源注册缓存开始。 |
  * | 首次处理具体输入 Buffer | 人脸工作线程 | RGA 注册源 DMA-BUF、分配模型输入 Buffer；每个 RknnModel 首次收到自己的 DMA-BUF 时建立 `RknnInputBinding`。 |
  *
- * @par 二、RGA 源 Buffer 注册缓存的资源结构
+ * @par 二、Godot 所有者线程执行的对象结构
+ *
+ * 从 GodotRenderStage 开始阅读。Stage 借用输入通道并拥有工作线程；thread_main()
+ * 把 GodotRenderPipeline 的独占所有权移入线程局部变量，然后才初始化 LibGodot。
+ * 红色实线表示独占所有权，黄色虚线表示借用，灰色线表示构造动作。
+ *
+ * @mermaid{godot_render_worker_object_structure} "GodotRenderStage、同步渲染主体与 LibGodot 所有权"
+ * flowchart TB
+ *     App["VtbApplication::run()<br/>构造阶段"]
+ *     Stage["GodotRenderStage<br/>线程与通道协调"]
+ *     Worker["worker_ / thread_main()<br/>Godot所有者线程"]
+ *     Channel["Live2DTrackingChannel<br/>输入通道"]
+ *     Pipeline["GodotRenderPipeline<br/>同步任务主体"]
+ *     Impl["GodotRenderPipeline::Impl<br/>编排与计时资源"]
+ *     Godot["LibGodotInstance 独立模块<br/>LibGodot ABI 与资源"]
+ *     Convert["RgaNv12FrameTransformer<br/>宿主 RGBA→NV12"]
+ *     GodotSession["RgaTransformSession<br/>Godot 私有缓存与 NV12 池"]
+ *     Executor["RgaExecutor<br/>共享两个 Worker"]
+ *     Encode["MediaEncodeSession<br/>宿主双路 MPP"]
+ *     Output["MediaOutputSession<br/>协议输出接收器"]
+ *
+ *     App -->|"红色：局部对象生命期覆盖 run()"| Stage
+ *     Stage -->|"红色：拥有 std::thread"| Worker
+ *     App -->|"灰色：GodotRenderPipeline::create() 只装配依赖"| Pipeline
+ *     Worker -->|"红色：thread_main() 局部 unique_ptr 接管"| Pipeline
+ *     Stage -.->|"黄色：input_channel_ 引用"| Channel
+ *     Pipeline -->|"红色：unique_ptr impl_"| Impl
+ *     Impl -->|"红色：initialize() 后 unique_ptr godot_"| Godot
+ *     Impl -->|"红色：直接持有"| Convert
+ *     Convert -->|"红色：独占业务 Session"| GodotSession
+ *     GodotSession -->|"蓝色：shared_ptr"| Executor
+ *     Convert -.->|"黄色：Nv12FrameSink 同步回调"| Encode
+ *     Encode -.->|"黄色：EncodedVideoSink 同步回调"| Output
+ *
+ *     classDef neutral fill:#161b22,stroke:#8b949e,color:#ffffff
+ *     class App,Stage,Worker,Channel,Pipeline,Impl,Godot,Convert,GodotSession,Executor,Encode,Output neutral
+ * @endmermaid
+ *
+ * Pipeline 对象可以在启动调用线程构造，因为 create() 不接触 LibGodot。Stage 工作线程
+ * 调用 initialize() 后，同一线程继续执行 submit()、run_frame()、finish()，并在退出
+ * thread_main() 前析构 Pipeline。当前同步输出路径中，run_frame() 触发 Godot 渲染、
+ * GPU copy 后从 LibGodotInstance 取得同步借用的 RgbaFrameView，再调用宿主
+ * RgaNv12FrameTransformer，向共享 Executor
+ * 提交一次命令并同步等待 Worker 完成 RGA，再通过
+ * Nv12FrameSink 进入宿主 MediaEncodeSession；MPP H.264、
+ * 可选 MPP MJPEG 和 EncodedVideoSink 发布仍在该所有者线程按帧顺序完成。两边均不创建
+ * 额外的业务帧线程。RGA Executor 固定拥有两个命令 Worker；RTSP 与 UVC 协议写出位于
+ * 宿主 OutputManager 的独立工作线程。
+ * 该顺序使异常路径中的 LibGodot RAII 清理也留在所有者线程。
+ *
+ * @par 三、RGA 源 Buffer 注册缓存的资源结构
  *
  * 这张图围绕一个源代次的 `source_buffers_` 展开。红色实线是独占成员，蓝色实线是
  * shared_ptr 保活，黄色虚线是当前 `prepare()` 的借用访问，灰色线是创建或清理动作。
  *
- * @mermaid{face_tracking_rga_source_cache_structure} "RgaImageTransformer 内的源 DMA-BUF 注册缓存"
+ * @mermaid{face_tracking_rga_source_cache_structure} "Face RgaTransformSession 内的源 DMA-BUF 注册缓存"
  * flowchart TB
- *     Transformer["RgaImageTransformer"]
- *     Impl["RgaImageTransformer::Impl"]
- *     Device["RgaDevice"]
+ *     Transformer["RgaModelInputTransformer"]
+ *     Session["RgaTransformSession"]
+ *     Impl["RgaTransformSession::Impl"]
  *     Generation["active_generation_<br/>当前源代次"]
  *     Cache["source_buffers_<br/>vector&lt;SourceRegistration&gt;"]
- *     Registration["SourceRegistration[N]<br/>源 fd 与布局匹配信息"]
+ *     Registration["SourceRegistration[N]<br/>fd + buffer_id + generation + 布局"]
  *     Buffer["RgaBuffer<br/>源 DMA-BUF 注册租约"]
  *     OwnedFd["UniqueFd<br/>F_DUPFD_CLOEXEC 复制 fd"]
  *     Handle["RGA handle<br/>importbuffer_fd()"]
  *     Frame["DecodedFrameLease / FramePlaneView<br/>当前源 fd"]
- *     SyncUse["improcess(..., IM_SYNC)<br/>同步读取源 Buffer"]
+ *     Command["RgaCommand<br/>按值持有 source shared_ptr"]
+ *     Worker["Executor Worker<br/>improcess(..., IM_SYNC)"]
  *     Retire["retire_source(generation)<br/>source_buffers_.clear()"]
  *
- *     Transformer -->|"红色：unique_ptr impl_"| Impl
- *     Impl -->|"蓝色：shared_ptr device_"| Device
+ *     Transformer -->|"红色：独占"| Session
+ *     Session -->|"红色：unique_ptr impl_"| Impl
  *     Impl -->|"红色：optional 值状态"| Generation
  *     Impl -->|"红色：按值拥有容器"| Cache
  *     Cache -->|"红色：按值拥有注册项"| Registration
  *     Registration -->|"蓝色：shared_ptr 保活"| Buffer
- *     Device -->|"灰色：复制 fd 并导入后返回"| Buffer
  *     Buffer -->|"红色：独占复制 fd"| OwnedFd
  *     Buffer -->|"红色：独占导入 handle"| Handle
- *     Frame -.->|"黄色：借用源 fd 与像素"| SyncUse
- *     Registration -.->|"黄色：提供已注册 handle"| SyncUse
+ *     Frame -.->|"黄色：同步调用期间保持源槽位"| Command
+ *     Registration -->|"蓝色：source shared_ptr"| Command
+ *     Command -->|"灰色：有界 FIFO 提交"| Worker
  *     Retire -->|"灰色：清空当前代次的注册项"| Cache
  *
  *     classDef neutral fill:#161b22,stroke:#8b949e,color:#ffffff
- *     class Transformer,Impl,Device,Generation,Cache,Registration,Buffer,OwnedFd,Handle,Frame,SyncUse,Retire neutral
- *     linkStyle 0,2,3,4,7,8 stroke:#ff5d5d,stroke-width:3px,color:#ff7b72
- *     linkStyle 1,5 stroke:#58a6ff,stroke-width:3px,color:#58a6ff
- *     linkStyle 9,10 stroke:#e3b341,stroke-width:2px,stroke-dasharray:6 4,color:#e3b341
- *     linkStyle 6,11 stroke:#8b949e,stroke-width:1.5px,color:#8b949e
+ *     class Transformer,Session,Impl,Generation,Cache,Registration,Buffer,OwnedFd,Handle,Frame,Command,Worker,Retire neutral
  * @endmermaid
  *
- * `begin_source()` 设置 `active_generation_`。首次看到一个源 DMA-BUF 时，RgaDevice
+ * `begin_source()` 设置 Session 的 `active_generation_`。首次看到一个源 DMA-BUF 时，
+ * Session 通过 RgaDevice 的底层资源入口
  * 复制 fd、导入 RGA handle，SourceRegistration 保存匹配信息并保活 RgaBuffer。
- * 后续帧匹配同一源描述时复用该注册项。`retire_source()` 清空当前代次缓存，
+ * 后续帧只有时间戳、序号或像素内容变化时复用该注册项；fd、buffer_id、generation、
+ * 大小、尺寸、stride 或格式变化会重新注册。`retire_source()` 清空当前代次缓存，
  * 最后一份 shared_ptr 析构时释放 RGA handle 并关闭复制 fd。
  *
- * @par 三、RGA 模型输入 Buffer 和每次 ModelInputLease
+ * @par 四、RGA 模型输入 Buffer 和每次 ModelInputLease
  *
- * 这张图从 `output_buffer_` 缓存展开，再连到一次 `prepare()` 返回的租约。
- * 缓存和 KeepRgaBufferAlive 各保留一份 shared_ptr，ModelInputView 在租约窗口内提供
- * RGB 地址、DMA-BUF fd 和 source_crop。
+ * 这张图从 Face Session 独立目标池展开，再连到一次 `prepare()` 返回的租约。
+ * 每个槽位由 Token 标记占用，ModelInputView 在租约窗口内提供 RGB 地址、DMA-BUF fd
+ * 和 source_crop。
  *
  * @mermaid{face_tracking_rga_output_cache_structure} "RGA 输出缓存与 ModelInputLease 保活结构"
  * flowchart TB
- *     Impl["RgaImageTransformer::Impl"]
- *     Device["RgaDevice"]
- *     Cache["output_buffer_<br/>shared_ptr&lt;RgaBuffer&gt;"]
- *     Buffer["RgaBuffer<br/>224×224 RGB888 模型输入"]
+ *     Session["RgaTransformSession<br/>Face 私有"]
+ *     Pool["DestinationPool<br/>至少两个槽位"]
+ *     Slot["DestinationSlot[N]<br/>RgaBuffer + in_use"]
+ *     Buffer["RgaBuffer<br/>RGB888 模型输入"]
  *     DmaFd["UniqueFd<br/>DMA heap fd"]
  *     Mapping["mapping<br/>mmap CPU 地址"]
  *     Handle["RGA handle<br/>输出目标"]
+ *     TransformLease["RgaTransformLease<br/>移动专属"]
+ *     Token["DestinationSlotToken<br/>析构归还槽位"]
  *     Lease["ModelInputLease<br/>本次输入租约"]
- *     KeepAlive["return_buffer_<br/>KeepRgaBufferAlive"]
+ *     KeepAlive["return_buffer_<br/>保持 TransformLease"]
  *     View["ModelInputView<br/>FrameView + Spec + source_crop"]
  *     Rknn["RknnModel::run()<br/>本次同步借用"]
  *
- *     Impl -->|"红色：按值拥有 shared_ptr 成员"| Cache
- *     Cache -->|"蓝色：缓存一份 shared_ptr"| Buffer
- *     Impl -->|"蓝色：shared_ptr device_"| Device
- *     Device -->|"灰色：allocate_buffer() 返回"| Buffer
+ *     Session -->|"红色：独占目标池"| Pool
+ *     Pool -->|"红色：按值拥有"| Slot
+ *     Slot -->|"蓝色：shared_ptr"| Buffer
  *     Buffer -->|"红色：独占 DMA heap fd"| DmaFd
  *     Buffer -->|"红色：独占 mmap"| Mapping
  *     Buffer -->|"红色：独占 RGA handle"| Handle
+ *     TransformLease -->|"蓝色：保活目标 Buffer"| Buffer
+ *     TransformLease -->|"红色：持有"| Token
+ *     Token -->|"灰色：析构 release(index)"| Pool
  *     Lease -->|"红色：按值拥有保活动作"| KeepAlive
- *     KeepAlive -->|"蓝色：shared_ptr 覆盖本次输入"| Buffer
+ *     KeepAlive -->|"蓝色：间接保持"| TransformLease
  *     Lease -->|"红色：按值拥有 view_"| View
  *     View -.->|"黄色：借用 RGB 地址与 fd"| Buffer
  *     Rknn -.->|"黄色：Lease 有效期内读取"| View
  *
  *     classDef neutral fill:#161b22,stroke:#8b949e,color:#ffffff
- *     class Impl,Device,Cache,Buffer,DmaFd,Mapping,Handle,Lease,KeepAlive,View,Rknn neutral
- *     linkStyle 0,4,5,6,7,9 stroke:#ff5d5d,stroke-width:3px,color:#ff7b72
- *     linkStyle 1,2,8 stroke:#58a6ff,stroke-width:3px,color:#58a6ff
- *     linkStyle 10,11 stroke:#e3b341,stroke-width:2px,stroke-dasharray:6 4,color:#e3b341
- *     linkStyle 3 stroke:#8b949e,stroke-width:1.5px,color:#8b949e
+ *     class Session,Pool,Slot,Buffer,DmaFd,Mapping,Handle,TransformLease,Token,Lease,KeepAlive,View,Rknn neutral
  * @endmermaid
  *
- * `output_buffer()` 按 ModelInputSpec 和当前 shared_ptr 占用状态选择复用或分配。
- * `prepare()` 把输出 Buffer 的地址和 fd 放入 ModelInputView，并把另一份 shared_ptr
- * 放入 KeepRgaBufferAlive。Lease 析构时结束本次保活；缓存替换后，旧 Buffer
- * 在最后一份 Lease 结束时释放 handle、mmap 和 fd。
+ * 目标池按 ModelInputSpec 复用匹配槽位；规格变化时等待全部槽位归还再重建。
+ * `prepare()` 把输出 Buffer 的地址和 fd 放入 ModelInputView，并通过回调对象保持
+ * RgaTransformLease。ModelInputLease 析构后 Token 归还槽位；任何在途 Lease 存在时，
+ * 同一槽位都不会被下一项任务选中。
  *
- * @par 四、每个 RKNN 模型实例内部的资源
+ * @par 五、每个 RKNN 模型实例内部的资源
  *
  * 检测器和关键点估计器各自独占一个 RknnModel。图中的“单个实例成员结构”
  * 在 Core0 检测实例与 Core1 关键点实例中各存在一份，两份资源独立。
@@ -446,7 +498,7 @@
 /**
  * @defgroup face_tracking_coordination 接入与编排
  * @ingroup face_tracking
- * @brief 两个 Stage、两条消息通道、单帧人脸算法及跟踪状态协调。
+ * @brief 三个 Stage、两条消息通道、同步人脸与 Godot 任务主体的协调。
  */
 
 /**
@@ -482,10 +534,31 @@
 /** @class vtb::FacePipeline
  * @ingroup face_tracking_coordination
  */
+/** @class vtb::GodotRenderPipeline
+ * @ingroup face_tracking_coordination
+ */
+/** @class vtb::LibGodotInstance
+ * @ingroup face_tracking_coordination
+ */
+/** @class vtb::GodotRenderStage
+ * @ingroup face_tracking_coordination
+ */
 /** @class vtb::RgaDevice
  * @ingroup face_tracking_model_input
  */
-/** @class vtb::RgaImageTransformer
+/** @class vtb::RgaExecutor
+ * @ingroup face_tracking_model_input
+ */
+/** @class vtb::RgaTransformer
+ * @ingroup face_tracking_model_input
+ */
+/** @class vtb::RgaTransformSession
+ * @ingroup face_tracking_model_input
+ */
+/** @class vtb::RgaModelInputTransformer
+ * @ingroup face_tracking_model_input
+ */
+/** @class vtb::RgaNv12FrameTransformer
  * @ingroup face_tracking_model_input
  */
 /** @class vtb::ModelInputLease

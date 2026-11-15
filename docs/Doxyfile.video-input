@@ -12,8 +12,6 @@ INPUT                  = include/vtb/video \
                          include/vtb/capture_config.hpp \
                          include/vtb/v4l2_camera.hpp \
                          include/vtb/pipeline/video_processing_runtime.hpp \
-                         include/vtb/face/cpu_image_transformer.hpp \
-                         include/vtb/face/image_transformer.hpp \
                          include/vtb/face/model_input.hpp \
                          include/vtb/face/face_types.hpp \
                          include/vtb/face/face_pipeline.hpp \
@@ -23,12 +21,13 @@ INPUT                  = include/vtb/video \
                          include/vtb/face/face_frame_consumer.hpp \
                          include/vtb/live2d \
                          include/vtb/output/encoded_video_sink.hpp \
+                         include/vtb/render/nv12_frame_sink.hpp \
+                         include/vtb/render/rgba_frame_sink.hpp \
                          apps/vtb-live2d \
                          src/messaging \
                          src/video \
                          src/v4l2_camera.cpp \
                          src/pipeline/video_processing_runtime.cpp \
-                         src/face/cpu_image_transformer.cpp \
                          src/face/model_input.cpp \
                          src/face/face_types.cpp \
                          src/face/face_pipeline.cpp \

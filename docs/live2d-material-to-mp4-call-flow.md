@@ -474,9 +474,10 @@ OpenVTDmaBufCapture::capture_frame(...)
 Separate 模式，这个调用才会把任务放入 Godot 渲染命令队列，由独立 Render Thread
 执行。
 
-`capture_frame()` 会等待纹理复制、`glFinish()` 和 READY slot 发布完成。RGA/MPP 由
-`OpenVT RGA MPP` 媒体线程异步消费 READY slot，RTSP 写出再由 `OutputManager` 工作线程
-处理；调用方不会同步等待这两个阶段完成。
+`capture_frame()` 会在 Godot 所有者兼渲染线程中依次等待纹理复制、`glFinish()`、一次
+RGA 转换、MPP H.264、可选的 MPP MJPEG 和同步 `EncodedVideoSink::publish()` 完成。
+RTSP 与 GStreamer UVC 写出分别由 `OutputManager` 工作线程处理；调用方会等待当前帧编码
+并进入输出队列，但不会等待网络或 USB 发送完成。
 
 ### 10.3 图形上下文所属线程取得 SubViewport 原生纹理
 
