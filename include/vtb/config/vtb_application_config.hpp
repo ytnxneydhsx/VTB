@@ -44,6 +44,12 @@ public:
 class MediaOutputConfiguration {
 public:
     std::string rtsp_url;
+    bool uvc_enabled = false;
+    std::string uvc_device;
+    std::string gst_launch_path;
+    std::string gstreamer_library_path;
+    std::string gstreamer_plugin_path;
+    std::uint32_t uvc_fps = 0;
 };
 
 class InstrumentationConfiguration {

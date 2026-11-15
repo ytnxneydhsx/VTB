@@ -56,48 +56,51 @@ private:
 class MediaOutputSession::Impl final {
 public:
     Impl(
-        std::unique_ptr<Output> output,
-        std::string metrics_path,
-        std::chrono::milliseconds metrics_report_interval,
-        std::string output_id,
-        std::string stream_id,
-        std::string metrics_source,
-        std::string write_timer_name)
-        : output_id_(std::move(output_id)),
-          stream_id_(std::move(stream_id)),
-          metrics_source_(std::move(metrics_source)),
-          write_timer_(timers_.register_timer(std::move(write_timer_name))) {
+        std::unique_ptr<Output> rtsp_output,
+        std::unique_ptr<Output> uvc_output,
+        MediaOutputSessionConfig config)
+        : config_(std::move(config)),
+          rtsp_write_timer_(timers_.register_timer("live2d.rtsp_write")),
+          uvc_write_timer_(timers_.register_timer("live2d.uvc_write")) {
         initialize(
-            std::move(output),
-            std::move(metrics_path),
-            metrics_report_interval);
+            std::move(rtsp_output),
+            std::move(uvc_output));
     }
 
     void initialize(
-        std::unique_ptr<Output> output,
-        std::string metrics_path,
-        std::chrono::milliseconds metrics_report_interval) {
-        if (!output) {
-            throw std::invalid_argument("Media output is required");
+        std::unique_ptr<Output> rtsp_output,
+        std::unique_ptr<Output> uvc_output) {
+        if (!rtsp_output) {
+            throw std::invalid_argument("RTSP media output is required");
         }
-        if (output_id_.empty() || stream_id_.empty() ||
-            metrics_source_.empty()) {
+        if (config_.rtsp_output_id.empty() || config_.uvc_output_id.empty() ||
+            config_.h264_stream_id.empty() || config_.mjpeg_stream_id.empty() ||
+            config_.metrics_source.empty()) {
             throw std::invalid_argument(
                 "Media output identifiers must not be empty");
         }
         OutputOptions options;
         options.queue_capacity = 16;
         manager_.add(
-            output_id_,
-            std::make_unique<TimedOutput>(std::move(output), write_timer_),
+            config_.rtsp_output_id,
+            std::make_unique<TimedOutput>(
+                std::move(rtsp_output), rtsp_write_timer_),
             options);
-        if (!metrics_path.empty()) {
+        if (uvc_output) {
+            manager_.add(
+                config_.uvc_output_id,
+                std::make_unique<TimedOutput>(
+                    std::move(uvc_output), uvc_write_timer_),
+                options);
+            uvc_enabled_ = true;
+        }
+        if (!config_.metrics_path.empty()) {
             metrics_reporter_ =
                 std::make_unique<instrumentation::MetricsJsonlReporter>(
                     timers_,
-                    metrics_source_,
-                    std::move(metrics_path),
-                    metrics_report_interval);
+                    config_.metrics_source,
+                    config_.metrics_path,
+                    config_.metrics_report_interval);
             metrics_reporter_->start();
         }
     }
@@ -116,7 +119,7 @@ public:
     EncodedVideoSink sink() noexcept {
         EncodedVideoSink result;
         result.context = this;
-        result.configure_h264 = configure_callback;
+        result.configure = configure_callback;
         result.publish = publish_callback;
         return result;
     }
@@ -133,7 +136,7 @@ public:
     }
 
     void finish() {
-        if (!started_) {
+        if (started_output_ids_.empty()) {
             finish_metrics();
             rethrow_if_failed();
             return;
@@ -141,31 +144,42 @@ public:
         const auto deadline =
             std::chrono::steady_clock::now() + std::chrono::seconds(2);
         while (std::chrono::steady_clock::now() < deadline) {
-            const OutputStatus status = manager_.status().front();
-            if (status.queue_depth == 0 &&
-                status.written + status.dropped >= status.published) {
+            bool drained = true;
+            for (const OutputStatus& status : manager_.status()) {
+                if (status.queue_depth != 0 ||
+                    status.written + status.dropped < status.published) {
+                    drained = false;
+                    break;
+                }
+            }
+            if (drained) {
                 break;
             }
             std::this_thread::sleep_for(std::chrono::milliseconds(10));
         }
-        manager_.stop(output_id_);
-        started_ = false;
-        const OutputStatus status = manager_.status().front();
-        const auto write_timing = write_timer_.snapshot();
-        std::cout << "VTB_OUTPUT_RESULT output_id=" << output_id_
-                  << " published=" << status.published
-                  << " written=" << status.written << " dropped=" << status.dropped
-                  << " errors=" << status.errors << " reconnects=" << status.reconnects
-                  << " queue_depth=" << status.queue_depth
-                  << " queue_capacity=" << status.queue_capacity
-                  << " write_samples=" << write_timing.sample_count()
-                  << " write_average_ns=" << write_timing.average().count() << "\n";
+        for (const std::string& output_id : started_output_ids_) {
+            manager_.stop(output_id);
+        }
+        const std::vector<OutputStatus> statuses = manager_.status();
+        for (const OutputStatus& status : statuses) {
+            std::cout << "VTB_OUTPUT_RESULT output_id=" << status.id
+                      << " published=" << status.published
+                      << " written=" << status.written
+                      << " dropped=" << status.dropped
+                      << " errors=" << status.errors
+                      << " reconnects=" << status.reconnects
+                      << " queue_depth=" << status.queue_depth
+                      << " queue_capacity=" << status.queue_capacity << "\n";
+        }
+        started_output_ids_.clear();
         finish_metrics();
         rethrow_if_failed();
-        if (status.written == 0) {
-            throw std::runtime_error(
-                "Media output " + output_id_ +
-                " did not write any encoded packets: " + status.last_error);
+        for (const OutputStatus& status : statuses) {
+            if (!status.streams.empty() && status.written == 0) {
+                throw std::runtime_error(
+                    "Media output " + status.id +
+                    " did not write any encoded packets: " + status.last_error);
+            }
         }
     }
 
@@ -189,7 +203,7 @@ private:
     }
 
     static std::int32_t configure_callback(
-        void* context, const H264StreamFormat* format) noexcept {
+        void* context, const EncodedVideoStreamFormat* format) noexcept {
         auto& self = *static_cast<Impl*>(context);
         try {
             self.configure(*format);
@@ -219,78 +233,124 @@ private:
         }
     }
 
-    void configure(const H264StreamFormat& format) {
-        if (started_ || format.codec_configuration == nullptr ||
+    void configure(const EncodedVideoStreamFormat& format) {
+        if (format.codec_configuration_size >
+            std::numeric_limits<std::size_t>::max()) {
+            throw std::invalid_argument("Encoded stream configuration is too large");
+        }
+        if (format.codec == EncodedVideoCodec::h264) {
+            configure_h264(format);
+            return;
+        }
+        if (format.codec == EncodedVideoCodec::mjpeg) {
+            configure_mjpeg(format);
+            return;
+        }
+        throw std::invalid_argument("Unsupported encoded video codec");
+    }
+
+    void configure_h264(const EncodedVideoStreamFormat& format) {
+        if (h264_configured_ || format.codec_configuration == nullptr ||
             format.codec_configuration_size == 0 ||
             format.codec_configuration_size > std::numeric_limits<std::size_t>::max()) {
-            throw std::invalid_argument("Invalid or repeated encoded stream configuration");
+            throw std::invalid_argument("Invalid or repeated H.264 stream configuration");
         }
         std::vector<std::uint8_t> configuration(
             format.codec_configuration,
             format.codec_configuration +
                 static_cast<std::size_t>(format.codec_configuration_size));
         manager_.register_stream(StreamDescriptor::video(
-            stream_id_, 1, "h264", format.width,
+            config_.h264_stream_id, 1, "h264", format.width,
             format.height, format.fps, 1, true, std::move(configuration)));
-        manager_.bind(output_id_, stream_id_);
-        manager_.start(output_id_);
-        started_ = true;
+        manager_.bind(config_.rtsp_output_id, config_.h264_stream_id);
+        start_output(config_.rtsp_output_id);
+        h264_configured_ = true;
+    }
+
+    void configure_mjpeg(const EncodedVideoStreamFormat& format) {
+        if (!uvc_enabled_ || mjpeg_configured_ ||
+            format.codec_configuration != nullptr ||
+            format.codec_configuration_size != 0) {
+            throw std::invalid_argument("Invalid or unavailable MJPEG stream configuration");
+        }
+        manager_.register_stream(StreamDescriptor::video(
+            config_.mjpeg_stream_id, 1, "mjpeg", format.width,
+            format.height, format.fps, 1, true, {}));
+        manager_.bind(config_.uvc_output_id, config_.mjpeg_stream_id);
+        start_output(config_.uvc_output_id);
+        mjpeg_configured_ = true;
+    }
+
+    void start_output(const std::string& output_id) {
+        manager_.start(output_id);
+        started_output_ids_.push_back(output_id);
         const auto deadline =
             std::chrono::steady_clock::now() + std::chrono::seconds(5);
         while (std::chrono::steady_clock::now() < deadline) {
-            if (manager_.status().front().state == OutputState::running) {
+            const OutputStatus status = status_for(output_id);
+            if (status.state == OutputState::running) {
                 return;
             }
             std::this_thread::sleep_for(std::chrono::milliseconds(20));
         }
         throw std::runtime_error(
-            "Media output did not start: " + manager_.status().front().last_error);
+            "Media output did not start: " + status_for(output_id).last_error);
+    }
+
+    OutputStatus status_for(const std::string& output_id) const {
+        for (const OutputStatus& status : manager_.status()) {
+            if (status.id == output_id) {
+                return status;
+            }
+        }
+        throw std::logic_error("Media output status is missing: " + output_id);
     }
 
     void publish(const EncodedVideoPacketView& view) {
-        if (!started_ || view.data == nullptr || view.size == 0 ||
+        std::string stream_id;
+        if (view.codec == EncodedVideoCodec::h264 && h264_configured_) {
+            stream_id = config_.h264_stream_id;
+        } else if (view.codec == EncodedVideoCodec::mjpeg && mjpeg_configured_) {
+            stream_id = config_.mjpeg_stream_id;
+        } else {
+            throw std::invalid_argument("Encoded packet codec is not configured");
+        }
+        if (view.data == nullptr || view.size == 0 ||
             view.size > std::numeric_limits<std::size_t>::max()) {
             throw std::invalid_argument("Invalid encoded video packet");
         }
         // The producer owns view.data only until this callback returns.
         auto payload = std::make_shared<const std::vector<std::uint8_t>>(
             view.data, view.data + static_cast<std::size_t>(view.size));
-        MediaPacket packet(stream_id_, std::move(payload), view.pts_ns, view.dts_ns,
+        MediaPacket packet(std::move(stream_id), std::move(payload), view.pts_ns, view.dts_ns,
             view.duration_ns, view.sequence, view.keyframe != 0, false);
         // Zero enqueues is allowed during reconnect/keyframe wait/backpressure.
         manager_.publish(std::move(packet));
     }
 
-    std::string output_id_;
-    std::string stream_id_;
-    std::string metrics_source_;
+    MediaOutputSessionConfig config_;
     instrumentation::TimerRegistry timers_;
-    instrumentation::TimerHandle write_timer_;
+    instrumentation::TimerHandle rtsp_write_timer_;
+    instrumentation::TimerHandle uvc_write_timer_;
     std::unique_ptr<instrumentation::MetricsJsonlReporter> metrics_reporter_;
     OutputManager manager_;
     mutable std::mutex error_mutex_;
     std::exception_ptr callback_error_;
-    // Configure precedes media-worker start; finish follows worker join.
-    bool started_ = false;
+    std::vector<std::string> started_output_ids_;
+    bool uvc_enabled_ = false;
+    bool h264_configured_ = false;
+    bool mjpeg_configured_ = false;
     bool metrics_finished_ = false;
 };
 
 MediaOutputSession::MediaOutputSession(
-    std::unique_ptr<Output> output,
-    std::string metrics_path,
-    std::chrono::milliseconds metrics_report_interval,
-    std::string output_id,
-    std::string stream_id,
-    std::string metrics_source,
-    std::string write_timer_name)
+    std::unique_ptr<Output> rtsp_output,
+    std::unique_ptr<Output> uvc_output,
+    MediaOutputSessionConfig config)
     : impl_(std::make_unique<Impl>(
-          std::move(output),
-          std::move(metrics_path),
-          metrics_report_interval,
-          std::move(output_id),
-          std::move(stream_id),
-          std::move(metrics_source),
-          std::move(write_timer_name))) {}
+          std::move(rtsp_output),
+          std::move(uvc_output),
+          std::move(config))) {}
 MediaOutputSession::~MediaOutputSession() = default;
 EncodedVideoSink MediaOutputSession::sink() noexcept { return impl_->sink(); }
 void MediaOutputSession::rethrow_if_failed() const { impl_->rethrow_if_failed(); }

@@ -5,9 +5,15 @@
 
 namespace vtb {
 
-// Borrowed H.264 Annex B configuration. Valid only during configure_h264().
-class H264StreamFormat {
+enum class EncodedVideoCodec : std::uint32_t {
+    h264 = 1,
+    mjpeg = 2,
+};
+
+// Borrowed encoded-video configuration. Valid only during configure().
+class EncodedVideoStreamFormat {
 public:
+    EncodedVideoCodec codec = EncodedVideoCodec::h264;
     std::uint32_t width = 0;
     std::uint32_t height = 0;
     std::uint32_t fps = 0;
@@ -18,6 +24,7 @@ public:
 // Borrowed encoded bytes. PTS/DTS use CLOCK_MONOTONIC nanoseconds.
 class EncodedVideoPacketView {
 public:
+    EncodedVideoCodec codec = EncodedVideoCodec::h264;
     const std::uint8_t* data = nullptr;
     std::uint64_t size = 0;
     std::uint64_t pts_ns = 0;
@@ -28,7 +35,7 @@ public:
 };
 
 // ABI values only: no STL ownership or exceptions cross the shared library.
-// configure_h264 runs once, before the single media worker starts calling publish.
+// configure runs once per enabled codec before the owner thread starts publishing it.
 // Callbacks consume all borrowed data before returning. The host copies packet bytes
 // once into its immutable shared payload; downstream queues only share or move it.
 // Zero means accepted according to the sink's queue/drop policy, not necessarily
@@ -38,12 +45,12 @@ public:
 class EncodedVideoSink {
 public:
     void* context = nullptr;
-    std::int32_t (*configure_h264)(void*, const H264StreamFormat*) noexcept = nullptr;
+    std::int32_t (*configure)(void*, const EncodedVideoStreamFormat*) noexcept = nullptr;
     std::int32_t (*publish)(void*, const EncodedVideoPacketView*) noexcept = nullptr;
 };
 
-static_assert(std::is_standard_layout<H264StreamFormat>::value);
-static_assert(std::is_trivially_copyable<H264StreamFormat>::value);
+static_assert(std::is_standard_layout<EncodedVideoStreamFormat>::value);
+static_assert(std::is_trivially_copyable<EncodedVideoStreamFormat>::value);
 static_assert(std::is_standard_layout<EncodedVideoPacketView>::value);
 static_assert(std::is_trivially_copyable<EncodedVideoPacketView>::value);
 static_assert(std::is_standard_layout<EncodedVideoSink>::value);

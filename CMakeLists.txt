@@ -45,10 +45,10 @@ if(VTB_ENABLE_ROCKCHIP_MPP_PUBLISHER OR VTB_ENABLE_RGA_FACE OR
         REQUIRED)
 endif()
 
-if(VTB_ENABLE_ROCKCHIP_MPP_PUBLISHER)
+if(VTB_ENABLE_ROCKCHIP_MPP_PUBLISHER OR VTB_ENABLE_EMBEDDED_GODOT)
     if(VTB_ROCKCHIP_SYSROOT STREQUAL "")
         message(FATAL_ERROR
-            "VTB_ROCKCHIP_SYSROOT is required for Rockchip MPP support")
+            "VTB_ROCKCHIP_SYSROOT is required for host-side Rockchip MPP support")
     endif()
     find_path(VTB_MPP_INCLUDE_DIR rockchip/rk_mpi.h
         PATHS "${VTB_ROCKCHIP_SYSROOT}/usr/include"
@@ -166,7 +166,10 @@ if(VTB_ENABLE_RTSP_OUTPUT)
 endif()
 
 if(VTB_ENABLE_UVC_OUTPUT)
-    add_library(vtb_output_uvc STATIC src/output/uvc_output.cpp)
+    add_library(vtb_output_uvc STATIC
+        src/output/gstreamer_uvc_output.cpp
+        src/output/uvc_output.cpp
+    )
     add_library(vtb::output_uvc ALIAS vtb_output_uvc)
     target_include_directories(vtb_output_uvc PUBLIC include)
     target_link_libraries(vtb_output_uvc PUBLIC vtb_output_core)
@@ -422,9 +425,10 @@ vtb_configure_target(vtb)
 
 if(VTB_ENABLE_EMBEDDED_GODOT)
     if(NOT VTB_ENABLE_OPENCV_FACE_PIPELINE OR NOT VTB_ENABLE_RKNN_FACE OR
-       NOT VTB_ENABLE_RGA_FACE OR NOT VTB_ENABLE_RTSP_OUTPUT)
+       NOT VTB_ENABLE_RGA_FACE OR NOT VTB_ENABLE_RTSP_OUTPUT OR
+       NOT VTB_ENABLE_UVC_OUTPUT)
         message(FATAL_ERROR
-            "VTB_ENABLE_EMBEDDED_GODOT requires OpenCV, RKNN, RGA face backends and RTSP output")
+            "VTB_ENABLE_EMBEDDED_GODOT requires OpenCV, RKNN, RGA face backends, RTSP and UVC output")
     endif()
     if(VTB_GODOT_SOURCE_ROOT STREQUAL "")
         message(FATAL_ERROR
@@ -441,8 +445,25 @@ if(VTB_ENABLE_EMBEDDED_GODOT)
         message(FATAL_ERROR "VTB_LIBGODOT_LIBRARY does not exist")
     endif()
 
+    add_library(vtb_media_encode_session STATIC
+        apps/vtb-live2d/media_encode_session.cpp
+        apps/vtb-live2d/mpp_encoder_session.cpp
+    )
+    target_include_directories(vtb_media_encode_session
+        PUBLIC apps/vtb-live2d
+        SYSTEM PRIVATE "${VTB_MPP_INCLUDE_DIR}"
+    )
+    target_link_libraries(vtb_media_encode_session
+        PUBLIC vtb_instrumentation
+        PRIVATE "${VTB_MPP_LIBRARY}"
+    )
+    vtb_configure_target(vtb_media_encode_session)
+
     add_executable(vtb-live2d
+        apps/vtb-live2d/libgodot_instance.cpp
         apps/vtb-live2d/main.cpp
+        apps/vtb-live2d/pipeline/godot_render_pipeline.cpp
+        apps/vtb-live2d/pipeline/godot_render_stage.cpp
         apps/vtb-live2d/vtb_application.cpp
     )
     target_include_directories(vtb-live2d
@@ -454,11 +475,15 @@ if(VTB_ENABLE_EMBEDDED_GODOT)
         PRIVATE
             vtb_live2d_stages
             vtb_live2d_control
+            vtb_rga_core
+            vtb_media_encode_session
             vtb_media_output_session
             vtb_output_rtsp
+            vtb_output_uvc
             vtb_application_config
             vtb_application_video_input
             vtb_face_pipeline
+            vtb_instrumentation
             "${VTB_LIBGODOT_LIBRARY}"
     )
     target_link_options(vtb-live2d PRIVATE -Wl,--allow-shlib-undefined)

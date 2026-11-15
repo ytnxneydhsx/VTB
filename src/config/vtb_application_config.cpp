@@ -227,6 +227,28 @@ MediaOutputConfiguration parse_output(const Json& root) {
     const Json& output = required_object(root, "output", "root");
     MediaOutputConfiguration config;
     config.rtsp_url = required_nonempty_string(output, "rtsp_url", "output");
+    const auto uvc_iterator = output.find("uvc");
+    if (uvc_iterator == output.end()) {
+        return config;
+    }
+    if (!uvc_iterator->is_object()) {
+        throw std::invalid_argument("output.uvc must be an object");
+    }
+    const Json& uvc = *uvc_iterator;
+    config.uvc_enabled = required_value<bool>(uvc, "enabled", "output.uvc");
+    if (!config.uvc_enabled) {
+        return config;
+    }
+    config.uvc_device =
+        required_nonempty_string(uvc, "device", "output.uvc");
+    config.gst_launch_path =
+        required_nonempty_string(uvc, "gst_launch_path", "output.uvc");
+    config.gstreamer_library_path = required_nonempty_string(
+        uvc, "library_path", "output.uvc");
+    config.gstreamer_plugin_path = required_nonempty_string(
+        uvc, "plugin_path", "output.uvc");
+    config.uvc_fps = required_uint32(
+        uvc, "fps", "output.uvc", 1, 240);
     return config;
 }
 
@@ -277,6 +299,11 @@ VtbApplicationConfiguration VtbApplicationConfigParser::parse(
     config.control = parse_control(root);
     config.render = parse_render(root);
     config.output = parse_output(root);
+    if (config.output.uvc_enabled &&
+        config.output.uvc_fps > config.render.output_fps) {
+        throw std::invalid_argument(
+            "output.uvc.fps must not exceed render.output_fps");
+    }
     config.instrumentation = parse_instrumentation(root);
     return config;
 }

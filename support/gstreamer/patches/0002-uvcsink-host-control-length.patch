@@ -1,0 +1,41 @@
+--- a/sys/uvcgadget/uvc.c
++++ b/sys/uvcgadget/uvc.c
+@@ -281,7 +281,8 @@
+ }
+
+ static int
+-uvc_events_process_streaming (GstUvcSink * self, uint8_t req, uint8_t cs,
++uvc_events_process_streaming (GstUvcSink * self, uint8_t req,
++    uint8_t cs, uint16_t request_length,
+     struct uvc_request_data *resp)
+ {
+   struct uvc_streaming_control *ctrl;
+@@ -298,12 +299,12 @@
+     return 0;
+
+   ctrl = (struct uvc_streaming_control *) &resp->data;
+-  resp->length = sizeof (*ctrl);
++  resp->length = MIN ((unsigned int) request_length,
++      (unsigned int) sizeof (resp->data));
+
+   switch (req) {
+     case UVC_SET_CUR:
+       self->control = cs;
+-      resp->length = 34;
+       break;
+
+     case UVC_GET_CUR:
+@@ -412,11 +413,11 @@
+   if ((ctrl->bRequestType & USB_RECIP_MASK) != USB_RECIP_INTERFACE)
+     return -EINVAL;
+
+-  if (interface == UVC_STRING_CONTROL_IDX) {
++  if (interface == self->fc->control.intf.bInterfaceNumber) {
+     return uvc_events_parse_control (self, ctrl->bRequest,
+         ctrl->wValue >> 8, ctrl->wIndex >> 8, ctrl->wLength, resp);
+-  } else if (interface == UVC_STRING_STREAMING_IDX) {
++  } else if (interface == self->fc->streaming.intf.bInterfaceNumber) {
+     return uvc_events_process_streaming (self, ctrl->bRequest,
+-        le16toh (ctrl->wValue) >> 8, resp);
++        le16toh (ctrl->wValue) >> 8, le16toh (ctrl->wLength), resp);
+   }

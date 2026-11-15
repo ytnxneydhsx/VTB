@@ -177,6 +177,61 @@ void test_instrumentation_interval_range() {
     require(rejected, "sub-second metrics interval was accepted");
 }
 
+void test_uvc_output_configuration() {
+    std::string json = valid_configuration();
+    const std::string expected =
+        R"json("rtsp_url": "rtsp://127.0.0.1:8554/live2d")json";
+    const std::size_t position = json.find(expected);
+    require(position != std::string::npos, "output URL is missing");
+    json.replace(
+        position,
+        expected.size(),
+        expected + R"json(,
+            "uvc": {
+                "enabled": true,
+                "device": "/dev/video2",
+                "gst_launch_path": "/opt/vtb/gstreamer-1.28.9/bin/gst-launch-1.0",
+                "library_path": "/opt/vtb/gstreamer-1.28.9/lib/aarch64-linux-gnu",
+                "plugin_path": "/opt/vtb/gstreamer-1.28.9/lib/aarch64-linux-gnu/gstreamer-1.0",
+                "fps": 30
+            })json");
+
+    vtb::VtbApplicationConfigParser parser;
+    const vtb::VtbApplicationConfiguration config = parser.parse(json);
+    require(config.output.uvc_enabled, "UVC output was not enabled");
+    require(config.output.uvc_device == "/dev/video2", "UVC device mismatch");
+    require(config.output.uvc_fps == 30, "UVC fps mismatch");
+}
+
+void test_uvc_fps_does_not_exceed_render_fps() {
+    std::string json = valid_configuration();
+    const std::string expected =
+        R"json("rtsp_url": "rtsp://127.0.0.1:8554/live2d")json";
+    const std::size_t position = json.find(expected);
+    require(position != std::string::npos, "output URL is missing");
+    json.replace(
+        position,
+        expected.size(),
+        expected + R"json(,
+            "uvc": {
+                "enabled": true,
+                "device": "/dev/video2",
+                "gst_launch_path": "/opt/vtb/gstreamer-1.28.9/bin/gst-launch-1.0",
+                "library_path": "/opt/vtb/gstreamer-1.28.9/lib/aarch64-linux-gnu",
+                "plugin_path": "/opt/vtb/gstreamer-1.28.9/lib/aarch64-linux-gnu/gstreamer-1.0",
+                "fps": 60
+            })json");
+
+    vtb::VtbApplicationConfigParser parser;
+    bool rejected = false;
+    try {
+        parser.parse(json);
+    } catch (const std::invalid_argument&) {
+        rejected = true;
+    }
+    require(rejected, "UVC fps above render fps was accepted");
+}
+
 }  // namespace
 
 int main() {
@@ -187,6 +242,8 @@ int main() {
         test_render_output_url_requires_migration();
         test_instrumentation_section_is_optional();
         test_instrumentation_interval_range();
+        test_uvc_output_configuration();
+        test_uvc_fps_does_not_exceed_render_fps();
         std::cout << "vtb_application_config_test passed\n";
         return 0;
     } catch (const std::exception& error) {

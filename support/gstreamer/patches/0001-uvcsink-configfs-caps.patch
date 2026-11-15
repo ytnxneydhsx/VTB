@@ -1,0 +1,246 @@
+--- a/sys/uvcgadget/configfs.c
++++ b/sys/uvcgadget/configfs.c
+@@ -928,10 +928,12 @@
+   bname = g_path_get_basename (function);
+
+   fc->udc = attribute_read_str (fpath, "../../UDC");
+-  fc->video = udc_find_video_device (fc->udc, bname);
+-  if (!fc->video) {
+-    ret = -ENODEV;
+-    goto done;
++  if (fc->udc && fc->udc[0] != '\0') {
++    fc->video = udc_find_video_device (fc->udc, bname);
++    if (!fc->video) {
++      ret = -ENODEV;
++      goto done;
++    }
+   }
+
+   ret = configfs_parse_uvc (fpath, fc);
+@@ -955,7 +957,17 @@
+   glob_t globbuf;
+   char *config;
+   int ret;
++
++  ret = asprintf (&vpath,
++      "/sys/class/video4linux/%s", video ? video : "*");
++  if (ret < 0)
++    return NULL;
+
++  config = attribute_read_str (vpath, "function_name");
++  free (vpath);
++  if (config)
++    return config;
++
+   ret = asprintf (&vpath,
+       "/sys/class/udc/*/device/gadget*/video4linux/%s", video ? video : "*");
+   if (!ret)
+@@ -996,6 +1008,14 @@
+
+   fc = configfs_parse_uvc_function (function);
+
++  if (fc && !fc->video) {
++    fc->video = strdup (rpath);
++    if (!fc->video) {
++      configfs_free_uvc_function (fc);
++      fc = NULL;
++    }
++  }
++
+   free (function);
+
+   return fc;
+--- a/sys/uvcgadget/gstuvcsink.c
++++ b/sys/uvcgadget/gstuvcsink.c
+@@ -248,6 +248,57 @@
+   }
+
+   return structure;
++}
++
++#define SIMPLIFY_FRACTION_N_TERMS   8
++#define SIMPLIFY_FRACTION_THRESHOLD 333
++
++static GstCaps *
++gst_uvc_sink_get_configfs_caps (GstUvcSink * self)
++{
++  GstCaps *caps;
++  unsigned int format_index;
++
++  if (!self->fc)
++    return NULL;
++
++  caps = gst_caps_new_empty ();
++  for (format_index = 0;
++      format_index < self->fc->streaming.num_formats; ++format_index) {
++    const struct uvc_function_config_format *format =
++        &self->fc->streaming.formats[format_index];
++    unsigned int frame_index;
++
++    for (frame_index = 0; frame_index < format->num_frames; ++frame_index) {
++      const struct uvc_function_config_frame *frame =
++          &format->frames[frame_index];
++      unsigned int interval_index;
++
++      for (interval_index = 0;
++          interval_index < frame->num_intervals; ++interval_index) {
++        GstStructure *structure;
++        gint numerator = 10000000;
++        gint denominator = frame->intervals[interval_index];
++
++        if (!denominator)
++          continue;
++
++        structure = gst_v4l2uvc_fourcc_to_bare_struct (format->fcc);
++        if (!structure)
++          continue;
++
++        gst_util_simplify_fraction (&numerator, &denominator,
++            SIMPLIFY_FRACTION_N_TERMS, SIMPLIFY_FRACTION_THRESHOLD);
++        gst_structure_set (structure,
++            "width", G_TYPE_INT, (gint) frame->width,
++            "height", G_TYPE_INT, (gint) frame->height,
++            "framerate", GST_TYPE_FRACTION, numerator, denominator, NULL);
++        gst_caps_append_structure (caps, structure);
++      }
++    }
++  }
++
++  return caps;
+ }
+
+ /* The UVC EVENT_DATA from the host, which is committing the currently
+@@ -259,91 +310,41 @@
+ static GstCaps *
+ gst_uvc_sink_get_configured_caps (GstUvcSink * self)
+ {
+-  struct v4l2_fmtdesc format;
+-  struct v4l2_frmsizeenum size;
+-  struct v4l2_frmivalenum ival;
+-  guint32 width, height;
+-  gint device_fd;
++  const struct uvc_function_config_format *format;
++  const struct uvc_function_config_frame *frame;
+   GstStructure *s;
+   gint numerator, denominator;
+-  GValue framerate = { 0, };
+
+-  g_object_get (G_OBJECT (self->v4l2sink), "device-fd", &device_fd, NULL);
+-
+-  format.index = self->cur.bFormatIndex - 1;
+-  format.type = V4L2_BUF_TYPE_VIDEO_OUTPUT;
+-
+-  if (ioctl (device_fd, VIDIOC_ENUM_FMT, &format) < 0) {
+-    GST_ELEMENT_ERROR (self, RESOURCE, READ, ("Linux kernel error"),
+-        ("VIDIOC_ENUM_FMT failed: %s (%d)", g_strerror (errno), errno));
++  if (!self->fc || !self->cur.bFormatIndex ||
++      self->cur.bFormatIndex > self->fc->streaming.num_formats) {
++    GST_ELEMENT_ERROR (self, RESOURCE, READ,
++        ("Invalid UVC format index"), NULL);
+     return NULL;
+   }
+
+-  s = gst_v4l2uvc_fourcc_to_bare_struct (format.pixelformat);
+-  if (!s)
+-    return NULL;
+-
+-  memset (&size, 0, sizeof (struct v4l2_frmsizeenum));
+-  size.index = self->cur.bFrameIndex - 1;
+-  size.pixel_format = format.pixelformat;
+-
+-  if (ioctl (device_fd, VIDIOC_ENUM_FRAMESIZES, &size) < 0) {
+-    GST_ELEMENT_ERROR (self, RESOURCE, READ, ("Linux kernel error"),
+-        ("VIDIOC_ENUM_FRAMESIZES failed: %s (%d)", g_strerror (errno), errno));
++  format = &self->fc->streaming.formats[self->cur.bFormatIndex - 1];
++  if (!self->cur.bFrameIndex || self->cur.bFrameIndex > format->num_frames) {
++    GST_ELEMENT_ERROR (self, RESOURCE, READ,
++        ("Invalid UVC frame index"), NULL);
+     return NULL;
+   }
+
+-  GST_LOG_OBJECT (self, "got discrete frame size %dx%d",
+-      size.discrete.width, size.discrete.height);
+-
+-  width = MIN (size.discrete.width, G_MAXINT);
+-  height = MIN (size.discrete.height, G_MAXINT);
+-
+-  if (!width || !height)
++  frame = &format->frames[self->cur.bFrameIndex - 1];
++  if (!frame->width || !frame->height || !self->cur.dwFrameInterval)
+     return NULL;
++  s = gst_v4l2uvc_fourcc_to_bare_struct (format->fcc);
++  if (!s)
++    return NULL;
+
+-  g_value_init (&framerate, GST_TYPE_FRACTION);
+-
+-  memset (&ival, 0, sizeof (struct v4l2_frmivalenum));
+-
+-  ival.index = 0;
+-  ival.pixel_format = format.pixelformat;
+-  ival.width = width;
+-  ival.height = height;
+-
+-#define SIMPLIFY_FRACTION_N_TERMS   8
+-#define SIMPLIFY_FRACTION_THRESHOLD 333
+-
+-  numerator = self->cur.dwFrameInterval;
+-  denominator = 10000000;
++  numerator = 10000000;
++  denominator = self->cur.dwFrameInterval;
+   gst_util_simplify_fraction (&numerator, &denominator,
+       SIMPLIFY_FRACTION_N_TERMS, SIMPLIFY_FRACTION_THRESHOLD);
+
+-  if (ioctl (device_fd, VIDIOC_ENUM_FRAMEINTERVALS, &ival) < 0) {
+-    GST_ELEMENT_ERROR (self, RESOURCE, READ, ("Linux kernel error"),
+-        ("VIDIOC_ENUM_FRAMEINTERVALS failed: %s (%d)",
+-            g_strerror (errno), errno));
+-    return NULL;
+-  }
+-
+-  do {
+-    gint inumerator = ival.discrete.numerator;
+-    gint idenominator = ival.discrete.denominator;
+-
+-    gst_util_simplify_fraction (&inumerator, &idenominator,
+-        SIMPLIFY_FRACTION_N_TERMS, SIMPLIFY_FRACTION_THRESHOLD);
+-
+-    if (numerator == inumerator && denominator == idenominator)
+-      /* swap to get the framerate */
+-      gst_value_set_fraction (&framerate, denominator, numerator);
+-
+-    ival.index++;
+-  } while (ioctl (device_fd, VIDIOC_ENUM_FRAMEINTERVALS, &ival) >= 0);
+-
+-  gst_structure_set (s, "width", G_TYPE_INT, (gint) width,
+-      "height", G_TYPE_INT, (gint) height, NULL);
+-
+-  gst_structure_take_value (s, "framerate", &framerate);
++  gst_structure_set (s,
++      "width", G_TYPE_INT, (gint) frame->width,
++      "height", G_TYPE_INT, (gint) frame->height,
++      "framerate", GST_TYPE_FRACTION, numerator, denominator, NULL);
+
+   return gst_caps_new_full (s, NULL);
+ }
+@@ -956,18 +957,11 @@
+ static gboolean
+ gst_uvc_sink_query_probed_caps (GstUvcSink * self)
+ {
+-  GstQuery *caps_query = gst_query_new_caps (NULL);
+-  GstCaps *query_caps;
+-
+   gst_clear_caps (&self->probed_caps);
+-  if (!gst_pad_query (self->v4l2sinkpad, caps_query))
++  self->probed_caps = gst_uvc_sink_get_configfs_caps (self);
++  if (!self->probed_caps || gst_caps_is_empty (self->probed_caps))
+     return FALSE;
+
+-  gst_query_parse_caps_result (caps_query, &query_caps);
+-  gst_query_unref (caps_query);
+-
+-  self->probed_caps = gst_caps_copy (query_caps);
+-
+   gst_caps_replace (&self->cur_caps, self->probed_caps);
+
+   return TRUE;

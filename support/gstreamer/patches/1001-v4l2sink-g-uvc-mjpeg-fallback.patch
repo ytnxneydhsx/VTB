@@ -1,0 +1,23 @@
+--- a/sys/v4l2/gstv4l2object.c
++++ b/sys/v4l2/gstv4l2object.c
+@@ -1341,6 +1341,20 @@
+     format->type = type;
+
+     if (v4l2object->ioctl (v4l2object->video_fd, VIDIOC_ENUM_FMT, format) < 0) {
++      if (n == 0 && errno == ENOTTY &&
++          (type == V4L2_BUF_TYPE_VIDEO_OUTPUT ||
++              type == V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE) &&
++          g_strcmp0 ((const gchar *) v4l2object->vcap.driver, "g_uvc") == 0) {
++        format->pixelformat = V4L2_PIX_FMT_MJPEG;
++        format->flags = V4L2_FMT_FLAG_COMPRESSED;
++        g_strlcpy ((gchar *) format->description, "Motion-JPEG",
++            sizeof (format->description));
++        v4l2object->formats =
++            g_slist_insert_sorted (v4l2object->formats, format,
++            (GCompareFunc) format_cmp_func);
++        n++;
++        break;
++      }
+       if (errno == EINVAL) {
+         g_free (format);
+         break;                  /* end of enumeration */

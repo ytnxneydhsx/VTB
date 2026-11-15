@@ -1,0 +1,79 @@
+--- a/sys/uvcgadget/gstuvcsink.c
++++ b/sys/uvcgadget/gstuvcsink.c
+@@ -251,7 +251,38 @@
+ }
+
+ #define SIMPLIFY_FRACTION_N_TERMS   8
+ #define SIMPLIFY_FRACTION_THRESHOLD 333
++#define UVC_INTERVALS_PER_SECOND     10000000U
++#define UVC_INTEGER_FPS_MAX_ERROR    100U
++
++static void
++gst_uvc_sink_interval_to_framerate (unsigned int interval,
++    gint * numerator, gint * denominator)
++{
++  guint64 rounded_fps;
++  guint64 represented_intervals;
++  guint64 difference;
++
++  *numerator = UVC_INTERVALS_PER_SECOND;
++  *denominator = interval;
++
++  rounded_fps = (UVC_INTERVALS_PER_SECOND + interval / 2) / interval;
++  represented_intervals = rounded_fps * interval;
++  if (represented_intervals >= UVC_INTERVALS_PER_SECOND)
++    difference = represented_intervals - UVC_INTERVALS_PER_SECOND;
++  else
++    difference = UVC_INTERVALS_PER_SECOND - represented_intervals;
++
++  if (rounded_fps > 0 && rounded_fps <= G_MAXINT &&
++      difference <= UVC_INTEGER_FPS_MAX_ERROR) {
++    *numerator = rounded_fps;
++    *denominator = 1;
++    return;
++  }
++
++  gst_util_simplify_fraction (numerator, denominator,
++      SIMPLIFY_FRACTION_N_TERMS, SIMPLIFY_FRACTION_THRESHOLD);
++}
+
+ static GstCaps *
+ gst_uvc_sink_get_configfs_caps (GstUvcSink * self)
+@@ -277,10 +308,10 @@
+       for (interval_index = 0;
+           interval_index < frame->num_intervals; ++interval_index) {
+         GstStructure *structure;
+-        gint numerator = 10000000;
+-        gint denominator = frame->intervals[interval_index];
++        gint numerator;
++        gint denominator;
+
+-        if (!denominator)
++        if (!frame->intervals[interval_index])
+           continue;
+
+         structure = gst_v4l2uvc_fourcc_to_bare_struct (format->fcc);
+@@ -287,8 +318,8 @@
+         if (!structure)
+           continue;
+
+-        gst_util_simplify_fraction (&numerator, &denominator,
+-            SIMPLIFY_FRACTION_N_TERMS, SIMPLIFY_FRACTION_THRESHOLD);
++        gst_uvc_sink_interval_to_framerate (frame->intervals[interval_index],
++            &numerator, &denominator);
+         gst_structure_set (structure,
+             "width", G_TYPE_INT, (gint) frame->width,
+             "height", G_TYPE_INT, (gint) frame->height,
+@@ -336,10 +367,8 @@
+   if (!s)
+     return NULL;
+
+-  numerator = 10000000;
+-  denominator = self->cur.dwFrameInterval;
+-  gst_util_simplify_fraction (&numerator, &denominator,
+-      SIMPLIFY_FRACTION_N_TERMS, SIMPLIFY_FRACTION_THRESHOLD);
++  gst_uvc_sink_interval_to_framerate (self->cur.dwFrameInterval,
++      &numerator, &denominator);
+
+   gst_structure_set (s,
+       "width", G_TYPE_INT, (gint) frame->width,

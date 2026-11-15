@@ -36,7 +36,15 @@
     "total_frames": 0
   },
   "output": {
-    "rtsp_url": "rtsp://127.0.0.1:8554/live2d"
+    "rtsp_url": "rtsp://127.0.0.1:8554/live2d",
+    "uvc": {
+      "enabled": true,
+      "device": "/dev/video2",
+      "gst_launch_path": "/opt/vtb/gstreamer-1.28.9/bin/gst-launch-1.0",
+      "library_path": "/opt/vtb/gstreamer-1.28.9/lib/aarch64-linux-gnu",
+      "plugin_path": "/opt/vtb/gstreamer-1.28.9/lib/aarch64-linux-gnu/gstreamer-1.0",
+      "fps": 30
+    }
   },
   "instrumentation": {
     "metrics_directory": "/home/huangnv/VTB/runtime/cpp-host-libgodot-20261030-01/metrics",

@@ -1,0 +1,19 @@
+[binaries]
+c = '@TOOLCHAIN_ROOT@/bin/aarch64-godot-linux-gnu-gcc'
+cpp = '@TOOLCHAIN_ROOT@/bin/aarch64-godot-linux-gnu-g++'
+ar = '@TOOLCHAIN_ROOT@/bin/aarch64-godot-linux-gnu-ar'
+strip = '@TOOLCHAIN_ROOT@/bin/aarch64-godot-linux-gnu-strip'
+pkg-config = '/usr/bin/pkg-config'
+
+[host_machine]
+system = 'linux'
+cpu_family = 'aarch64'
+cpu = 'armv8-a'
+endian = 'little'
+
+[properties]
+needs_exe_wrapper = true
+
+[built-in options]
+c_args = ['-fPIC', '-I@TARGET_SYSROOT@/usr/lib64/glib-2.0/include']
+cpp_args = ['-fPIC', '-I@TARGET_SYSROOT@/usr/lib64/glib-2.0/include']

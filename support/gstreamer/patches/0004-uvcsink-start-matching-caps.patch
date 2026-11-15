@@ -1,0 +1,18 @@
+--- a/sys/uvcgadget/gstuvcsink.c
++++ b/sys/uvcgadget/gstuvcsink.c
+@@ -568,9 +568,15 @@
+   if (self->streamon || self->streamoff) {
+     /* Drop all incoming buffers until the streamoff or streamon is done. */
+     self->buffer_peer_probe_id =
+         gst_pad_add_probe (pad, GST_PAD_PROBE_TYPE_BUFFER,
+         gst_uvc_sink_sinkpad_buffer_peer_probe, self, NULL);
+
++    if (self->streamon && !self->caps_changed) {
++      GST_DEBUG_OBJECT (self, "caps already match; start v4l2sink");
++      gst_uvc_sink_update_streaming (self);
++      return GST_PAD_PROBE_PASS;
++    }
++
+     GST_DEBUG_OBJECT (self, "Send reconfigure");
+     gst_pad_push_event (self->sinkpad, gst_event_new_reconfigure ());
+   }
