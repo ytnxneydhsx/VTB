@@ -20,6 +20,7 @@ script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 cross_file="$GSTREAMER_BUILD_ROOT/aarch64-godot-linux-gnu.ini"
 gst_plugins_bad_source="$GSTREAMER_SOURCE_ROOT/gst-plugins-bad-1.28.9"
 gst_plugins_good_source="$GSTREAMER_SOURCE_ROOT/gst-plugins-good-1.28.9"
+gst_rtsp_server_source="$GSTREAMER_SOURCE_ROOT/gst-rtsp-server-1.28.9"
 
 mkdir -p "$GSTREAMER_BUILD_ROOT" "$GSTREAMER_STAGING_ROOT"
 
@@ -29,8 +30,10 @@ apply_patch_set() {
 	for gstreamer_patch in "$@"; do
 		if git -C "$patch_source" apply --check "$gstreamer_patch" >/dev/null 2>&1; then
 			git -C "$patch_source" apply "$gstreamer_patch"
+		elif git -C "$patch_source" apply --reverse --check "$gstreamer_patch" >/dev/null 2>&1; then
+			printf 'GStreamer patch is already applied: %s\n' "$(basename "$gstreamer_patch")"
 		else
-			printf 'GStreamer patch does not apply cleanly: %s\n' "$(basename "$gstreamer_patch")" >&2
+			printf 'GStreamer patch is neither applicable nor already applied: %s\n' "$(basename "$gstreamer_patch")" >&2
 			exit 1
 		fi
 	done
@@ -114,13 +117,13 @@ setup_compile_install() {
 		-Dtests=disabled \
 		-Dexamples=disabled \
 		-Ddoc=disabled \
-		-Dnls=disabled \
 		"$@"
 	meson compile -C "$build_dir" -j "$GSTREAMER_BUILD_JOBS"
 	DESTDIR="$GSTREAMER_STAGING_ROOT" meson install -C "$build_dir"
 }
 
 setup_compile_install gstreamer \
+	-Dnls=disabled \
 	-Dbenchmarks=disabled \
 	-Dintrospection=disabled \
 	-Dcheck=disabled \
@@ -132,20 +135,33 @@ setup_compile_install gstreamer \
 	-Dtools=enabled
 
 setup_compile_install gst-plugins-base \
+	-Dnls=disabled \
 	-Dintrospection=disabled \
 	-Dorc=disabled \
 	-Dapp=enabled \
 	-Dtypefind=enabled
 
 setup_compile_install gst-plugins-good \
+	-Dnls=disabled \
 	-Dorc=disabled \
+	-Drtp=enabled \
+	-Drtpmanager=enabled \
+	-Drtsp=enabled \
+	-Dudp=enabled \
 	-Dv4l2=enabled \
 	-Dv4l2-probe=false \
 	-Dv4l2-libv4l2=disabled \
 	-Dv4l2-gudev=disabled
 
 setup_compile_install gst-plugins-bad \
+	-Dnls=disabled \
 	-Dintrospection=disabled \
 	-Dorc=disabled \
 	-Djpegformat=enabled \
+	-Dvideoparsers=enabled \
 	-Duvcgadget=enabled
+
+test -d "$gst_rtsp_server_source"
+setup_compile_install gst-rtsp-server \
+	-Dintrospection=disabled \
+	-Drtspclientsink=enabled

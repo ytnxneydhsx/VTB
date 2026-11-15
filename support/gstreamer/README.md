@@ -1,15 +1,17 @@
 # GStreamer 1.28.9 ARM64 build
 
-This directory builds the minimal GStreamer runtime used by the Live2D UVC
-branch. It installs below `/opt/vtb/gstreamer-1.28.9`, so the board's packaged
-GStreamer 1.24.2 remains available.
+This directory builds the GStreamer runtime used by the Live2D raw-frame tee,
+RTSP publisher and UVC branch. It installs below
+`/opt/vtb/gstreamer-1.28.9`, so the board's packaged GStreamer 1.24.2 remains
+available.
 
 Enabled runtime elements are:
 
-- core: `fdsrc`, `queue`, `gst-launch-1.0`;
-- gst-plugins-base: app/typefind libraries required by the selected plugins;
-- gst-plugins-good: `v4l2sink`;
-- gst-plugins-bad: `jpegparse`, `uvcsink`.
+- core: `fdsrc`, `queue`, `tee`, `gst-launch-1.0`;
+- gst-plugins-base: `appsrc`, `appsink`, DMA-BUF/video libraries and typefind;
+- gst-plugins-good: RTP/RTCP, UDP, RTSP helpers and `v4l2sink`;
+- gst-plugins-bad: `h264parse`, `jpegparse`, `uvcsink`;
+- gst-rtsp-server: `rtspclientsink` for publishing H.264 to MediaMTX.
 
 The build applies both patches under `patches/` before configuring
 gst-plugins-bad. `0001-uvcsink-configfs-caps.patch` handles the RK3588 Linux
@@ -52,6 +54,7 @@ The verified source archives and build tool have these SHA-256 values:
 c1fda668b520e6aef763c0eb962c032c9fe52bce322e8b00c69b4e9e847bddc1  gst-plugins-base-1.28.9.tar.xz
 e518cd97483706a252e95e60312a22d23dec6f5e7673af6f5bde719c3a9ca7f4  gst-plugins-good-1.28.9.tar.xz
 4a4e0b7bf84f868378c48f143a7ac3a98923b488a5b74f1a35ba46bc3c43f6b1  gst-plugins-bad-1.28.9.tar.xz
+b87ed564d857a226a3135bd2c42eae7b40eb64031cb9cbce124722af92cc8b9d  gst-rtsp-server-1.28.9.tar.xz
 82c6818dc81743c96de3a458f06175776ebfde4081195ea31ea6971838f25e38  meson-1.7.2-py3-none-any.whl
 ```
 

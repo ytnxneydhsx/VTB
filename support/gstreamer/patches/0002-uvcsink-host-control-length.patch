@@ -25,7 +25,7 @@
        break;
 
      case UVC_GET_CUR:
-@@ -412,11 +413,11 @@
+@@ -412,10 +413,10 @@
    if ((ctrl->bRequestType & USB_RECIP_MASK) != USB_RECIP_INTERFACE)
      return -EINVAL;
 
