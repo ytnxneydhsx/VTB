@@ -334,6 +334,7 @@ endif()
 
 if(VTB_ENABLE_RGA_FACE OR VTB_ENABLE_EMBEDDED_GODOT)
     add_library(vtb_rga_core STATIC
+        src/hardware/rga/rga_buffer_pool.cpp
         src/hardware/rga/rga_device.cpp
         src/hardware/rga/rga_nv12_frame_transformer.cpp
         src/hardware/rga/rga_transform_session.cpp

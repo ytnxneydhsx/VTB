@@ -1,5 +1,6 @@
 #include <type_traits>
 
+#include "vtb/hardware/rga/rga_buffer_pool.hpp"
 #include "vtb/hardware/rga/rga_device.hpp"
 #include "vtb/hardware/rga/rga_model_input_transformer.hpp"
 #include "vtb/hardware/rga/rga_nv12_frame_transformer.hpp"
@@ -9,6 +10,8 @@
 
 static_assert(!std::is_copy_constructible_v<vtb::RgaDevice>);
 static_assert(!std::is_move_constructible_v<vtb::RgaDevice>);
+static_assert(!std::is_copy_constructible_v<vtb::RgaBufferPool>);
+static_assert(!std::is_move_constructible_v<vtb::RgaBufferPool>);
 static_assert(!std::is_copy_constructible_v<vtb::RgaTransformer>);
 static_assert(!std::is_move_constructible_v<vtb::RgaTransformer>);
 static_assert(!std::is_copy_constructible_v<vtb::RgaTransformSession>);

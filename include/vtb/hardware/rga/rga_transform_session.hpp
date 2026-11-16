@@ -5,6 +5,7 @@
 #include <memory>
 #include <string>
 
+#include "vtb/hardware/rga/rga_buffer_pool.hpp"
 #include "vtb/hardware/rga/rga_transformer.hpp"
 
 namespace vtb {
@@ -97,38 +98,13 @@ private:
     RgaPixelFormat destination_format_ = RgaPixelFormat::rgb888;
 };
 
-/** @brief 独占一个目标池槽位并保持其 RgaBuffer 有效的移动租约。 */
-class RgaTransformLease final {
-public:
-    ~RgaTransformLease() = default;
-
-    RgaTransformLease(const RgaTransformLease&) = delete;
-    RgaTransformLease& operator=(const RgaTransformLease&) = delete;
-    RgaTransformLease(RgaTransformLease&&) noexcept = default;
-    RgaTransformLease& operator=(RgaTransformLease&&) noexcept = default;
-
-    const std::shared_ptr<RgaBuffer>& buffer() const noexcept;
-    std::uint64_t buffer_id() const noexcept;
-
-private:
-    RgaTransformLease(
-        std::shared_ptr<RgaBuffer> buffer,
-        std::uint64_t buffer_id,
-        std::shared_ptr<void> slot_token);
-
-    std::shared_ptr<RgaBuffer> buffer_;
-    std::uint64_t buffer_id_ = 0;
-    std::shared_ptr<void> slot_token_;
-    friend class RgaTransformSession;
-};
-
 /**
- * @brief 一个业务生产者独占的 RGA 导入缓存、目标池和同步提交会话。
+ * @brief 一个业务生产者独占的 RGA 导入缓存和同步提交会话。
  *
  * Session 每次 transform() 只允许一个调用进入，并在所属业务线程直接同步调用
  * RgaTransformer。不同 Session 可由不同业务线程并发向 librga 提交；硬件核心由
  * RGA 驱动调度。源注册按 fd、buffer_id、stream_generation、尺寸、stride 和格式
- * 缓存；目标池槽位由 RgaTransformLease 的寿命控制。
+ * 缓存；独立 RgaBufferPool 的目标槽位由 RgaTransformLease 的寿命控制。
  */
 class RgaTransformSession final {
 public:

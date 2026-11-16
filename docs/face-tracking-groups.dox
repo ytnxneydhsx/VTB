@@ -358,27 +358,27 @@
  *
  * @par 四、RGA 模型输入 Buffer 和每次 ModelInputLease
  *
- * 这张图从 Face Session 独立目标池展开，再连到一次 `prepare()` 返回的租约。
- * 每个槽位由 Token 标记占用，ModelInputView 在租约窗口内提供 RGB 地址、DMA-BUF fd
- * 和 source_crop。
+ * 这张图从 Face Session 持有的独立 RgaBufferPool 展开，再连到一次 `prepare()`
+ * 返回的租约。每个槽位由归还对象标记占用，ModelInputView 在租约窗口内提供 RGB
+ * 地址、DMA-BUF fd 和 source_crop。
  *
  * @mermaid{face_tracking_rga_output_cache_structure} "RGA 输出缓存与 ModelInputLease 保活结构"
  * flowchart TB
  *     Session["RgaTransformSession<br/>Face 私有"]
- *     Pool["DestinationPool<br/>至少两个槽位"]
+ *     Pool["RgaBufferPool<br/>至少两个槽位"]
  *     Slot["DestinationSlot[N]<br/>RgaBuffer + in_use"]
  *     Buffer["RgaBuffer<br/>RGB888 模型输入"]
  *     DmaFd["UniqueFd<br/>DMA heap fd"]
  *     Mapping["mapping<br/>mmap CPU 地址"]
  *     Handle["RGA handle<br/>输出目标"]
  *     TransformLease["RgaTransformLease<br/>移动专属"]
- *     Token["DestinationSlotToken<br/>析构归还槽位"]
+ *     Token["ReleaseOnLeaseDestroy<br/>析构归还槽位"]
  *     Lease["ModelInputLease<br/>本次输入租约"]
  *     KeepAlive["return_buffer_<br/>保持 TransformLease"]
  *     View["ModelInputView<br/>FrameView + Spec + source_crop"]
  *     Rknn["RknnModel::run()<br/>本次同步借用"]
  *
- *     Session -->|"红色：独占目标池"| Pool
+ *     Session -->|"蓝色：shared_ptr 持有目标池"| Pool
  *     Pool -->|"红色：按值拥有"| Slot
  *     Slot -->|"蓝色：shared_ptr"| Buffer
  *     Buffer -->|"红色：独占 DMA heap fd"| DmaFd
@@ -386,7 +386,7 @@
  *     Buffer -->|"红色：独占 RGA handle"| Handle
  *     TransformLease -->|"蓝色：保活目标 Buffer"| Buffer
  *     TransformLease -->|"红色：持有"| Token
- *     Token -->|"灰色：析构 release(index)"| Pool
+ *     Token -->|"蓝色：保活池；析构 release(index)"| Pool
  *     Lease -->|"红色：按值拥有保活动作"| KeepAlive
  *     KeepAlive -->|"蓝色：间接保持"| TransformLease
  *     Lease -->|"红色：按值拥有 view_"| View
@@ -397,7 +397,7 @@
  *     class Session,Pool,Slot,Buffer,DmaFd,Mapping,Handle,TransformLease,Token,Lease,KeepAlive,View,Rknn neutral
  * @endmermaid
  *
- * 目标池按 ModelInputSpec 复用匹配槽位；规格变化时等待全部槽位归还再重建。
+ * RgaBufferPool 按 ModelInputSpec 复用匹配槽位；规格变化时等待全部槽位归还再重建。
  * `prepare()` 把输出 Buffer 的地址和 fd 放入 ModelInputView，并通过回调对象保持
  * RgaTransformLease。ModelInputLease 析构后 Token 归还槽位；任何在途 Lease 存在时，
  * 同一槽位都不会被下一项任务选中。

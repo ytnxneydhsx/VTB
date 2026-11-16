@@ -110,15 +110,16 @@ H.264 与 MJPEG 分支，独占自己的上下文与输入导入缓存。
 目标在三种产品后端都启用时链接具体硬件依赖；产品配置默认具备这些后端。
 
 `RgaModelInputTransformer` 直接持有 Face 私有 `RgaTransformSession`。Session 保存源代次、
-`RgaBuffer` 注册缓存、RGB888 目标池和同步 `RgaTransformer`；直接调用 librga 期间调用栈
-继续持有上游帧租约。RKNN 模型
+`RgaBuffer` 注册缓存和同步 `RgaTransformer`，并持有独立 `RgaBufferPool` 管理 RGB888
+DMA-BUF 槽位；直接调用 librga 期间调用栈继续持有上游帧租约。RKNN 模型
 保持在 detector/landmark 内部：每个模型的 context、core 选择和张量属性与模型文件强绑定，
 当前没有跨流水线共享 context。`GStreamerMediaSession` 的两个 MPP context 按编码流
 独占，避免把码控、GOP、PTS/DTS 与输入 DMA-BUF 绑定混成全局状态。
 
-Live2D 的 `RgaNv12FrameTransformer` 位于宿主，接收 ABI v6 的 `RgbaFrameView`。它缓存 RGBA
-DMA-BUF 导入与四槽 NV12 输出缓冲，并通过自己的 `RgaTransformSession` 在 Godot
-所有者线程同步调用 librga。Pipeline 取得同步借用视图后等待 RGA 调用返回，再把
+Live2D 的 `RgaNv12FrameTransformer` 位于宿主，接收 ABI v6 的 `RgbaFrameView`。它通过
+自己的 `RgaTransformSession` 缓存 RGBA DMA-BUF 导入，并由独立 `RgaBufferPool` 管理
+四槽 NV12 输出缓冲；Session 在 Godot 所有者线程同步调用 librga。Pipeline 取得同步
+借用视图后等待 RGA 调用返回，再把
 `Nv12FrameLease` 移动给媒体 Sink。GStreamer 最后一个缓冲引用释放时，槽位才重新进入
 RGA 目标池。Face 和 Godot 的 Session 不共享源 handle、目标槽位或用户态执行对象。
 
