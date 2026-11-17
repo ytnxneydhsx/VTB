@@ -89,9 +89,9 @@ absent from the LibGodot module source list and link list. The module compiles o
 `Live2DParameters` value object; `Live2DFaceMapper` remains on the host side.
 
 The application directly owns the pipeline stages, their bounded channels,
-`Live2DControlServer`, and `GStreamerMediaSession`. The module
-receives parameters, renders, obtains the Viewport texture, submits the GPU blit, waits for
-GPU completion, and returns a borrowed RGBA DMA-BUF through `RgbaFrameSink`. The host
+`Live2DControlServer`, and `GStreamerMediaSession`. The module receives parameters, wraps an
+external RGBA DMA-BUF texture as the Viewport RenderTarget color attachment, renders into it,
+waits for GPU completion, and returns a borrowed RGBA DMA-BUF through `RgbaFrameSink`. The host
 submits it through the Godot-owned `RgaNv12FrameTransformer` session, calls librga
 synchronously on the Godot owner thread, and moves the leased NV12 result into a GStreamer
 DMA-BUF `GstBuffer`. A tee and two bounded leaky queues drive independent H.264 and MJPEG
@@ -99,7 +99,7 @@ MPP sessions; their encoded packets are copied into GStreamer-owned buffers for 
 UVC output. Face preprocessing uses a
 separate session, target pool, and synchronous RGA execution object on the face thread.
 
-Bridge ABI v6 carries only the RGBA sink and output geometry in the versioned initialize
+Bridge ABI v7 carries only the RGBA sink and output geometry in the versioned initialize
 contract, with version/size checks. Render metrics and all persistence are owned by the host.
 The optional UVC frame rate belongs to the host media configuration. Rebuild and deploy the
 host and LibGodot together.
@@ -162,8 +162,8 @@ freshness, immediate view controls or stale-tracking fallback.
 ## Known first-version boundaries
 
 - Headless EGL/GBM uses Mali-G610 without creating an X11 display or window.
-- The current `glBlitFramebuffer()` capture stage remains in place; direct
-  RenderTarget-to-DMA-BUF output is a separate optimization stage.
+- The Viewport color attachment is a single externally allocated RGBA DMA-BUF. The host must
+  complete its synchronous RGA read before the next LibGodot iteration.
 - Audio falls back to Godot's dummy driver; audio input and A/V synchronization
   are outside this migration.
 - Empty-index meshes in the current model still produce the pre-existing

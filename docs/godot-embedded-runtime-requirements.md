@@ -3,7 +3,9 @@
 状态：第一版实现完成，实机验收记录见 `godot-embedded-runtime-validation-2026-10-30.md`
 日期：2026-10-30；2026-11-03 增补当前模块边界。
 
-历史实机验收不覆盖 ABI v6。当前实现的模块职责与验证范围以
+历史实机验收不覆盖 ABI v7。2026-11-17 已按
+[ADR 0009](adr/0009-render-live2d-directly-into-rgba-dmabuf.md) 改为直接渲染到外部
+RGBA DMA-BUF，ARM64 编译通过，RK3588 回归待完成。当前实现的模块职责与验证范围以
 [模块边界](module-boundaries.md) 为准，下文保留尚未接入产品的接口设计。
 2026-11-03 的 Headless EGL 后续阶段由
 [ADR 0002](adr/0002-use-headless-egl-for-product-runtime.md) 管理；下文关于 X11 的
@@ -53,8 +55,8 @@ VTB C++ main()
   → C++ 创建 SceneTree、SubViewport 和 Ayagami 模型
   → C++ 每帧向 Godot 提交已完成的 Live2D 参数并驱动 iteration
   → Headless EGL/GBM / Mali-G610 驱动 Godot RenderingServer 完成离屏绘制
-  → C++ 取得已完成帧的 GPU 纹理
-  → RGBA DMA-BUF → LibGodotInstance 返回同步借用 RgbaFrameView
+  → RGBA DMA-BUF texture 作为 SubViewport RenderTarget 颜色附件
+  → Godot 直接渲染 → LibGodotInstance 返回同步借用 RgbaFrameView
   → 宿主 RgaNv12FrameTransformer → Godot RgaTransformSession
   → Godot 所有者线程直接同步调用 RgaTransformer → NV12 DMA-BUF → Nv12FrameSink
   → GStreamer appsrc → tee → 两条 leaky queue
@@ -85,7 +87,7 @@ Godot 4.7.1 已提供实验性的 LibGodot Linux 静态库/共享库构建和
 - 提升 Live2D FPS；
 - 降低 RKNN、RGA 或 MPP 的单段耗时；
 - 自动实现 Headless EGL；
-- 自动消除当前 `glBlitFramebuffer()` GPU copy；
+- LibGodot 生命周期迁移本身不承诺消除 GPU copy；该优化已由 ADR 0009 独立完成；
 - 自动实现摄像头到浏览器的端到端低延迟；
 - 自动解决音频输入和 A/V 同步；
 - 自动修复 Ayagami 模型中的空索引 Mesh 警告。
@@ -155,8 +157,8 @@ ADR 0002 在生命周期迁移完成后启动独立的显示后端迁移阶段�
 5. **帧接口符合异步渲染语义。** 参数提交、Godot iteration 和完成帧获取是不同阶段。
 6. **不做 CPU 图像回读。** 产品路径不能用 `ViewportTexture::get_image()` 作为连续
    输出接口。
-7. **保留当前正确性基线。** 第一版继续使用 `SubViewport GL Texture → GPU copy →
-   RGBA DMA-BUF`。
+7. **保留第一版正确性基线。** 第一版使用 `SubViewport GL Texture → GPU copy →
+   RGBA DMA-BUF`；2026-11-17 的 ADR 0009 在保持同步借用契约的前提下替换了该内部实现。
 8. **应用负责编排，能力库负责单项能力。** 人脸、渲染、编码和输出不合并成一个
    巨型公共库。
 9. **先证明生命周期正确，再优化复制。** 外部颜色附件等优化必须由测量驱动。
@@ -263,24 +265,23 @@ VTB 模块不得包含 Godot `main/` 或 `core/` 私有头文件。
 
 ### 6.5 `DmaBufRenderBridge`
 
-第一版复用当前 `OpenVTDmaBufCapture` 的已验证语义：
+当前 `OpenVTDmaBufCapture` 使用以下语义：
 
 ```text
-SubViewport native GL texture
-  → acquire_viewport_texture
-  → glBlitFramebuffer
-  → RGBA DMA-BUF slot
+RGBA DMA-BUF → EGLImage → native GL texture
+  → Godot external texture RID
+  → SubViewport RenderTarget color override
+  → Godot 直接渲染
   → glFinish
   → RgbaFrameSink
 ```
 
-该模块负责单个 RGBA DMA-BUF 槽位、GPU copy、GPU 完成等待和同步借用交付。
+该模块负责单个 RGBA DMA-BUF 槽位、外部颜色附件、GPU 完成等待和同步借用交付。
 宿主 `RgaNv12FrameTransformer` 在回调内通过私有 `RgaTransformSession` 直接同步调用
 librga，随后把移动专属 NV12 Lease 绑定到 GStreamer DMA-BUF `GstMemory`。RGBA 由
 同步回调调用栈保持；NV12 由 GStreamer 内存引用计数保持，直到两个分支都
-释放缓冲区。
-后续如实现外部颜色附件，应替换该模块内部实现，不能改变 `VtbApplication` 和
-`GodotRuntime` 的接口。
+释放缓冲区。桥接 ABI v7 删除逐帧 acquire/blit 调用，宿主的 `VtbApplication`、
+RGA 和媒体输出边界保持不变。
 
 ## 7. Runtime 生命周期和状态机
 

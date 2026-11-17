@@ -155,8 +155,7 @@ vtb-live2d-gstreamer-media.metrics.jsonl
 ```
 
 渲染文件由宿主 `GodotRenderPipeline` 写入，包含 `live2d.parameter_prepare`、
-`live2d.godot_iteration`、`live2d.viewport_texture`、`live2d.gpu_blit`、
-`live2d.gpu_wait`、`live2d.rgba_publish`、`live2d.rga_transform`、
+`live2d.godot_iteration`、`live2d.gpu_render_wait`、`live2d.rgba_publish`、`live2d.rga_transform`、
 `live2d.nv12_publish` 和 `live2d.render_total`。由于 RGBA sink 是同步回调，
 `rgba_publish` 包含宿主 RGA 转换与 raw appsrc 提交时间；MPP 已在 GStreamer 分支流线程
 执行，不再进入该同步区间。媒体文件当前只包含

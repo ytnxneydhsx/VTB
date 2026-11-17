@@ -27,9 +27,8 @@ public:
           nv12_sink_(nv12_sink),
           prepare_timer_(timers_.register_timer("live2d.parameter_prepare")),
           iteration_timer_(timers_.register_timer("live2d.godot_iteration")),
-          texture_timer_(timers_.register_timer("live2d.viewport_texture")),
-          blit_timer_(timers_.register_timer("live2d.gpu_blit")),
-          wait_timer_(timers_.register_timer("live2d.gpu_wait")),
+          render_wait_timer_(
+              timers_.register_timer("live2d.gpu_render_wait")),
           publish_timer_(timers_.register_timer("live2d.rgba_publish")),
           rga_timer_(timers_.register_timer("live2d.rga_transform")),
           nv12_publish_timer_(
@@ -105,16 +104,8 @@ public:
             iteration_finished = godot.iterate();
         }
         {
-            auto scope = texture_timer_.scope();
-            godot.acquire_viewport_texture();
-        }
-        {
-            auto scope = blit_timer_.scope();
-            godot.blit_viewport_texture();
-        }
-        {
-            auto scope = wait_timer_.scope();
-            godot.wait_gpu_copy();
+            auto scope = render_wait_timer_.scope();
+            godot.wait_gpu_render();
         }
         const std::uint64_t ready_timestamp_ns = MonotonicClock::now_ns();
         RgbaFrameView rgba_frame;
@@ -211,9 +202,7 @@ private:
     instrumentation::TimerRegistry timers_;
     instrumentation::TimerHandle prepare_timer_;
     instrumentation::TimerHandle iteration_timer_;
-    instrumentation::TimerHandle texture_timer_;
-    instrumentation::TimerHandle blit_timer_;
-    instrumentation::TimerHandle wait_timer_;
+    instrumentation::TimerHandle render_wait_timer_;
     instrumentation::TimerHandle publish_timer_;
     instrumentation::TimerHandle rga_timer_;
     instrumentation::TimerHandle nv12_publish_timer_;

@@ -10,8 +10,9 @@ Godot 模块内部选择 RTSP 并持有 OutputManager。这些关系会扩大修
 
 本次把产品选择集中到 `apps/vtb-live2d`，低层算法与后端只保留自己的输入输出契约。
 更小的做法是只移动文件，但仍会保留头文件传递依赖、硬件构建条件和 Godot 的 FFmpeg
-链接依赖，因此同时调整这些实际边界。LibGodot 当前只负责渲染、GPU 拷贝、GPU 完成等待
-和 RGBA DMA-BUF 交付；宿主 `RgaNv12FrameTransformer` 完成 RGBA→NV12。2026-11-16
+链接依赖，因此同时调整这些实际边界。LibGodot 当前把 RGBA DMA-BUF 设为 Viewport
+颜色附件，负责直接渲染、GPU 完成等待和同步交付；宿主 `RgaNv12FrameTransformer`
+完成 RGBA→NV12。2026-11-16
 起，`GStreamerMediaSession` 取得 NV12 槽位租约，并用 GStreamer 的 tee、流线程和有界
 leaky queue 管理 H.264 网络与 MJPEG UVC 两个分支；Rockchip GStreamer 插件直接调用
 MPP 编码器。Face 与 Godot 的私有 `RgaTransformSession` 分别在所属业务线程直接同步
@@ -46,8 +47,8 @@ flowchart TB
     App --> GodotPipeline[GodotRenderPipeline 已配置任务主体]
     GodotStage --> TrackingChannel
     GodotStage --> GodotPipeline
-    GodotPipeline --> Godot[LibGodotInstance / ABI v6]
-    Godot --> Render[Godot / Ayagami / DMA-BUF GL copy]
+    GodotPipeline --> Godot[LibGodotInstance / ABI v7]
+    Godot --> Render[Godot / Ayagami / DMA-BUF 颜色附件]
     Render --> RgbaView[LibGodotInstance 返回同步借用 RgbaFrameView]
     RgbaView --> Rga[RgaNv12FrameTransformer / 宿主业务适配]
     Rga --> GodotSession[RgaTransformSession Godot 私有缓存与目标池]
@@ -82,12 +83,12 @@ GStreamer 编码元件分别拥有 H.264 与 MJPEG 的 MPP 上下文。
 | `vtb_live2d_mapper` | 人脸结果到 Live2D 的校准、映射和平滑 |
 | `vtb_live2d_stages` | 视频采集、人脸处理两个独立工作阶段及同步跟踪主体；Stage 拥有线程，主体拥有算法，通道完成数据交接 |
 | `apps/vtb-live2d/libgodot_instance.*` | 独占 Godot 参数拼装、LibGodot/OpenVT ABI 检查与调用、Live2D 参数提交和实例清理；不包含 Pipeline 计时、RGA 或 NV12 输出逻辑 |
-| `vtb-live2d` 内的 Godot pipeline 源码 | `GodotRenderPipeline` 编排并分别计时参数准备、iteration、Viewport 纹理取得、GPU blit、GPU wait、RGBA 交付和宿主 RGA；`GodotRenderStage` 绑定跟踪通道并拥有 Godot 所有者线程；Pipeline 不包含 LibGodot ABI 实现 |
+| `vtb-live2d` 内的 Godot pipeline 源码 | `GodotRenderPipeline` 编排并分别计时参数准备、iteration、GPU render wait、RGBA 交付和宿主 RGA；`GodotRenderStage` 绑定跟踪通道并拥有 Godot 所有者线程；Pipeline 不包含 LibGodot ABI 实现 |
 | `vtb_rga_core` | 提供通用转换请求、Session、租约、目标池、同步执行端和两个具体业务 Transformer；不创建线程或任务队列 |
 | `vtb_gstreamer_media_session` | 把 NV12 DMA-BUF Lease 绑定到 `GstMemory`，建立编码 pipeline、进程内 GstRTSPServer、可选 WebRTC 及 UVC 输出 |
 | `vtb_live2d_control` | HTTP 解析与 JSON 状态序列化；借用 FaceTrackingStage 的查询、取景、校准能力 |
 | `vtb_application_video_input` | 应用配置转换为后端配置并选择摄像头实现 |
-| LibGodot 模块 | 渲染、Viewport 原生纹理取得、GPU copy、`glFinish` 和 RGBA 同步交付；不编译 RGA、MPP、GStreamer、指标报告器或网络/UVC 输出 |
+| LibGodot 模块 | 把外部 RGBA DMA-BUF texture 设为 Viewport RenderTarget 颜色附件，执行直接渲染、`glFinish` 和 RGBA 同步交付；不编译 RGA、MPP、GStreamer、指标报告器或网络/UVC 输出 |
 
 `vtb_render_runtime` 保留为带替身后端的生命周期契约原型，仅由既有状态机单元测试使用。
 产品渲染生命周期由 `apps/vtb-live2d/pipeline` 中的 `GodotRenderStage` 与
@@ -118,7 +119,7 @@ DMA-BUF 槽位；直接调用 librga 期间调用栈继续持有上游帧租约�
 context，避免把码控、GOP、PTS/DTS 与输入 DMA-BUF 绑定混成全局状态；应用层不再直接
 包含 MPP API 或输入导入缓存。
 
-Live2D 的 `RgaNv12FrameTransformer` 位于宿主，接收 ABI v6 的 `RgbaFrameView`。它通过
+Live2D 的 `RgaNv12FrameTransformer` 位于宿主，接收 ABI v7 的 `RgbaFrameView`。它通过
 自己的 `RgaTransformSession` 缓存 RGBA DMA-BUF 导入，并由独立 `RgaBufferPool` 管理
 四槽 NV12 输出缓冲；Session 在 Godot 所有者线程同步调用 librga。Pipeline 取得同步
 借用视图后等待 RGA 调用返回，再把
@@ -148,9 +149,8 @@ RGA 目标池。Face 和 Godot 的 Session 不共享源 handle、目标槽位或
 ```text
 Godot 所有者兼渲染执行线程
   prepare_frame → iteration → RenderingServer draw
-  → acquire_viewport_texture
-  → blit_viewport_texture / glBlitFramebuffer
-  → wait_gpu_copy / glFinish
+  → Viewport RenderTarget 直接写 RGBA DMA-BUF
+  → wait_gpu_render / glFinish
   → LibGodotInstance::publish_rgba_frame → 返回同步借用 RgbaFrameView
   → 宿主 RgaNv12FrameTransformer → Godot RgaTransformSession
   → Godot 所有者线程直接调用 RgaTransformer/RgaDevice
@@ -168,7 +168,7 @@ GStreamer H.264 分支流线程              GStreamer MJPEG 分支流线程
 
 这里列出的是 Live2D 所有者线程与两个 GStreamer 分支流线程；摄像头采集、人脸消费、
 控制、指标以及 Godot 内部工作池仍有各自线程。GPU 作为独立硬件执行图形命令；
-`glFinish()` 是所有者线程等待本次 DMA-BUF 复制完成的同步点。Godot 与 Face 可从各自
+`glFinish()` 是所有者线程等待本次 DMA-BUF 渲染完成的同步点。Godot 与 Face 可从各自
 线程并发调用 librga；两个 GStreamer MPP 编码元件分别在对应分支流线程执行。
 
 `call_on_render_thread()` 保留对 Separate 模式的正确路由能力。以后显式切换 Separate 时，
@@ -225,7 +225,7 @@ IDR 请求计数。
 
 - `output.rtsp_url` 配置进程内 RTSP Server 的监听地址、端口和挂载点；可选的 `output.uvc` 配置 Gadget V4L2 节点、
   GStreamer 1.28.9 插件目录和 MJPEG 帧率。
-- 桥接使用 `openvt_libgodot_application_initialize_v6()`，启动检查 ABI 版本和配置尺寸；
+- 桥接使用 `openvt_libgodot_application_initialize_v7()`，启动检查 ABI 版本和配置尺寸；
   宿主与 LibGodot 必须成对构建、成对部署，不能混用历史二进制。
 - Godot 模块只要求 `OPENVT_VTB_SOURCE_ROOT` 与 `OPENVT_BOARD_SYSROOT`，不链接 RGA、
   MPP 或 GStreamer。宿主产品目标链接 Rockchip RGA 与 GStreamer 1.28.9；MPP 动态依赖

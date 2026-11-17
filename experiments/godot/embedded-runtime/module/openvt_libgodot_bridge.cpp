@@ -67,7 +67,7 @@ extern "C" int openvt_libgodot_iteration(void *p_instance) {
 	return 0;
 }
 
-extern "C" int openvt_libgodot_application_initialize_v6(
+extern "C" int openvt_libgodot_application_initialize_v7(
 		const OpenVTEmbeddedApplicationConfig *p_config) {
 	if (application != nullptr) {
 		application_error = "Embedded Live2D application is already initialized";
@@ -150,28 +150,12 @@ extern "C" int openvt_libgodot_application_prepare_frame(uint64_t p_monotonic_ti
 	return remember_application_error(application->prepare_frame(p_monotonic_timestamp_ns));
 }
 
-extern "C" int openvt_libgodot_application_acquire_viewport_texture(void) {
+extern "C" int openvt_libgodot_application_wait_gpu_render(void) {
 	if (application == nullptr) {
 		application_error = "Embedded Live2D application is unavailable";
 		return static_cast<int>(ERR_UNCONFIGURED);
 	}
-	return remember_application_error(application->acquire_viewport_texture());
-}
-
-extern "C" int openvt_libgodot_application_blit_viewport_texture(void) {
-	if (application == nullptr) {
-		application_error = "Embedded Live2D application is unavailable";
-		return static_cast<int>(ERR_UNCONFIGURED);
-	}
-	return remember_application_error(application->blit_viewport_texture());
-}
-
-extern "C" int openvt_libgodot_application_wait_gpu_copy(void) {
-	if (application == nullptr) {
-		application_error = "Embedded Live2D application is unavailable";
-		return static_cast<int>(ERR_UNCONFIGURED);
-	}
-	return remember_application_error(application->wait_gpu_copy());
+	return remember_application_error(application->wait_gpu_render());
 }
 
 extern "C" int openvt_libgodot_application_publish_rgba_frame(

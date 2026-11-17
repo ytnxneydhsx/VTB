@@ -95,7 +95,8 @@ Error EmbeddedLive2DApplication::configure_render_session() {
 Error EmbeddedLive2DApplication::configure_output() {
 	capture_.instantiate();
 	const Error error = capture_->configure(
-			rgba_sink_, output_width_, output_height_, output_fps_, total_frames_);
+			rgba_sink_, render_session_->viewport_rid(), output_width_, output_height_,
+			output_fps_, total_frames_);
 	if (error != OK) {
 		return fail(error, "DMA-BUF output configuration failed: " + capture_->get_last_error());
 	}
@@ -198,7 +199,7 @@ Error EmbeddedLive2DApplication::apply_fallback_parameters(uint64_t p_monotonic_
 	return OK;
 }
 
-Error EmbeddedLive2DApplication::acquire_viewport_texture() {
+Error EmbeddedLive2DApplication::wait_gpu_render() {
 	if (!initialized_ || capture_.is_null() || render_session_ == nullptr) {
 		return fail(ERR_UNCONFIGURED, "Embedded Live2D application is not initialized");
 	}
@@ -206,42 +207,17 @@ Error EmbeddedLive2DApplication::acquire_viewport_texture() {
 		return OK;
 	}
 	if (output_frame_state_ != OutputFrameState::IDLE) {
-		return fail(ERR_BUSY, "Previous RGBA frame has not been published");
+		return fail(ERR_BUSY, "Previous direct-rendered RGBA frame has not been published");
 	}
 	const uint64_t next_frame = completed_frames_ + 1;
 	current_frame_end_of_stream_ = false;
 	if (total_frames_ > 0 && next_frame >= static_cast<uint64_t>(total_frames_)) {
 		current_frame_end_of_stream_ = true;
 	}
-	const Error error = capture_->acquire_viewport_texture(
-			render_session_->viewport_rid(), static_cast<int>(completed_frames_),
-			current_frame_end_of_stream_);
+	const Error error = capture_->wait_gpu_render(
+			static_cast<int>(completed_frames_), current_frame_end_of_stream_);
 	if (error != OK) {
-		return fail(error, "Viewport texture acquisition failed: " + capture_->get_last_error());
-	}
-	output_frame_state_ = OutputFrameState::ACQUIRED;
-	return OK;
-}
-
-Error EmbeddedLive2DApplication::blit_viewport_texture() {
-	if (output_frame_state_ != OutputFrameState::ACQUIRED) {
-		return fail(ERR_UNCONFIGURED, "Viewport texture has not been acquired");
-	}
-	const Error error = capture_->blit_viewport_texture();
-	if (error != OK) {
-		return fail(error, "Viewport GPU blit failed: " + capture_->get_last_error());
-	}
-	output_frame_state_ = OutputFrameState::BLITTED;
-	return OK;
-}
-
-Error EmbeddedLive2DApplication::wait_gpu_copy() {
-	if (output_frame_state_ != OutputFrameState::BLITTED) {
-		return fail(ERR_UNCONFIGURED, "Viewport GPU blit has not been submitted");
-	}
-	const Error error = capture_->wait_gpu_copy();
-	if (error != OK) {
-		return fail(error, "GPU copy completion wait failed: " + capture_->get_last_error());
+		return fail(error, "Direct viewport render wait failed: " + capture_->get_last_error());
 	}
 	output_frame_state_ = OutputFrameState::READY;
 	return OK;
@@ -262,10 +238,8 @@ Error EmbeddedLive2DApplication::publish_rgba_frame(uint64_t p_ready_timestamp_n
 				" snapshot_generation=" + itos(static_cast<int64_t>(last_snapshot_generation_)));
 	}
 	if (current_frame_end_of_stream_) {
-		const Error finish_error = capture_->finish();
-		if (finish_error != OK) {
-			return fail(finish_error, "DMA-BUF output finish failed: " + capture_->get_last_error());
-		}
+		// The host synchronously runs RGA after this callback returns. Keep the
+		// direct-render DMA-BUF alive until application shutdown completes.
 		output_finished_ = true;
 	}
 	current_frame_end_of_stream_ = false;

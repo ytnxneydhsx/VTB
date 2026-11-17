@@ -17,7 +17,7 @@ namespace vtb {
  * @brief 在专用所有者线程中消费 Live2D 快照并驱动同步 Godot 渲染主体。
  *
  * 本类负责线程、输入通道、帧调度、停止和异常传播。工作线程只独占
- * GodotRenderPipeline；Pipeline 内部管理 LibGodotInstance、GPU copy 和 RGBA 同步借用。
+ * GodotRenderPipeline；Pipeline 内部管理 LibGodotInstance、直接 DMA-BUF 渲染和 RGBA 同步借用。
  * input_channel_ 和 process_stop_requested_ 是对 VtbApplication::run() 局部对象的借用；
  * 调用方在本 Stage 完成 finish() 和析构前保持二者有效。
  */

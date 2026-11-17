@@ -8,6 +8,7 @@
 #include "core/string/print_string.h"
 #include "platform/linuxbsd/platform_egl.h"
 #include "platform/linuxbsd/platform_gl.h"
+#include "servers/rendering/rendering_server_globals.h"
 #include "servers/rendering/rendering_server.h"
 
 #include <drm/drm_fourcc.h>
@@ -161,10 +162,15 @@ public:
 		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
 		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
 		image_target_texture(GL_TEXTURE_2D, image);
-		glGenFramebuffers(1, &framebuffer);
-		glBindFramebuffer(GL_FRAMEBUFFER, framebuffer);
+		GLint previous_framebuffer = 0;
+		glGetIntegerv(GL_FRAMEBUFFER_BINDING, &previous_framebuffer);
+		GLuint validation_framebuffer = 0;
+		glGenFramebuffers(1, &validation_framebuffer);
+		glBindFramebuffer(GL_FRAMEBUFFER, validation_framebuffer);
 		glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, texture, 0);
 		const GLenum status = glCheckFramebufferStatus(GL_FRAMEBUFFER);
+		glBindFramebuffer(GL_FRAMEBUFFER, static_cast<GLuint>(previous_framebuffer));
+		glDeleteFramebuffers(1, &validation_framebuffer);
 		if (status != GL_FRAMEBUFFER_COMPLETE) {
 			r_error = "DMA-BUF output framebuffer is incomplete: " + itos(static_cast<int64_t>(status));
 			return ERR_CANT_CREATE;
@@ -173,10 +179,6 @@ public:
 	}
 
 	void shutdown() {
-		if (framebuffer != 0) {
-			glDeleteFramebuffers(1, &framebuffer);
-			framebuffer = 0;
-		}
 		if (texture != 0) {
 			glDeleteTextures(1, &texture);
 			texture = 0;
@@ -187,7 +189,7 @@ public:
 		}
 	}
 
-	GLuint get_framebuffer() const { return framebuffer; }
+	GLuint get_texture() const { return texture; }
 
 private:
 	EGLDisplay display = EGL_NO_DISPLAY;
@@ -196,12 +198,11 @@ private:
 	EglDestroyImageKhrProc destroy_image = nullptr;
 	GlEglImageTargetTexture2DProc image_target_texture = nullptr;
 	GLuint texture = 0;
-	GLuint framebuffer = 0;
 };
 
 class FrameSlot final {
 public:
-	enum class State { FREE, RESERVED, COPIED, READY };
+	enum class State { FREE, READY };
 
 	FrameSlot() = default;
 	~FrameSlot() = default;
@@ -221,10 +222,9 @@ public:
 
 	int fd() const { return rgba_buffer.get_fd(); }
 	size_t size() const { return rgba_buffer.get_size(); }
-	GLuint framebuffer() const { return target.get_framebuffer(); }
+	GLuint texture() const { return target.get_texture(); }
 
 	State state = State::FREE;
-	GLuint source_texture = 0;
 	int frame_index = -1;
 	bool end_of_stream = false;
 
@@ -244,8 +244,9 @@ public:
 	OpenVTRgbaFramePipeline(OpenVTRgbaFramePipeline &&) = delete;
 	OpenVTRgbaFramePipeline &operator=(OpenVTRgbaFramePipeline &&) = delete;
 
-	Error initialize(const vtb::RgbaFrameSink &p_sink, int p_width, int p_height,
-			int p_fps, int p_total_frames, String &r_error) {
+	Error initialize(const vtb::RgbaFrameSink &p_sink, RID p_viewport,
+			int p_width, int p_height, int p_fps, int p_total_frames,
+			String &r_error) {
 		width = p_width;
 		height = p_height;
 		fps = p_fps;
@@ -256,9 +257,24 @@ public:
 		if (error != OK) {
 			return error;
 		}
-		glGenFramebuffers(1, &source_framebuffer);
-		if (source_framebuffer == 0) {
-			r_error = "failed to allocate source framebuffer";
+		const RID render_target = RenderingServer::get_singleton()->viewport_get_render_target(p_viewport);
+		if (!render_target.is_valid()) {
+			r_error = "Godot viewport render target is invalid";
+			return ERR_INVALID_DATA;
+		}
+		external_texture = RSG::texture_storage->texture_create_from_native_handle(
+				RSE::TEXTURE_TYPE_2D, Image::FORMAT_RGBA8,
+				static_cast<uint64_t>(slot.texture()), width, height, 1);
+		if (!external_texture.is_valid()) {
+			r_error = "failed to wrap RGBA DMA-BUF texture for Godot";
+			return ERR_CANT_CREATE;
+		}
+		viewport_render_target = render_target;
+		RSG::texture_storage->render_target_set_override(
+				viewport_render_target, external_texture, RID(), RID(), RID());
+		if (RSG::texture_storage->render_target_get_override_color(
+					viewport_render_target) != external_texture) {
+			r_error = "Godot rejected the RGBA DMA-BUF color attachment";
 			return ERR_CANT_CREATE;
 		}
 		rgba_sink = p_sink;
@@ -266,11 +282,11 @@ public:
 		initialized = true;
 		print_line(vformat("OPENVT_RGBA_CONFIG width=%d height=%d fps=%d frames=%d rgba_fd=%d rgba_stride=%d heap=%s",
 				width, height, fps, total_frames, slot.fd(), rgba_stride, DMA_HEAP_PATH));
-		print_line("OPENVT_RGBA_PIPELINE steps=acquire_viewport_texture,blit_viewport_texture,wait_gpu_copy,publish_rgba_frame boundary=rgba metrics=host");
+		print_line("OPENVT_RGBA_PIPELINE steps=direct_viewport_render,wait_gpu_render,publish_rgba_frame boundary=rgba metrics=host");
 		return OK;
 	}
 
-	Error acquire(GLuint p_texture, int p_frame_index, bool p_eos, String &r_error) {
+	Error wait_for_render(int p_frame_index, bool p_eos, String &r_error) {
 		if (!initialized || pipeline_error != OK || !accepting_frames) {
 			r_error = pipeline_error_message;
 			if (r_error.is_empty()) {
@@ -281,60 +297,21 @@ public:
 			}
 			return ERR_UNAVAILABLE;
 		}
-		if (p_texture == 0 || slot.state != FrameSlot::State::FREE) {
-			r_error = "RGBA texture or slot state is invalid";
+		if (slot.state != FrameSlot::State::FREE) {
+			r_error = "RGBA DMA-BUF is still borrowed by the previous frame";
 			return ERR_BUSY;
 		}
-		slot.state = FrameSlot::State::RESERVED;
-		slot.source_texture = p_texture;
 		slot.frame_index = p_frame_index;
 		slot.end_of_stream = p_eos;
-		++acquired_frames;
+		glFinish();
+		if (glGetError() != GL_NO_ERROR) {
+			return fail(FAILED, "Godot render completion wait failed", r_error);
+		}
+		slot.state = FrameSlot::State::READY;
+		++rendered_frames;
 		if (p_eos) {
 			accepting_frames = false;
 		}
-		return OK;
-	}
-
-	Error blit(String &r_error) {
-		if (slot.state != FrameSlot::State::RESERVED) {
-			return fail(ERR_UNCONFIGURED, "RGBA frame was not acquired", r_error);
-		}
-		GLint previous_read = 0;
-		GLint previous_draw = 0;
-		GLint previous_texture = 0;
-		glGetIntegerv(GL_READ_FRAMEBUFFER_BINDING, &previous_read);
-		glGetIntegerv(GL_DRAW_FRAMEBUFFER_BINDING, &previous_draw);
-		glGetIntegerv(GL_TEXTURE_BINDING_2D, &previous_texture);
-		glBindFramebuffer(GL_READ_FRAMEBUFFER, source_framebuffer);
-		glFramebufferTexture2D(GL_READ_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
-				GL_TEXTURE_2D, slot.source_texture, 0);
-		const GLenum source_status = glCheckFramebufferStatus(GL_READ_FRAMEBUFFER);
-		if (source_status != GL_FRAMEBUFFER_COMPLETE) {
-			restore_gl_state(previous_read, previous_draw, previous_texture);
-			return fail(ERR_INVALID_DATA, "Godot source framebuffer is incomplete", r_error);
-		}
-		glBindFramebuffer(GL_DRAW_FRAMEBUFFER, slot.framebuffer());
-		glBlitFramebuffer(0, 0, width, height, 0, 0, width, height,
-				GL_COLOR_BUFFER_BIT, GL_NEAREST);
-		const GLenum gl_error = glGetError();
-		restore_gl_state(previous_read, previous_draw, previous_texture);
-		if (gl_error != GL_NO_ERROR) {
-			return fail(FAILED, "GPU blit into RGBA DMA-BUF failed", r_error);
-		}
-		slot.state = FrameSlot::State::COPIED;
-		return OK;
-	}
-
-	Error wait_for_gpu(String &r_error) {
-		if (slot.state != FrameSlot::State::COPIED) {
-			return fail(ERR_UNCONFIGURED, "GPU blit was not submitted", r_error);
-		}
-		glFinish();
-		if (glGetError() != GL_NO_ERROR) {
-			return fail(FAILED, "GPU completion wait failed", r_error);
-		}
-		slot.state = FrameSlot::State::READY;
 		return OK;
 	}
 
@@ -380,7 +357,7 @@ public:
 			r_error = pipeline_error_message;
 			return pipeline_error;
 		}
-		if (slot.state != FrameSlot::State::FREE || delivered_frames != acquired_frames) {
+		if (slot.state != FrameSlot::State::FREE || delivered_frames != rendered_frames) {
 			r_error = "RGBA frame sequence ended before publication";
 			return FAILED;
 		}
@@ -397,9 +374,14 @@ public:
 
 	void shutdown() {
 		accepting_frames = false;
-		if (source_framebuffer != 0) {
-			glDeleteFramebuffers(1, &source_framebuffer);
-			source_framebuffer = 0;
+		if (viewport_render_target.is_valid()) {
+			RSG::texture_storage->render_target_set_override(
+					viewport_render_target, RID(), RID(), RID(), RID());
+			viewport_render_target = RID();
+		}
+		if (external_texture.is_valid()) {
+			RSG::texture_storage->texture_free(external_texture);
+			external_texture = RID();
 		}
 		initialized = false;
 	}
@@ -416,15 +398,8 @@ private:
 
 	void release_slot() {
 		slot.state = FrameSlot::State::FREE;
-		slot.source_texture = 0;
 		slot.frame_index = -1;
 		slot.end_of_stream = false;
-	}
-
-	void restore_gl_state(GLint p_read, GLint p_draw, GLint p_texture) {
-		glBindFramebuffer(GL_READ_FRAMEBUFFER, static_cast<GLuint>(p_read));
-		glBindFramebuffer(GL_DRAW_FRAMEBUFFER, static_cast<GLuint>(p_draw));
-		glBindTexture(GL_TEXTURE_2D, static_cast<GLuint>(p_texture));
 	}
 
 	int width = 0;
@@ -436,12 +411,13 @@ private:
 	bool finished = false;
 	bool accepting_frames = false;
 	bool end_of_stream_delivered = false;
-	GLuint source_framebuffer = 0;
+	RID viewport_render_target;
+	RID external_texture;
 	FrameSlot slot;
 	vtb::RgbaFrameSink rgba_sink;
 	Error pipeline_error = OK;
 	String pipeline_error_message;
-	int acquired_frames = 0;
+	int rendered_frames = 0;
 	int delivered_frames = 0;
 };
 
@@ -452,26 +428,25 @@ OpenVTDmaBufCapture::~OpenVTDmaBufCapture() {
 }
 
 void OpenVTDmaBufCapture::_bind_methods() {
-	ClassDB::bind_method(D_METHOD("acquire_viewport_texture", "viewport", "frame_index", "end_of_stream"), &OpenVTDmaBufCapture::acquire_viewport_texture);
-	ClassDB::bind_method(D_METHOD("blit_viewport_texture"), &OpenVTDmaBufCapture::blit_viewport_texture);
-	ClassDB::bind_method(D_METHOD("wait_gpu_copy"), &OpenVTDmaBufCapture::wait_gpu_copy);
+	ClassDB::bind_method(D_METHOD("wait_gpu_render", "frame_index", "end_of_stream"), &OpenVTDmaBufCapture::wait_gpu_render);
 	ClassDB::bind_method(D_METHOD("publish_rgba_frame", "timestamp_ns"), &OpenVTDmaBufCapture::publish_rgba_frame);
 	ClassDB::bind_method(D_METHOD("finish"), &OpenVTDmaBufCapture::finish);
 	ClassDB::bind_method(D_METHOD("get_last_error"), &OpenVTDmaBufCapture::get_last_error);
 }
 
 Error OpenVTDmaBufCapture::configure(const vtb::RgbaFrameSink &p_sink,
-		int p_width, int p_height, int p_fps, int p_total_frames) {
+		RID p_viewport, int p_width, int p_height, int p_fps, int p_total_frames) {
 	if (configured || pipeline != nullptr) {
 		operation_error_message = "capture is already configured";
 		return ERR_ALREADY_IN_USE;
 	}
-	if (p_sink.context == nullptr || p_sink.submit == nullptr ||
+	if (p_sink.context == nullptr || p_sink.submit == nullptr || !p_viewport.is_valid() ||
 			p_width <= 0 || p_height <= 0 || p_fps <= 0 || p_total_frames < 0) {
 		operation_error_message = "invalid RGBA capture configuration";
 		return ERR_INVALID_PARAMETER;
 	}
 	rgba_sink = p_sink;
+	viewport = p_viewport;
 	width = p_width;
 	height = p_height;
 	fps = p_fps;
@@ -479,52 +454,25 @@ Error OpenVTDmaBufCapture::configure(const vtb::RgbaFrameSink &p_sink,
 	configured = true;
 	finished = false;
 	operation_error_message = String();
-	return OK;
-}
-
-Error OpenVTDmaBufCapture::acquire_viewport_texture(
-		RID p_viewport, int p_frame_index, bool p_end_of_stream) {
-	if (!configured || finished || !p_viewport.is_valid()) {
-		operation_error_message = "RGBA capture or viewport is invalid";
-		return ERR_UNCONFIGURED;
-	}
-	if (pipeline == nullptr) {
-		operation_error = OK;
-		RenderingServer::get_singleton()->call_on_render_thread(
-				callable_mp(this, &OpenVTDmaBufCapture::_initialize_pipeline_render_thread));
-		operation_finished.wait();
-		if (operation_error != OK) {
-			return operation_error;
-		}
-	}
 	operation_error = OK;
 	RenderingServer::get_singleton()->call_on_render_thread(
-			callable_mp(this, &OpenVTDmaBufCapture::_acquire_viewport_texture_render_thread)
-					.bind(p_viewport, p_frame_index, p_end_of_stream));
+			callable_mp(this, &OpenVTDmaBufCapture::_initialize_pipeline_render_thread));
 	operation_finished.wait();
+	if (operation_error != OK) {
+		configured = false;
+	}
 	return operation_error;
 }
 
-Error OpenVTDmaBufCapture::blit_viewport_texture() {
+Error OpenVTDmaBufCapture::wait_gpu_render(int p_frame_index, bool p_end_of_stream) {
 	if (!configured || finished || pipeline == nullptr) {
-		operation_error_message = "RGBA frame was not acquired";
+		operation_error_message = "RGBA direct render target is unavailable";
 		return ERR_UNCONFIGURED;
 	}
 	operation_error = OK;
 	RenderingServer::get_singleton()->call_on_render_thread(
-			callable_mp(this, &OpenVTDmaBufCapture::_blit_viewport_texture_render_thread));
-	operation_finished.wait();
-	return operation_error;
-}
-
-Error OpenVTDmaBufCapture::wait_gpu_copy() {
-	if (!configured || finished || pipeline == nullptr) {
-		operation_error_message = "RGBA GPU blit was not submitted";
-		return ERR_UNCONFIGURED;
-	}
-	operation_error = OK;
-	RenderingServer::get_singleton()->call_on_render_thread(
-			callable_mp(this, &OpenVTDmaBufCapture::_wait_gpu_copy_render_thread));
+			callable_mp(this, &OpenVTDmaBufCapture::_wait_gpu_render_thread)
+					.bind(p_frame_index, p_end_of_stream));
 	operation_finished.wait();
 	return operation_error;
 }
@@ -565,7 +513,8 @@ String OpenVTDmaBufCapture::get_last_error() const {
 void OpenVTDmaBufCapture::_initialize_pipeline_render_thread() {
 	String message;
 	pipeline = memnew(OpenVTRgbaFramePipeline);
-	const Error error = pipeline->initialize(rgba_sink, width, height, fps, total_frames, message);
+	const Error error = pipeline->initialize(
+			rgba_sink, viewport, width, height, fps, total_frames, message);
 	if (error != OK) {
 		memdelete(pipeline);
 		pipeline = nullptr;
@@ -573,28 +522,11 @@ void OpenVTDmaBufCapture::_initialize_pipeline_render_thread() {
 	_complete_operation(error, message);
 }
 
-void OpenVTDmaBufCapture::_acquire_viewport_texture_render_thread(
-		RID p_viewport, int p_frame_index, bool p_end_of_stream) {
-	const RID texture = RenderingServer::get_singleton()->viewport_get_texture(p_viewport);
-	if (!texture.is_valid()) {
-		_complete_operation(ERR_INVALID_DATA, "Godot viewport texture RID is invalid");
-		return;
-	}
-	const uint64_t handle = RenderingServer::get_singleton()->texture_get_native_handle(texture, false);
+void OpenVTDmaBufCapture::_wait_gpu_render_thread(
+		int p_frame_index, bool p_end_of_stream) {
 	String message;
-	const Error error = pipeline->acquire(
-			static_cast<GLuint>(handle), p_frame_index, p_end_of_stream, message);
-	_complete_operation(error, message);
-}
-
-void OpenVTDmaBufCapture::_blit_viewport_texture_render_thread() {
-	String message;
-	_complete_operation(pipeline->blit(message), message);
-}
-
-void OpenVTDmaBufCapture::_wait_gpu_copy_render_thread() {
-	String message;
-	_complete_operation(pipeline->wait_for_gpu(message), message);
+	_complete_operation(
+			pipeline->wait_for_render(p_frame_index, p_end_of_stream, message), message);
 }
 
 void OpenVTDmaBufCapture::_publish_rgba_frame_render_thread(uint64_t p_timestamp_ns) {

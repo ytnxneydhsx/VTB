@@ -33,13 +33,11 @@ public:
     void submit(const Live2DTrackingSnapshot& snapshot);
     void prepare_frame(std::uint64_t timestamp_ns);
     bool iterate();
-    void acquire_viewport_texture();
-    void blit_viewport_texture();
-    void wait_gpu_copy();
+    void wait_gpu_render();
     /**
      * @brief 完成本帧发布并返回可同步借用的 RGBA DMA-BUF 描述。
      *
-     * 返回内容在下一次 acquire_viewport_texture() 或本实例销毁前保持不变。
+     * 返回内容在下一次 iterate() 或本实例销毁前保持不变。
      */
     RgbaFrameView publish_rgba_frame(std::uint64_t timestamp_ns);
     bool should_stop() const noexcept;

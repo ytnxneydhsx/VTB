@@ -22,13 +22,12 @@ public:
 
 	Error configure(
 			const vtb::RgbaFrameSink &p_sink,
+			RID p_viewport,
 			int p_width,
 			int p_height,
 			int p_fps,
 			int p_total_frames);
-	Error acquire_viewport_texture(RID p_viewport, int p_frame_index, bool p_end_of_stream);
-	Error blit_viewport_texture();
-	Error wait_gpu_copy();
+	Error wait_gpu_render(int p_frame_index, bool p_end_of_stream);
 	Error publish_rgba_frame(uint64_t p_timestamp_ns);
 	Error finish();
 	String get_last_error() const;
@@ -38,14 +37,13 @@ protected:
 
 private:
 	void _initialize_pipeline_render_thread();
-	void _acquire_viewport_texture_render_thread(RID p_viewport, int p_frame_index, bool p_end_of_stream);
-	void _blit_viewport_texture_render_thread();
-	void _wait_gpu_copy_render_thread();
+	void _wait_gpu_render_thread(int p_frame_index, bool p_end_of_stream);
 	void _publish_rgba_frame_render_thread(uint64_t p_timestamp_ns);
 	void _finish_render_thread();
 	void _complete_operation(Error p_error, const String &p_message);
 
 	vtb::RgbaFrameSink rgba_sink;
+	RID viewport;
 	int width = 0;
 	int height = 0;
 	int fps = 0;

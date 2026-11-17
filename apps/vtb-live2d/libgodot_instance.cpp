@@ -157,7 +157,7 @@ public:
         embedded_config.total_frames = render_config_.total_frames;
         application_cleanup_required_ = true;
         const int application_result =
-            openvt_libgodot_application_initialize_v6(&embedded_config);
+            openvt_libgodot_application_initialize_v7(&embedded_config);
         if (application_result != 0) {
             throw_application_error(
                 "C++ Live2D application initialization failed",
@@ -211,22 +211,10 @@ public:
         return result > 0;
     }
 
-    void acquire_viewport_texture() {
+    void wait_gpu_render() {
         call_application_step(
-            openvt_libgodot_application_acquire_viewport_texture(),
-            "Viewport texture acquisition failed");
-    }
-
-    void blit_viewport_texture() {
-        call_application_step(
-            openvt_libgodot_application_blit_viewport_texture(),
-            "Viewport GPU blit failed");
-    }
-
-    void wait_gpu_copy() {
-        call_application_step(
-            openvt_libgodot_application_wait_gpu_copy(),
-            "GPU copy completion wait failed");
+            openvt_libgodot_application_wait_gpu_render(),
+            "Direct viewport render completion wait failed");
     }
 
     RgbaFrameView publish_rgba_frame(std::uint64_t timestamp_ns) {
@@ -354,16 +342,8 @@ bool LibGodotInstance::iterate() {
     return impl_->iterate();
 }
 
-void LibGodotInstance::acquire_viewport_texture() {
-    impl_->acquire_viewport_texture();
-}
-
-void LibGodotInstance::blit_viewport_texture() {
-    impl_->blit_viewport_texture();
-}
-
-void LibGodotInstance::wait_gpu_copy() {
-    impl_->wait_gpu_copy();
+void LibGodotInstance::wait_gpu_render() {
+    impl_->wait_gpu_render();
 }
 
 RgbaFrameView LibGodotInstance::publish_rgba_frame(

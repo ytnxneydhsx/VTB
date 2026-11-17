@@ -1,5 +1,5 @@
 PROJECT_NAME           = "VTB C++ 专题说明书"
-PROJECT_BRIEF          = "视频输入与人脸跟踪的对象关系、运行时序和资源生命周期"
+PROJECT_BRIEF          = "视频输入、人脸跟踪、Godot 渲染与 NV12 转换的对象关系、运行时序和资源生命周期"
 OUTPUT_DIRECTORY       = build/docs/video-input-doxygen
 
 OUTPUT_LANGUAGE        = Chinese
@@ -24,6 +24,8 @@ INPUT                  = include/vtb/video \
                          include/vtb/render/nv12_frame_sink.hpp \
                          include/vtb/render/rgba_frame_sink.hpp \
                          apps/vtb-live2d \
+                         experiments/godot/embedded-runtime/module \
+                         experiments/godot/openvt-dmabuf-capture/module/openvt_dmabuf_capture \
                          src/messaging \
                          src/video \
                          src/v4l2_camera.cpp \
@@ -37,8 +39,9 @@ INPUT                  = include/vtb/video \
                          src/face/face_frame_consumer.cpp \
                          src/live2d \
                          docs/video-input-groups.dox \
-                         docs/face-tracking-groups.dox
-FILE_PATTERNS          = *.hpp *.cpp *.dox
+                         docs/face-tracking-groups.dox \
+                         docs/live2d-render-groups.dox
+FILE_PATTERNS          = *.hpp *.h *.cpp *.dox
 RECURSIVE              = YES
 
 EXTRACT_ALL            = YES

@@ -45,9 +45,7 @@ public:
 			uint64_t p_produced_timestamp_ns,
 			uint64_t p_snapshot_generation);
 	Error prepare_frame(uint64_t p_monotonic_timestamp_ns);
-	Error acquire_viewport_texture();
-	Error blit_viewport_texture();
-	Error wait_gpu_copy();
+	Error wait_gpu_render();
 	Error publish_rgba_frame(uint64_t p_ready_timestamp_ns);
 	Error shutdown();
 
@@ -58,8 +56,6 @@ public:
 private:
 	enum class OutputFrameState {
 		IDLE,
-		ACQUIRED,
-		BLITTED,
 		READY,
 	};
 

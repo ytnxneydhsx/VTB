@@ -29,7 +29,7 @@ V4L2 CameraSource (MMAP / DQBUF / QBUF)
       └─ leaky queue → videorate → mppjpegenc → jpegparse → uvcsink/UVC
 ```
 
-Godot/Ayagami、Viewport 纹理访问和 GPU copy 位于 LibGodot/OpenVT；RGA、GStreamer 与输出
+Godot/Ayagami、外部 RGBA DMA-BUF 颜色附件和 GPU 完成等待位于 LibGodot/OpenVT；RGA、GStreamer 与输出
 协议位于宿主。`vtb-live2d` 可执行文件直接链接 V4L2 视频输入、OpenCV PnP 几何计算、
 RKNN、Rockchip RGA、GStreamer 和三个流水线 Stage；MPP 由 Rockchip GStreamer 插件间接
 引入。LibGodot 共享库不编译摄像头、RKNN 模型、几何估计、人脸管线、RGA、MPP、
@@ -72,8 +72,8 @@ GStreamer、指标报告或输出源码，也不链接 RGA/MPP/GStreamer。
   `Live2DFaceMapper`。
 - `OpenVTLive2DFrameInput`：宿主与 LibGodot 之间的固定数值帧对象，只包含十个
   Live2D 参数、取景状态、结果产生时间戳和 snapshot_generation；通过 C linkage 函数提交。
-- `EmbeddedLive2DApplication`：Godot 内部渲染编排，只消费参数帧并驱动 Ayagami、Viewport
-  纹理取得、GPU blit、GPU wait 和 RGBA 交付。
+- `EmbeddedLive2DApplication`：Godot 内部渲染编排，只消费参数帧并驱动 Ayagami、外部
+  DMA-BUF 颜色附件、GPU render wait 和 RGBA 交付。
 
 FaceTrackingStage 不访问 Godot 对象。它调用已配置的 `Live2DTrackingPipeline` 取得映射结果，
 再把值快照发布到纯 C++ Channel；
@@ -148,7 +148,7 @@ Godot 内置模块只需要 `OPENVT_VTB_SOURCE_ROOT`、`OPENVT_BOARD_SYSROOT` �
 `VTB_ENABLE_OPENCV_FACE_PIPELINE`、`VTB_ENABLE_RKNN_FACE`、`VTB_ENABLE_RGA_FACE`、
 `VTB_ENABLE_RTSP_OUTPUT`。两个推理后端关闭时，通用会话与消费适配仍可独立编译。
 
-ABI v6 使用 `openvt_libgodot_application_initialize_v6()`、版本查询和配置尺寸校验，
+ABI v7 使用 `openvt_libgodot_application_initialize_v7()`、版本查询和配置尺寸校验，
 只把 `RgbaFrameSink` 和输出几何传入 LibGodot。渲染分段计时和 JSONL 报告器由宿主
 `GodotRenderPipeline` 持有。
 宿主和 LibGodot 必须成对构建、成对部署。回调契约与关闭顺序见 [模块边界](module-boundaries.md)。
@@ -175,7 +175,7 @@ MPP 编码和 RTSP 写出均为 300，丢弃和错误均为 0，渲染吞吐为 
 该数值不包含摄像头曝光、编码、网络和浏览器解码，不能当作端到端延迟。取证完成后
 用 `SIGTERM` 停止持续运行，退出码 143 来自本次主动清理。
 
-历史构建记录不覆盖 ABI v6；本轮以 [模块边界](module-boundaries.md) 的验证范围为准，尚未在
+历史构建记录不覆盖 ABI v7；本轮以 [模块边界](module-boundaries.md) 的验证范围为准，尚未在
 RK3588 上运行。仍需完成新边界的板端回归、C++/Python 数值精度对照、长时间
 稳定性和摄像头到浏览器的关联时间戳端到端延迟测量。
 
