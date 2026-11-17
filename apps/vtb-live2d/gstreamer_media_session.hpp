@@ -25,8 +25,11 @@ public:
  * @brief 以 GStreamer 管理 NV12 分支、MPP 编码和 RTSP/WebRTC/UVC 输出。
  *
  * 输入 Nv12FrameLease 被绑定到 DMA-BUF GstMemory。raw appsrc 后的 tee 和有界
- * leaky queue 分别驱动 mpph264enc 与 mppjpegenc。H.264 由进程内
- * GstRTSPServer 共享给客户端，启用 WebRTC 时同时供给 webrtcsink。
+ * leaky queue 分别驱动 mpph264enc 与 mppjpegenc。H.264 只向进程内
+ * GstRTSPServer 当前处于活动状态的 shared media 提交一次，再由
+ * GstRTSPStream 分发给多个客户端；最后一个 RTSP 客户端离开后由 media
+ * factory 回收该实例，后续连接创建新的共享实例。启用 WebRTC 时同时供给
+ * webrtcsink。
  * MJPEG 交给 UVC 元件。最后一个 GstMemory 引用释放时，
  * Lease 析构并把 RGA 目标槽位归还缓冲池。
  */

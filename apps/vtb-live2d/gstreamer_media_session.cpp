@@ -1,6 +1,5 @@
 #include "gstreamer_media_session.hpp"
 
-#include <algorithm>
 #include <atomic>
 #include <cerrno>
 #include <chrono>
@@ -19,7 +18,6 @@
 #include <string>
 #include <thread>
 #include <utility>
-#include <vector>
 
 #include <gst/allocators/gstdmabuf.h>
 #include <gst/app/gstappsink.h>
@@ -50,52 +48,6 @@ public:
     std::string address;
     std::string service;
     std::string mount_path;
-};
-
-class RtspClientStream final {
-public:
-    RtspClientStream(GstRTSPMedia* media, GstElement* source)
-        : media_(GST_RTSP_MEDIA(gst_object_ref(media))),
-          source_(GST_ELEMENT(gst_object_ref(source))) {}
-
-    ~RtspClientStream() {
-        gst_object_unref(source_);
-        gst_object_unref(media_);
-    }
-
-    RtspClientStream(const RtspClientStream&) = delete;
-    RtspClientStream& operator=(const RtspClientStream&) = delete;
-    RtspClientStream(RtspClientStream&&) = delete;
-    RtspClientStream& operator=(RtspClientStream&&) = delete;
-
-    GstRTSPMedia* media() const noexcept { return media_; }
-    GstElement* source() const noexcept { return source_; }
-
-    bool prepare_buffer(bool keyframe) noexcept {
-        if (waiting_for_keyframe_) {
-            if (!keyframe) {
-                return false;
-            }
-            waiting_for_keyframe_ = false;
-        }
-        return true;
-    }
-
-    GstClockTime take_timestamp(GstClockTime duration) noexcept {
-        const GstClockTime result = next_timestamp_;
-        if (GST_CLOCK_TIME_IS_VALID(duration) && duration > 0) {
-            next_timestamp_ += duration;
-        } else {
-            next_timestamp_ += GST_SECOND / 60;
-        }
-        return result;
-    }
-
-private:
-    GstRTSPMedia* media_ = nullptr;
-    GstElement* source_ = nullptr;
-    GstClockTime next_timestamp_ = 0;
-    bool waiting_for_keyframe_ = true;
 };
 
 class Nv12LeaseHolder final {
@@ -486,7 +438,19 @@ private:
         GstRTSPMedia* media,
         gpointer user_data) noexcept {
         auto& self = *static_cast<Impl*>(user_data);
-        self.release_rtsp_media(media);
+        self.release_rtsp_shared_stream(media);
+    }
+
+    static void rtsp_appsrc_need_data_callback(
+        GstAppSrc* source,
+        guint,
+        gpointer user_data) noexcept {
+        auto& self = *static_cast<Impl*>(user_data);
+        try {
+            self.prime_rtsp_shared_stream(source);
+        } catch (...) {
+            self.remember_failure(std::current_exception());
+        }
     }
 
     static GstPadProbeReturn mjpeg_output_probe(
@@ -774,7 +738,7 @@ private:
             "queue max-size-buffers=8 max-size-bytes=0 max-size-time=0 "
             "leaky=downstream ! rtph264pay name=pay0 pt=96 "
             "config-interval=-1 )");
-        gst_rtsp_media_factory_set_shared(factory, FALSE);
+        gst_rtsp_media_factory_set_shared(factory, TRUE);
         gst_rtsp_media_factory_set_stop_on_disconnect(factory, FALSE);
         gst_rtsp_media_factory_set_suspend_mode(
             factory, GST_RTSP_SUSPEND_MODE_NONE);
@@ -834,7 +798,6 @@ private:
         configure_appsrc(source, kEncodedQueueCapacity);
 
         GstCaps* caps = nullptr;
-        GstBuffer* keyframe = nullptr;
         {
             std::lock_guard<std::mutex> lock(rtsp_mutex_);
             if (h264_caps_ == nullptr || latest_keyframe_ == nullptr) {
@@ -843,58 +806,133 @@ private:
                     "RTSP media configured before an H.264 keyframe was available");
             }
             caps = gst_caps_ref(h264_caps_);
-            keyframe = gst_buffer_ref(latest_keyframe_);
+            if (rtsp_media_ != nullptr || rtsp_source_ != nullptr) {
+                gst_caps_unref(caps);
+                gst_object_unref(source);
+                throw std::logic_error(
+                    "Shared RTSP media was configured more than once");
+            }
         }
-        const auto client =
-            std::make_shared<RtspClientStream>(media, source);
-        client->prepare_buffer(true);
         gst_app_src_set_caps(GST_APP_SRC(source), caps);
         gst_caps_unref(caps);
-        GstBuffer* initial_buffer = gst_buffer_copy(keyframe);
-        gst_buffer_unref(keyframe);
-        if (initial_buffer == nullptr) {
-            release_rtsp_media(media);
-            gst_object_unref(source);
-            throw std::runtime_error(
-                "Failed to copy the cached H.264 keyframe for RTSP");
-        }
-        const GstClockTime initial_timestamp =
-            client->take_timestamp(GST_BUFFER_DURATION(initial_buffer));
-        GST_BUFFER_PTS(initial_buffer) = initial_timestamp;
-        GST_BUFFER_DTS(initial_buffer) = initial_timestamp;
-        const GstFlowReturn initial_result = gst_app_src_push_buffer(
-            GST_APP_SRC(source), initial_buffer);
-        if (initial_result != GST_FLOW_OK) {
-            gst_object_unref(source);
-            throw std::runtime_error(
-                std::string("Failed to prime RTSP client with H.264 keyframe: ") +
-                gst_flow_get_name(initial_result));
-        }
-        {
-            std::lock_guard<std::mutex> lock(rtsp_mutex_);
-            rtsp_clients_.push_back(client);
-        }
+
+        GstAppSrcCallbacks callbacks{};
+        callbacks.need_data = rtsp_appsrc_need_data_callback;
+        gst_app_src_set_callbacks(
+            GST_APP_SRC(source), &callbacks, this, nullptr);
         g_signal_connect(
             media,
             "unprepared",
             G_CALLBACK(rtsp_media_unprepared_callback),
             this);
-        gst_object_unref(source);
-        rtsp_pushed_frames_.fetch_add(1);
+        {
+            std::lock_guard<std::mutex> lock(rtsp_mutex_);
+            rtsp_media_ = GST_RTSP_MEDIA(gst_object_ref(media));
+            rtsp_source_ = source;
+        }
         client_idr_requested_.store(true);
-        std::cout << "VTB_RTSP_MEDIA_CONFIGURED\n";
+        std::cout << "VTB_RTSP_MEDIA_CONFIGURED shared=1 reusable=0\n";
     }
 
-    void release_rtsp_media(GstRTSPMedia* media) noexcept {
-        std::lock_guard<std::mutex> lock(rtsp_mutex_);
-        rtsp_clients_.erase(
-            std::remove_if(
-                rtsp_clients_.begin(),
-                rtsp_clients_.end(),
-                [media](const std::shared_ptr<RtspClientStream>& client) {
-                    return client->media() == media;
-                }),
-            rtsp_clients_.end());
+    void release_rtsp_shared_stream(GstRTSPMedia* media) noexcept {
+        GstRTSPMedia* retained_media = nullptr;
+        GstElement* source = nullptr;
+        {
+            std::lock_guard<std::mutex> lock(rtsp_mutex_);
+            if (rtsp_media_ != media) {
+                return;
+            }
+            retained_media = rtsp_media_;
+            rtsp_media_ = nullptr;
+            source = rtsp_source_;
+            rtsp_source_ = nullptr;
+        }
+        {
+            std::lock_guard<std::mutex> lock(rtsp_push_mutex_);
+            rtsp_next_timestamp_ = 0;
+            rtsp_waiting_for_keyframe_ = true;
+        }
+        if (source != nullptr) {
+            GstAppSrcCallbacks callbacks{};
+            gst_app_src_set_callbacks(
+                GST_APP_SRC(source), &callbacks, nullptr, nullptr);
+            gst_object_unref(source);
+        }
+        if (retained_media != nullptr) {
+            gst_object_unref(retained_media);
+        }
+        client_idr_requested_.store(true);
+        std::cout << "VTB_RTSP_MEDIA_RELEASED shared=1 reusable=0\n";
+    }
+
+    GstFlowReturn push_rtsp_buffer(
+        GstAppSrc* source,
+        GstBuffer* buffer,
+        bool keyframe,
+        bool preroll_request) {
+        std::lock_guard<std::mutex> lock(rtsp_push_mutex_);
+        if (preroll_request && !rtsp_waiting_for_keyframe_) {
+            return GST_FLOW_OK;
+        }
+        if (rtsp_waiting_for_keyframe_ && !keyframe) {
+            rtsp_waiting_keyframe_drops_.fetch_add(1);
+            return GST_FLOW_OK;
+        }
+
+        GstBuffer* output_buffer = gst_buffer_copy(buffer);
+        if (output_buffer == nullptr) {
+            throw std::runtime_error(
+                "Failed to copy H.264 buffer metadata for shared RTSP media");
+        }
+        GST_BUFFER_PTS(output_buffer) = rtsp_next_timestamp_;
+        GST_BUFFER_DTS(output_buffer) = rtsp_next_timestamp_;
+        const GstClockTime duration = GST_BUFFER_DURATION(output_buffer);
+        const GstFlowReturn result = gst_app_src_push_buffer(
+            source, output_buffer);
+        if (result == GST_FLOW_OK) {
+            if (GST_CLOCK_TIME_IS_VALID(duration) && duration > 0) {
+                rtsp_next_timestamp_ += duration;
+            } else {
+                rtsp_next_timestamp_ += GST_SECOND / 60;
+            }
+            if (keyframe) {
+                rtsp_waiting_for_keyframe_ = false;
+            }
+            rtsp_pushed_frames_.fetch_add(1);
+            return result;
+        }
+        if (result == GST_FLOW_FLUSHING || result == GST_FLOW_EOS ||
+            result == GST_FLOW_NOT_LINKED) {
+            rtsp_no_client_frames_.fetch_add(1);
+            return result;
+        }
+        throw std::runtime_error(
+            std::string("Failed to queue H.264 for shared RTSP media: ") +
+            gst_flow_get_name(result));
+    }
+
+    void prime_rtsp_shared_stream(GstAppSrc* source) {
+        GstCaps* caps = nullptr;
+        GstBuffer* keyframe = nullptr;
+        {
+            std::lock_guard<std::mutex> lock(rtsp_mutex_);
+            if (GST_ELEMENT(source) != rtsp_source_ || h264_caps_ == nullptr ||
+                latest_keyframe_ == nullptr) {
+                return;
+            }
+            caps = gst_caps_ref(h264_caps_);
+            keyframe = gst_buffer_ref(latest_keyframe_);
+        }
+        gst_app_src_set_caps(source, caps);
+        gst_caps_unref(caps);
+        try {
+            push_rtsp_buffer(source, keyframe, true, true);
+        } catch (...) {
+            gst_buffer_unref(keyframe);
+            throw;
+        }
+        gst_buffer_unref(keyframe);
+        client_idr_requested_.store(true);
     }
 
     GstFlowReturn publish_h264_sample(GstAppSink* sink) {
@@ -909,7 +947,8 @@ private:
             keyframe = !GST_BUFFER_FLAG_IS_SET(
                 sample_buffer, GST_BUFFER_FLAG_DELTA_UNIT);
         }
-        std::vector<std::pair<GstElement*, GstClockTime>> targets;
+        GstElement* target = nullptr;
+        GstCaps* target_caps = nullptr;
         bool server_ready = false;
         {
             std::lock_guard<std::mutex> lock(rtsp_mutex_);
@@ -917,20 +956,16 @@ private:
                 (h264_caps_ == nullptr ||
                  !gst_caps_is_equal(h264_caps_, sample_caps))) {
                 gst_caps_replace(&h264_caps_, sample_caps);
+                if (rtsp_source_ != nullptr) {
+                    target_caps = gst_caps_ref(h264_caps_);
+                }
             }
             if (sample_buffer != nullptr) {
                 if (keyframe) {
                     gst_buffer_replace(&latest_keyframe_, sample_buffer);
                 }
-                for (const auto& client : rtsp_clients_) {
-                    if (!client->prepare_buffer(keyframe)) {
-                        rtsp_waiting_keyframe_drops_.fetch_add(1);
-                        continue;
-                    }
-                    targets.emplace_back(
-                        GST_ELEMENT(gst_object_ref(client->source())),
-                        client->take_timestamp(
-                            GST_BUFFER_DURATION(sample_buffer)));
+                if (rtsp_source_ != nullptr) {
+                    target = GST_ELEMENT(gst_object_ref(rtsp_source_));
                 }
             }
             server_ready =
@@ -939,44 +974,31 @@ private:
         if (rtsp_server_ == nullptr && server_ready) {
             start_rtsp_server();
         }
-        if (targets.empty() || sample_buffer == nullptr) {
-            if (targets.empty()) {
-                rtsp_no_client_frames_.fetch_add(1);
+        if (target == nullptr || sample_buffer == nullptr) {
+            if (target_caps != nullptr) {
+                gst_caps_unref(target_caps);
             }
+            if (target != nullptr) {
+                gst_object_unref(target);
+            }
+            rtsp_no_client_frames_.fetch_add(1);
             gst_sample_unref(sample);
             return GST_FLOW_OK;
         }
-        std::string failure;
-        for (const auto& target : targets) {
-            GstBuffer* output_buffer = gst_buffer_copy(sample_buffer);
-            if (output_buffer == nullptr) {
-                gst_object_unref(target.first);
-                if (failure.empty()) {
-                    failure =
-                        "Failed to copy H.264 buffer metadata for RTSP server";
-                }
-                continue;
-            }
-            GST_BUFFER_PTS(output_buffer) = target.second;
-            GST_BUFFER_DTS(output_buffer) = target.second;
-            const GstFlowReturn result = gst_app_src_push_buffer(
-                GST_APP_SRC(target.first), output_buffer);
-            gst_object_unref(target.first);
-            if (result == GST_FLOW_OK) {
-                rtsp_pushed_frames_.fetch_add(1);
-                continue;
-            }
-            if (result != GST_FLOW_FLUSHING && result != GST_FLOW_EOS &&
-                result != GST_FLOW_NOT_LINKED && failure.empty()) {
-                failure =
-                    std::string("Failed to queue H.264 for RTSP server: ") +
-                    gst_flow_get_name(result);
-            }
+        if (target_caps != nullptr) {
+            gst_app_src_set_caps(GST_APP_SRC(target), target_caps);
+            gst_caps_unref(target_caps);
         }
+        try {
+            push_rtsp_buffer(
+                GST_APP_SRC(target), sample_buffer, keyframe, false);
+        } catch (...) {
+            gst_object_unref(target);
+            gst_sample_unref(sample);
+            throw;
+        }
+        gst_object_unref(target);
         gst_sample_unref(sample);
-        if (!failure.empty()) {
-            throw std::runtime_error(failure);
-        }
         return GST_FLOW_OK;
     }
 
@@ -1227,22 +1249,34 @@ private:
             rtsp_thread_.join();
         }
 
-        std::vector<std::shared_ptr<RtspClientStream>> clients;
+        GstRTSPMedia* media = nullptr;
+        GstElement* source = nullptr;
         GstCaps* caps = nullptr;
         GstBuffer* keyframe = nullptr;
         {
             std::lock_guard<std::mutex> lock(rtsp_mutex_);
-            clients.swap(rtsp_clients_);
+            media = rtsp_media_;
+            rtsp_media_ = nullptr;
+            source = rtsp_source_;
+            rtsp_source_ = nullptr;
             caps = h264_caps_;
             h264_caps_ = nullptr;
             keyframe = latest_keyframe_;
             latest_keyframe_ = nullptr;
         }
-        for (const auto& client : clients) {
-            g_signal_handlers_disconnect_by_data(client->media(), this);
-            gst_rtsp_media_unprepare(client->media());
+        if (source != nullptr) {
+            GstAppSrcCallbacks callbacks{};
+            gst_app_src_set_callbacks(
+                GST_APP_SRC(source), &callbacks, nullptr, nullptr);
         }
-        clients.clear();
+        if (media != nullptr) {
+            g_signal_handlers_disconnect_by_data(media, this);
+            gst_rtsp_media_unprepare(media);
+            gst_object_unref(media);
+        }
+        if (source != nullptr) {
+            gst_object_unref(source);
+        }
         if (caps != nullptr) {
             gst_caps_unref(caps);
         }
@@ -1317,7 +1351,9 @@ private:
     GSource* rtsp_server_source_ = nullptr;
     std::thread rtsp_thread_;
     std::mutex rtsp_mutex_;
-    std::vector<std::shared_ptr<RtspClientStream>> rtsp_clients_;
+    std::mutex rtsp_push_mutex_;
+    GstRTSPMedia* rtsp_media_ = nullptr;
+    GstElement* rtsp_source_ = nullptr;
     GstCaps* h264_caps_ = nullptr;
     GstBuffer* latest_keyframe_ = nullptr;
     mutable std::mutex failure_mutex_;
@@ -1341,7 +1377,9 @@ private:
     std::uint64_t h264_gop_frames_ = 0;
     std::uint64_t stream_generation_ = 0;
     std::uint64_t base_timestamp_ns_ = 0;
+    GstClockTime rtsp_next_timestamp_ = 0;
     guint key_unit_count_ = 1;
+    bool rtsp_waiting_for_keyframe_ = true;
     bool stream_initialized_ = false;
     bool finished_ = false;
     bool metrics_finished_ = false;
