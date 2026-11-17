@@ -1,0 +1,19 @@
+From: VTB Project <vtb@example.invalid>
+Subject: [PATCH] uvcsink: allocate the event watcher an unused fd
+
+dup3(device_fd, device_fd + 1, O_CLOEXEC) replaces an open descriptor
+when the neighboring number is occupied. In the Live2D pipeline it
+replaces one of the RGA output pool's DMA-BUF descriptors with the UVC
+device. Allocate an unused descriptor and set close-on-exec atomically.
+
+--- a/sys/uvcgadget/gstuvcsink.c
++++ b/sys/uvcgadget/gstuvcsink.c
+@@ -855,7 +855,7 @@ gst_uvc_sink_watch (GstUvcSink * self)
+ 
+   g_object_get (G_OBJECT (self->v4l2sink), "device-fd", &device_fd, NULL);
+ 
+-  fd = dup3 (device_fd, device_fd + 1, O_CLOEXEC);
++  fd = fcntl (device_fd, F_DUPFD_CLOEXEC, 0);
+   if (fd < 0)
+     return FALSE;
+ 
