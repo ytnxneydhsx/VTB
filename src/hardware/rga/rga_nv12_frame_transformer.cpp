@@ -92,7 +92,7 @@ public:
             static_cast<std::size_t>(nv12_stride) *
             static_cast<std::size_t>(nv12_vertical_stride) * 3U / 2U;
         RgaTransformSpec spec(
-            RgaTransformOperation::rgba_to_nv12,
+            RgaTransformOperation::rgba_to_nv12_flip_vertical,
             RgaRectangle(0, 0, frame.width, frame.height),
             frame.width,
             frame.height,

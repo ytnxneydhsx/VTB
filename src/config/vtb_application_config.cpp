@@ -251,6 +251,11 @@ MediaOutputConfiguration parse_output(const Json& root) {
     }
     config.uvc_device =
         required_nonempty_string(uvc, "device", "output.uvc");
+    const auto uvc_link_path = uvc.find("link_path");
+    if (uvc_link_path != uvc.end()) {
+        config.uvc_link_path =
+            required_nonempty_string(uvc, "link_path", "output.uvc");
+    }
     config.gst_launch_path =
         required_nonempty_string(uvc, "gst_launch_path", "output.uvc");
     config.gstreamer_library_path = required_nonempty_string(

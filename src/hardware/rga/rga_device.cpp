@@ -376,4 +376,49 @@ void RgaDevice::convert_rgba_to_nv12(
         "RGA RGBA-to-NV12 conversion");
 }
 
+void RgaDevice::convert_rgba_to_nv12_flipped_vertically(
+    const RgaBuffer& source,
+    const RgaBuffer& destination) {
+    if (source.format() != RgaPixelFormat::rgba8888 ||
+        destination.format() != RgaPixelFormat::nv12) {
+        throw std::invalid_argument(
+            "RGA vertically flipped RGBA-to-NV12 conversion requires "
+            "RGBA8888 and NV12 buffers");
+    }
+    rga_buffer_t source_buffer = source.impl_->buffer();
+    rga_buffer_t destination_buffer = destination.impl_->buffer();
+    imsetColorSpace(&source_buffer, IM_RGB_FULL_RANGE);
+    imsetColorSpace(&destination_buffer, IM_YUV_BT601_LIMIT_RANGE);
+
+    im_rect source_rect{};
+    source_rect.width = static_cast<int>(source.width());
+    source_rect.height = static_cast<int>(source.height());
+    im_rect destination_rect{};
+    destination_rect.width = static_cast<int>(destination.width());
+    destination_rect.height = static_cast<int>(destination.height());
+    rga_buffer_t pattern_buffer{};
+    im_rect pattern_rect{};
+
+    require_rga_success(
+        imcheck_t(
+            source_buffer,
+            destination_buffer,
+            pattern_buffer,
+            source_rect,
+            destination_rect,
+            pattern_rect,
+            IM_HAL_TRANSFORM_FLIP_V),
+        "RGA vertically flipped RGBA-to-NV12 conversion check");
+    require_rga_success(
+        improcess(
+            source_buffer,
+            destination_buffer,
+            pattern_buffer,
+            source_rect,
+            destination_rect,
+            pattern_rect,
+            IM_HAL_TRANSFORM_FLIP_V | IM_SYNC),
+        "RGA vertically flipped RGBA-to-NV12 conversion");
+}
+
 }  // namespace vtb

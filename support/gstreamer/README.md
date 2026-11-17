@@ -57,6 +57,14 @@ buffer drop probe so a host can close and open the camera repeatedly.
 descriptor with `F_DUPFD_CLOEXEC`. RK3588 startup tracing showed that the
 original fixed-target `dup3` replaced a live RGA output DMA-BUF descriptor.
 
+`0007-uvcsink-rockchip-bulk-streaming.patch` reads Rockchip's optional
+`streaming_bulk` ConfigFS attribute. Its Probe/Commit response advertises the
+selected frame size as the maximum Bulk payload, matching the Rockchip UVC
+gadget userspace protocol. The Rockchip 5.10 kernel's STREAMON event remains
+the trigger for starting `v4l2sink`; board tracing showed that delaying it until
+COMMIT makes `VIDIOC_STREAMON` return `ENODEV`. Kernels without the Rockchip
+attribute retain the endpoint packet-size response.
+
 `1001-v4l2sink-g-uvc-mjpeg-fallback.patch` is applied to gst-plugins-good. On
 the RK3588 5.10 `g_uvc` output node, it supplies an MJPEG format descriptor when
 `VIDIOC_ENUM_FMT` is unavailable. The workaround is limited to `g_uvc` video

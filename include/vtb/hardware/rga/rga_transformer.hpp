@@ -9,6 +9,7 @@ namespace vtb {
 enum class RgaTransformOperation {
     crop_scale_convert,
     rgba_to_nv12,
+    rgba_to_nv12_flip_vertical,
 };
 
 /** @brief 已解析为 RgaBuffer 租约的通用 Worker 执行请求。 */

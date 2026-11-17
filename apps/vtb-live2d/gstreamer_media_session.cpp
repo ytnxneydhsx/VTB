@@ -670,7 +670,22 @@ private:
             mjpeg_encoder_ = make_element("mppjpegenc", "mjpeg-encoder");
             GstElement* jpeg_parser =
                 make_element("jpegparse", "mjpeg-parser");
-            GstElement* uvc_sink = make_element("uvcsink", "uvc-output");
+            GstElement* uvc_output = nullptr;
+            if (config_.uvc_link_path.empty()) {
+                uvc_output = make_element("uvcsink", "uvc-output");
+                set_uvc_device(uvc_output);
+            } else {
+                uvc_output = make_element("filesink", "uvc-link-output");
+                g_object_set(
+                    uvc_output,
+                    "location",
+                    config_.uvc_link_path.c_str(),
+                    "sync",
+                    FALSE,
+                    "async",
+                    FALSE,
+                    nullptr);
+            }
             configure_queue(mjpeg_queue, kRawQueueCapacity);
             g_object_set(frame_rate, "drop-only", TRUE, nullptr);
             g_object_set(
@@ -686,7 +701,6 @@ private:
                 "zero-copy-pkt",
                 FALSE,
                 nullptr);
-            set_uvc_device(uvc_sink);
             g_signal_connect(
                 mjpeg_queue,
                 "overrun",
@@ -695,10 +709,10 @@ private:
             add_elements(
                 pipeline_,
                 {mjpeg_queue, frame_rate, uvc_caps_filter_, mjpeg_encoder_,
-                 jpeg_parser, uvc_sink});
+                 jpeg_parser, uvc_output});
             link_elements(
                 {tee, mjpeg_queue, frame_rate, uvc_caps_filter_,
-                 mjpeg_encoder_, jpeg_parser, uvc_sink});
+                 mjpeg_encoder_, jpeg_parser, uvc_output});
             add_encoder_probe(
                 mjpeg_encoder_, GST_PAD_PROBE_TYPE_BUFFER, mjpeg_output_probe);
         }

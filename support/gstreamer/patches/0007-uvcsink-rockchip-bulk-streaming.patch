@@ -1,0 +1,61 @@
+diff --git a/sys/uvcgadget/configfs.c b/sys/uvcgadget/configfs.c
+index 7e0e2c4897..d9fa4c3a55 100644
+--- a/sys/uvcgadget/configfs.c
++++ b/sys/uvcgadget/configfs.c
+@@ -851,6 +851,7 @@ configfs_parse_streaming (const char *path,
+ static int
+ configfs_parse_uvc (const char *fpath, struct uvc_function_config *fc)
+ {
++  unsigned int streaming_bulk;
+   int ret = 0;
+ 
+   ret = ret ? : configfs_parse_child (fpath, "control", &fc->control,
+@@ -871,6 +872,12 @@ configfs_parse_uvc (const char *fpath, struct uvc_function_config *fc)
+   ret = ret ? : attribute_read_uint (fpath, "streaming_maxpacket",
+       &fc->streaming.ep.wMaxPacketSize);
+ 
++  /* Rockchip's UVC gadget bulk mode has different STREAMON timing and Probe
++   * payload semantics. Keep this optional for compatibility with upstream.
++   */
++  if (attribute_read_uint (fpath, "streaming_bulk", &streaming_bulk) == 0)
++    fc->streaming.bulk = streaming_bulk;
++
+   return ret;
+ }
+ 
+diff --git a/sys/uvcgadget/configfs.h b/sys/uvcgadget/configfs.h
+index 0bab980f32..2c0a0d1f15 100644
+--- a/sys/uvcgadget/configfs.h
++++ b/sys/uvcgadget/configfs.h
+@@ -82,6 +82,7 @@ struct uvc_function_config_format
+  * struct uvc_function_config_streaming - Streaming interface parameters
+  * @intf: Generic interface parameters
+  * @ep: Endpoint parameters
++ * @bulk: Whether the Rockchip bulk streaming mode is enabled
+  * @num_formats: Number of entries in the formats array
+  * @formats: Array of format descriptors
+  */
+@@ -90,6 +91,7 @@ struct uvc_function_config_streaming
+   struct uvc_function_config_interface intf;
+   struct uvc_function_config_endpoint ep;
+ 
++  unsigned int bulk;
+   unsigned int num_formats;
+   struct uvc_function_config_format *formats;
+ };
+diff --git a/sys/uvcgadget/uvc.c b/sys/uvcgadget/uvc.c
+index 48f59de7d0..9758ef04d1 100644
+--- a/sys/uvcgadget/uvc.c
++++ b/sys/uvcgadget/uvc.c
+@@ -235,7 +235,10 @@ uvc_fill_streaming_control (GstUvcSink * self,
+       break;
+   }
+ 
+-  ctrl->dwMaxPayloadTransferSize = self->fc->streaming.ep.wMaxPacketSize;
++  if (self->fc->streaming.bulk)
++    ctrl->dwMaxPayloadTransferSize = ctrl->dwMaxVideoFrameSize;
++  else
++    ctrl->dwMaxPayloadTransferSize = self->fc->streaming.ep.wMaxPacketSize;
+   ctrl->bmFramingInfo = 3;
+   ctrl->bPreferedVersion = 1;
+   ctrl->bMaxVersion = 1;

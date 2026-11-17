@@ -52,6 +52,12 @@ void RgaTransformer::transform(const RgaTransformRequest& request) {
             *request.source(), *request.destination());
         return;
     }
+    if (request.operation() ==
+        RgaTransformOperation::rgba_to_nv12_flip_vertical) {
+        device_.convert_rgba_to_nv12_flipped_vertically(
+            *request.source(), *request.destination());
+        return;
+    }
     throw std::invalid_argument("Unsupported RGA transform operation");
 }
 

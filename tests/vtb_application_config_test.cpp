@@ -190,6 +190,7 @@ void test_uvc_output_configuration() {
             "uvc": {
                 "enabled": true,
                 "device": "/dev/video2",
+                "link_path": "/run/vtb/uvc-link.mjpeg",
                 "gst_launch_path": "/opt/vtb/gstreamer-1.28.9/bin/gst-launch-1.0",
                 "library_path": "/opt/vtb/gstreamer-1.28.9/lib/aarch64-linux-gnu",
                 "plugin_path": "/opt/vtb/gstreamer-1.28.9/lib/aarch64-linux-gnu/gstreamer-1.0",
@@ -200,6 +201,9 @@ void test_uvc_output_configuration() {
     const vtb::VtbApplicationConfiguration config = parser.parse(json);
     require(config.output.uvc_enabled, "UVC output was not enabled");
     require(config.output.uvc_device == "/dev/video2", "UVC device mismatch");
+    require(
+        config.output.uvc_link_path == "/run/vtb/uvc-link.mjpeg",
+        "UVC link path mismatch");
     require(config.output.uvc_fps == 30, "UVC fps mismatch");
 }
 

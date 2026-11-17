@@ -141,6 +141,9 @@ public:
     void convert_rgba_to_nv12(
         const RgaBuffer& source,
         const RgaBuffer& destination);
+    void convert_rgba_to_nv12_flipped_vertically(
+        const RgaBuffer& source,
+        const RgaBuffer& destination);
 };
 
 }  // namespace vtb

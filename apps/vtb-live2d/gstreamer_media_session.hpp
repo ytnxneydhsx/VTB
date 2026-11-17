@@ -15,6 +15,7 @@ public:
     std::string webrtc_web_directory;
     bool uvc_enabled = false;
     std::string uvc_device;
+    std::string uvc_link_path;
     std::uint32_t uvc_fps = 0;
     std::string plugin_path;
     std::string metrics_path;
@@ -30,7 +31,8 @@ public:
  * GstRTSPStream 分发给多个客户端；最后一个 RTSP 客户端离开后由 media
  * factory 回收该实例，后续连接创建新的共享实例。启用 WebRTC 时同时供给
  * webrtcsink。
- * MJPEG 交给 UVC 元件。最后一个 GstMemory 引用释放时，
+ * MJPEG 交给常驻 UVC Link，或在未配置 Link 时直接交给 UVC 元件。
+ * 最后一个 GstMemory 引用释放时，
  * Lease 析构并把 RGA 目标槽位归还缓冲池。
  */
 class GStreamerMediaSession final {

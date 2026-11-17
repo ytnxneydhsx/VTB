@@ -44,10 +44,11 @@
     "uvc": {
       "enabled": true,
       "device": "/dev/video2",
+      "link_path": "/run/vtb/uvc-link.mjpeg",
       "gst_launch_path": "/opt/vtb/gstreamer-1.28.9/bin/gst-launch-1.0",
       "library_path": "/opt/vtb/gstreamer-1.28.9/lib/aarch64-linux-gnu",
       "plugin_path": "/opt/vtb/gstreamer-1.28.9/lib/aarch64-linux-gnu/gstreamer-1.0",
-      "fps": 30
+      "fps": 60
     }
   },
   "instrumentation": {

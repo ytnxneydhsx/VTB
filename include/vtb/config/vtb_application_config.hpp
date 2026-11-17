@@ -47,6 +47,7 @@ public:
     std::string webrtc_web_directory;
     bool uvc_enabled = false;
     std::string uvc_device;
+    std::string uvc_link_path;
     std::string gst_launch_path;
     std::string gstreamer_library_path;
     std::string gstreamer_plugin_path;

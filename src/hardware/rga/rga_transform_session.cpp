@@ -47,7 +47,11 @@ void validate_transform_spec(
         spec.destination_stride_bytes() == 0) {
         throw std::invalid_argument("RGA transform specification is invalid");
     }
-    if (spec.operation() == RgaTransformOperation::rgba_to_nv12 &&
+    const bool converts_rgba_to_nv12 =
+        spec.operation() == RgaTransformOperation::rgba_to_nv12 ||
+        spec.operation() ==
+            RgaTransformOperation::rgba_to_nv12_flip_vertical;
+    if (converts_rgba_to_nv12 &&
         (source.format() != RgaPixelFormat::rgba8888 ||
          spec.destination_format() != RgaPixelFormat::nv12)) {
         throw std::invalid_argument(
