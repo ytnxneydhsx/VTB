@@ -227,6 +227,16 @@ MediaOutputConfiguration parse_output(const Json& root) {
     const Json& output = required_object(root, "output", "root");
     MediaOutputConfiguration config;
     config.rtsp_url = required_nonempty_string(output, "rtsp_url", "output");
+    const auto webrtc = output.find("webrtc");
+    if (webrtc != output.end()) {
+        if (!webrtc->is_object()) {
+            throw std::invalid_argument("output.webrtc must be an object");
+        }
+        if (required_value<bool>(*webrtc, "enabled", "output.webrtc")) {
+            config.webrtc_web_directory =
+                required_nonempty_string(*webrtc, "web_directory", "output.webrtc");
+        }
+    }
     const auto uvc_iterator = output.find("uvc");
     if (uvc_iterator == output.end()) {
         return config;

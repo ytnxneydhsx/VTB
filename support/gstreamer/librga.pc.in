@@ -1,0 +1,10 @@
+prefix=@PREFIX@
+exec_prefix=${prefix}
+libdir=${exec_prefix}/lib/aarch64-linux-gnu
+includedir=${prefix}/include
+
+Name: librga
+Description: Rockchip RGA userspace library
+Version: 2
+Libs: -L${libdir} -lrga
+Cflags: -I${includedir}

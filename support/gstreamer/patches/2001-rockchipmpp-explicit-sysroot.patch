@@ -1,0 +1,49 @@
+From: VTB Project <vtb@example.invalid>
+Subject: [PATCH] meson: accept an explicit Rockchip MPP sysroot
+
+The VTB cross-build keeps the board MPP headers and libraries in a separate
+read-only sysroot without a rockchip_mpp.pc file.  Allow that verified sysroot
+to be selected without modifying the shared toolchain or staging a replacement
+MPP runtime inside the versioned GStreamer prefix.
+
+diff --git a/meson.build b/meson.build
+index 5ac384b..edc8bcf 100644
+--- a/meson.build
++++ b/meson.build
+@@ -84,8 +84,20 @@ gstpbutils_dep = dependency('gstreamer-pbutils-1.0', version : gst_req,
+ glib_dep = dependency('glib-2.0', version : glib_req,
+   fallback : ['glib', 'libglib_dep'])
+ x11_dep = dependency('x11', required : get_option('rkximage'))
+ drm_dep = dependency('libdrm', required : get_option('rkximage'))
+-mpp_dep = dependency('rockchip_mpp', required : get_option('rockchipmpp'))
++mpp_root = get_option('rockchipmpp-root')
++if mpp_root == ''
++  mpp_dep = dependency('rockchip_mpp', required : get_option('rockchipmpp'))
++else
++  mpp_library = cc.find_library('rockchip_mpp',
++    dirs : [join_paths(mpp_root, 'usr/lib/aarch64-linux-gnu')],
++    required : get_option('rockchipmpp'))
++  mpp_dep = declare_dependency(
++    dependencies : mpp_library,
++    compile_args : [
++      '-I' + join_paths(mpp_root, 'usr/include'),
++    ])
++endif
+ rga_dep = dependency('librga', required : get_option('rga'))
+ 
+ if rga_dep.found() and not get_option('rga').disabled()
+diff --git a/meson_options.txt b/meson_options.txt
+index 404b157..7447909 100644
+--- a/meson_options.txt
++++ b/meson_options.txt
+@@ -1,6 +1,8 @@
+ # Feature options for plugins
+ option('rkximage', type : 'feature', value : 'auto', description : 'Rockchip X11 ximage + KMS sink plugin')
+ option('rockchipmpp', type : 'feature', value : 'auto', description : 'Rockchip MPP encoder/decoder plugin')
++option('rockchipmpp-root', type : 'string', value : '',
++       description : 'Explicit sysroot containing Rockchip MPP headers and libraries')
+ option('kmssrc', type : 'feature', value : 'auto', description : 'KMS src plugin')
+ option('rga', type : 'feature', value : 'auto', description : 'Use Rockchip librga for conversions')
+ option('gpu', type : 'feature', value : 'auto', description : 'Use GPU (EGL/GLES2) for conversions')
+-- 
+2.39.5

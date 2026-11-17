@@ -1,0 +1,68 @@
+From: VTB Project <vtb@example.invalid>
+Subject: [PATCH] rockchipmpp: retain RGA input fd during conversion
+
+The same input GstDmaBufMemory can be consumed concurrently by the H.264 and
+MJPEG branches. Keep a private descriptor alive for the duration of the
+synchronous RGA request so another branch cannot invalidate the numeric fd
+between extracting it from GstMemory and the kernel importing it.
+
+diff --git a/gst/rockchipmpp/gstmpprga.c b/gst/rockchipmpp/gstmpprga.c
+index 39d71c7..4b2c551 100644
+--- a/gst/rockchipmpp/gstmpprga.c
++++ b/gst/rockchipmpp/gstmpprga.c
+@@ -25,6 +25,7 @@
+ #endif
+ 
+ #include <string.h>
++#include <unistd.h>
+ 
+ #include <gst/allocators/gstdmabuf.h>
+ 
+@@ -173,37 +174,43 @@ static rga_buffer_t
+ gboolean
+ gst_mpp_rga_convert (GstBuffer * inbuf, GstVideoInfo * src_vinfo,
+     GstMemory * out_mem, GstVideoInfo * dst_vinfo, gint rotation)
+ {
+   GstMapInfo mapinfo = { 0, };
+   rga_buffer_t src, dst;
+   gboolean ret;
+   gint fd = -1;
+   void *vir_addr = NULL;
++  gint source_fd = -1;
+ 
+   /* Prefer using dma fd */
+   if (gst_buffer_n_memory (inbuf) == 1) {
+     GstMemory *mem = gst_buffer_peek_memory (inbuf, 0);
+     gsize offset;
+ 
+     if (gst_is_dmabuf_memory (mem)) {
+       gst_memory_get_sizes (mem, &offset, NULL);
+       if (!offset)
+-        fd = gst_dmabuf_memory_get_fd (mem);
++        source_fd = dup (gst_dmabuf_memory_get_fd (mem));
+     }
+   }
+ 
++  if (source_fd >= 0)
++    fd = source_fd;
++
+   if (fd < 0) {
+     gst_buffer_map (inbuf, &mapinfo, GST_MAP_READ);
+     vir_addr = mapinfo.data;
+   }
+ 
+   src = gst_mpp_rga_buffer_from_video_info (src_vinfo, fd, vir_addr);
+   dst = gst_mpp_rga_buffer_from_video_info (dst_vinfo,
+       gst_dmabuf_memory_get_fd (out_mem), NULL);
+ 
+   ret = src.wstride && dst.wstride &&
+       gst_mpp_rga_do_convert (&src, &dst, rotation);
+ 
+   gst_buffer_unmap (inbuf, &mapinfo);
++  if (source_fd >= 0)
++    close (source_fd);
+   return ret;
+ }
+
+-- 
+2.39.5

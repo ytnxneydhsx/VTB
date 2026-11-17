@@ -279,8 +279,8 @@
  *     GodotSession["RgaTransformSession<br/>Godot 私有缓存与 NV12 池"]
  *     RgaDevice["RgaTransformer / RgaDevice<br/>Godot线程同步调用"]
  *     Media["GStreamerMediaSession<br/>tee、分支与输出"]
- *     H264["H.264 分支<br/>queue → appsink → MPP"]
- *     Mjpeg["MJPEG 分支<br/>queue → appsink → MPP"]
+ *     H264["H.264 分支<br/>queue → mpph264enc"]
+ *     Mjpeg["MJPEG 分支<br/>queue → videorate → mppjpegenc"]
  *
  *     App -->|"红色：局部对象生命期覆盖 run()"| Stage
  *     Stage -->|"红色：拥有 std::thread"| Worker
@@ -306,9 +306,12 @@
  * thread_main() 前析构 Pipeline。当前同步输出路径中，run_frame() 触发 Godot 渲染、
  * GPU copy 后从 LibGodotInstance 取得同步借用的 RgbaFrameView，再调用宿主
  * RgaNv12FrameTransformer，通过私有 Session 在所有者线程直接同步完成 RGA，再通过
- * Nv12FrameSink 把 Nv12FrameLease 移动到 GStreamer GstBuffer。tee 后的两个 leaky queue
- * 分别进入 H.264 与 MJPEG appsink；两个 MPP 会话由对应 GStreamer 分支流线程独占，
- * 编码包继续进入 RTSP 与 UVC pipeline。
+ * Nv12FrameSink 把 Nv12FrameLease 移动到 GStreamer DMA-BUF GstMemory。tee 后的两个
+ * leaky queue 分别进入 mpph264enc 与 mppjpegenc；两个元件由对应 GStreamer
+ * 分支流线程执行。布局匹配时，两路直接导入共享的 NV12 DMA-BUF，并持有输入内存引用
+ * 直到编码完成。UVC 事件监听 fd 由 F_DUPFD_CLOEXEC 分配，避免覆盖已使用的 fd。
+ * H.264 编码包送入进程内 RTSP Server，启用 WebRTC 时同时供给 webrtcsink；
+ * MJPEG 编码包进入 UVC 元件。
  * 该顺序使异常路径中的 LibGodot RAII 清理也留在所有者线程。
  *
  * @par 三、RGA 源 Buffer 注册缓存的资源结构

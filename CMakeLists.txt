@@ -9,7 +9,7 @@ option(VTB_ENABLE_UVC_OUTPUT "Build the Linux V4L2 UVC Gadget output" ON)
 option(VTB_ENABLE_UAC2_OUTPUT "Build the ALSA UAC2 Gadget output" ON)
 option(VTB_BUILD_OUTPUT_CLI "Build the optional output control example" OFF)
 option(VTB_ENABLE_ROCKCHIP_MPP_PUBLISHER
-    "Build the RK3588 RGA/MPP RTSP publisher" OFF)
+    "Build the legacy RK3588 RGA/MPP RTSP publisher example" OFF)
 option(VTB_ENABLE_RKNN_FACE
     "Build the RK3588 RKNN OpenSeeFace detector and landmark models" ON)
 option(VTB_ENABLE_RGA_FACE
@@ -47,7 +47,7 @@ if(VTB_ENABLE_ROCKCHIP_MPP_PUBLISHER OR VTB_ENABLE_RGA_FACE OR
         REQUIRED)
 endif()
 
-if(VTB_ENABLE_ROCKCHIP_MPP_PUBLISHER OR VTB_ENABLE_EMBEDDED_GODOT)
+if(VTB_ENABLE_ROCKCHIP_MPP_PUBLISHER)
     if(VTB_ROCKCHIP_SYSROOT STREQUAL "")
         message(FATAL_ERROR
             "VTB_ROCKCHIP_SYSROOT is required for host-side Rockchip MPP support")
@@ -473,12 +473,20 @@ if(VTB_ENABLE_EMBEDDED_GODOT)
     find_library(VTB_GSTBASE_LIBRARY gstbase-1.0
         PATHS "${VTB_GSTREAMER_PREFIX}/lib/aarch64-linux-gnu"
         NO_DEFAULT_PATH REQUIRED)
+    find_library(VTB_GSTRTSP_LIBRARY gstrtsp-1.0
+        PATHS "${VTB_GSTREAMER_PREFIX}/lib/aarch64-linux-gnu"
+        NO_DEFAULT_PATH REQUIRED)
+    find_library(VTB_GSTRTSPSERVER_LIBRARY gstrtspserver-1.0
+        PATHS "${VTB_GSTREAMER_PREFIX}/lib/aarch64-linux-gnu"
+        NO_DEFAULT_PATH REQUIRED)
     set(VTB_GSTREAMER_LIBRARIES
         "${VTB_GSTREAMER_LIBRARY}"
         "${VTB_GSTAPP_LIBRARY}"
         "${VTB_GSTALLOCATORS_LIBRARY}"
         "${VTB_GSTVIDEO_LIBRARY}"
-        "${VTB_GSTBASE_LIBRARY}")
+        "${VTB_GSTBASE_LIBRARY}"
+        "${VTB_GSTRTSP_LIBRARY}"
+        "${VTB_GSTRTSPSERVER_LIBRARY}")
     find_library(VTB_GOBJECT_LIBRARY gobject-2.0
         PATHS
             "${VTB_GSTREAMER_ROOT}/usr/lib/aarch64-linux-gnu"
@@ -494,12 +502,10 @@ if(VTB_ENABLE_EMBEDDED_GODOT)
 
     add_library(vtb_gstreamer_media_session STATIC
         apps/vtb-live2d/gstreamer_media_session.cpp
-        apps/vtb-live2d/mpp_encoder_session.cpp
     )
     target_include_directories(vtb_gstreamer_media_session
         PUBLIC apps/vtb-live2d
         SYSTEM PRIVATE
-            "${VTB_MPP_INCLUDE_DIR}"
             "${VTB_GSTREAMER_INCLUDE_DIR}"
             "${VTB_GLIB_INCLUDE_DIR}"
             "${VTB_GLIB_CONFIG_INCLUDE_DIR}"
@@ -508,7 +514,6 @@ if(VTB_ENABLE_EMBEDDED_GODOT)
         PUBLIC vtb_instrumentation vtb_rga_core
         PRIVATE
             Threads::Threads
-            "${VTB_MPP_LIBRARY}"
             ${VTB_GSTREAMER_LIBRARIES}
             "${VTB_GOBJECT_LIBRARY}"
             "${VTB_GLIB_LIBRARY}"

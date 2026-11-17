@@ -44,6 +44,7 @@ public:
 class MediaOutputConfiguration {
 public:
     std::string rtsp_url;
+    std::string webrtc_web_directory;
     bool uvc_enabled = false;
     std::string uvc_device;
     std::string gst_launch_path;

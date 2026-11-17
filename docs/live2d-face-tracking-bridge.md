@@ -25,14 +25,15 @@ V4L2 CameraSource (MMAP / DQBUF / QBUF)
   → Godot 所有者线程直接同步调用 RgaTransformer → NV12
   → Nv12FrameSink（移动 Nv12FrameLease）
   → GStreamer appsrc → tee
-      ├─ leaky queue → appsink → MPP H.264 → h264 appsrc → RTSP/MediaMTX
-      └─ leaky queue → appsink → MPP MJPEG → jpeg appsrc → uvcsink/UVC
+      ├─ leaky queue → mpph264enc → h264parse → RTSP Server / 可选 WebRTC
+      └─ leaky queue → videorate → mppjpegenc → jpegparse → uvcsink/UVC
 ```
 
-Godot/Ayagami、Viewport 纹理访问和 GPU copy 位于 LibGodot/OpenVT；RGA、MPP 与输出协议
-位于宿主。`vtb-live2d` 可执行文件直接链接 V4L2 视频输入、OpenCV PnP 几何计算、RKNN、
-Rockchip RGA/MPP 和三个流水线 Stage；LibGodot 共享库不编译摄像头、RKNN 模型、几何估计、
-人脸管线、RGA、MPP、GStreamer、指标报告或输出源码，也不链接 RGA/MPP/GStreamer。
+Godot/Ayagami、Viewport 纹理访问和 GPU copy 位于 LibGodot/OpenVT；RGA、GStreamer 与输出
+协议位于宿主。`vtb-live2d` 可执行文件直接链接 V4L2 视频输入、OpenCV PnP 几何计算、
+RKNN、Rockchip RGA、GStreamer 和三个流水线 Stage；MPP 由 Rockchip GStreamer 插件间接
+引入。LibGodot 共享库不编译摄像头、RKNN 模型、几何估计、人脸管线、RGA、MPP、
+GStreamer、指标报告或输出源码，也不链接 RGA/MPP/GStreamer。
 
 ## 模块边界
 
@@ -55,9 +56,9 @@ Rockchip RGA/MPP 和三个流水线 Stage；LibGodot 共享库不编译摄像头
   非阻塞取得新快照。
 - `Live2DControlServer`：独立的 HTTP 控制组件，借用寿命更长的 `FaceTrackingStage`，
   序列化状态和转发命令。
-- `GStreamerMediaSession`：取得 NV12 Lease，把 DMA-BUF 和租约绑定到 `GstBuffer`，通过
-  tee、两条有界 leaky queue 与两个 appsink 管理双输出的线程和背压；两个分支各自独占
-  一个 MPP 会话，再把编码包推入 RTSP 与 UVC pipeline。
+- `GStreamerMediaSession`：取得 NV12 Lease，把 DMA-BUF 和租约绑定到 `GstMemory`，通过
+  tee、两条有界 leaky queue 与 Rockchip `mpph264enc`/`mppjpegenc` 管理双输出的线程、
+  背压和编码。H.264 供给 RTSP Server 和可选的 `webrtcsink`，MJPEG 交给 UVC。
 - `RgaNv12FrameTransformer`：同步借用 LibGodot 交付的 RGBA DMA-BUF，通过 Godot 私有
   Session 在 Godot 所有者线程直接执行 RGBA→NV12，完成后把 NV12 Lease 移动给
   `GStreamerMediaSession`；RGA 硬件核心由驱动调度。

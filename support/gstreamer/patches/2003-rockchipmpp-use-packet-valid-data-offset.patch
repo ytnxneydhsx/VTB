@@ -1,0 +1,63 @@
+From: VTB Project <vtb@example.invalid>
+Subject: [PATCH] rockchipmpp: publish the valid MppPacket data range
+
+MppPacket separates the backing MppBuffer base from the valid payload returned
+by mpp_packet_get_pos(). The encoder used the buffer base for every packet, so
+after MPP advanced the packet position downstream parsers received stale bytes
+from the beginning of the reusable buffer. Preserve the valid offset for the
+zero-copy path and copy from the packet position for the stable-copy path.
+
+diff --git a/gst/rockchipmpp/gstmppenc.c b/gst/rockchipmpp/gstmppenc.c
+index 8f59434..72d35d7 100644
+--- a/gst/rockchipmpp/gstmppenc.c
++++ b/gst/rockchipmpp/gstmppenc.c
+@@ -1002,8 +1002,12 @@ gst_mpp_enc_poll_packet_locked (GstVideoEncoder * encoder)
+   MppPacket mpkt;
+   MppMeta meta;
+   MppBuffer mbuf;
++  guint8 *pkt_pos;
++  guint8 *pkt_base;
++  gsize pkt_offset;
++  gsize buffer_size;
+   gint pkt_size;
+ 
+   self->mpi->encode_get_packet (self->mpp_ctx, &mpkt);
+   if (!mpkt)
+     return FALSE;
+@@ -1027,6 +1031,16 @@ gst_mpp_enc_poll_packet_locked (GstVideoEncoder * encoder)
+   mbuf = mpp_packet_get_buffer (mpkt);
+   if (!mbuf)
+     goto error;
++  pkt_pos = mpp_packet_get_pos (mpkt);
++  pkt_base = mpp_buffer_get_ptr (mbuf);
++  buffer_size = mpp_buffer_get_size (mbuf);
++  if (!pkt_pos || !pkt_base || pkt_pos < pkt_base || pkt_size <= 0)
++    goto error;
++
++  pkt_offset = (gsize) (pkt_pos - pkt_base);
++  if (pkt_offset > buffer_size ||
++      (gsize) pkt_size > buffer_size - pkt_offset)
++    goto error;
+ 
+   if (self->zero_copy_pkt) {
+     buffer = gst_buffer_new ();
+@@ -1040,7 +1054,7 @@ gst_mpp_enc_poll_packet_locked (GstVideoEncoder * encoder)
+       goto error;
+     }
+ 
+-    gst_memory_resize (mem, 0, pkt_size);
++    gst_memory_resize (mem, pkt_offset, pkt_size);
+     gst_buffer_append_memory (buffer, mem);
+   } else {
+     buffer = gst_video_encoder_allocate_output_buffer (encoder, pkt_size);
+@@ -1048,7 +1062,7 @@ gst_mpp_enc_poll_packet_locked (GstVideoEncoder * encoder)
+     if (!buffer)
+       goto error;
+ 
+-    gst_buffer_fill (buffer, 0, mpp_buffer_get_ptr (mbuf), pkt_size);
++    gst_buffer_fill (buffer, 0, pkt_pos, pkt_size);
+   }
+ 
+   gst_buffer_replace (&frame->output_buffer, buffer);
+-- 
+2.39.5

@@ -180,8 +180,8 @@ VtbApplication
 │       └── LibGodotInstance     Pipeline 在所有者线程内创建并独占
 ├── GStreamerMediaSession
 │   ├── raw appsrc → tee → H.264/MJPEG queue
-│   ├── appsink → MppEncoderSession H.264 → RTSP
-│   └── appsink → MppEncoderSession MJPEG → UVC
+│   ├── mpph264enc → h264parse → RTSP / 可选 WebRTC
+│   └── videorate → mppjpegenc → jpegparse → UVC
 ├── GodotRuntime                 VTB-owned facade
 │   ├── LibGodotAdapter          only layer allowed to call LibGodot lifecycle API
 │   └── Live2DRenderSession      SceneTree/SubViewport/Ayagami ownership
@@ -276,8 +276,9 @@ SubViewport native GL texture
 
 该模块负责单个 RGBA DMA-BUF 槽位、GPU copy、GPU 完成等待和同步借用交付。
 宿主 `RgaNv12FrameTransformer` 在回调内通过私有 `RgaTransformSession` 直接同步调用
-librga，随后把移动专属 NV12 Lease 绑定到 GStreamer `GstBuffer`。RGBA 由同步回调调用栈
-保持；NV12 由 GStreamer 引用计数保持，直到两个分支都释放缓冲区。
+librga，随后把移动专属 NV12 Lease 绑定到 GStreamer DMA-BUF `GstMemory`。RGBA 由
+同步回调调用栈保持；NV12 由 GStreamer 内存引用计数保持，直到两个分支都
+释放缓冲区。
 后续如实现外部颜色附件，应替换该模块内部实现，不能改变 `VtbApplication` 和
 `GodotRuntime` 的接口。
 

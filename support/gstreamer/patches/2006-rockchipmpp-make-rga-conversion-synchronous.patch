@@ -1,0 +1,24 @@
+From: VTB Project <vtb@example.invalid>
+Subject: [PATCH] rockchipmpp: make encoder RGA conversion synchronous
+
+The encoder releases its temporary source descriptor immediately after the
+conversion helper returns. Mark the RGA request synchronous so the driver has
+finished importing and reading that descriptor before it is closed.
+
+diff --git a/gst/rockchipmpp/gstmpprga.c b/gst/rockchipmpp/gstmpprga.c
+index 4b2c551..5247f15 100644
+--- a/gst/rockchipmpp/gstmpprga.c
++++ b/gst/rockchipmpp/gstmpprga.c
+@@ -88,7 +88,8 @@ gst_mpp_rga_do_convert (rga_buffer_t * src, rga_buffer_t * dst, gint rotation)
+ 
+   ret = improcess (*src, *dst, (rga_buffer_t) {
+       0}
+-      , srect, drect, prect, gst_mpp_rga_get_rotation (rotation));
++      , srect, drect, prect,
++      gst_mpp_rga_get_rotation (rotation) | IM_SYNC);
+   if (ret <= 0) {
+     GST_WARNING ("failed to blit: %s", imStrError (ret));
+     return FALSE;
+
+-- 
+2.39.5

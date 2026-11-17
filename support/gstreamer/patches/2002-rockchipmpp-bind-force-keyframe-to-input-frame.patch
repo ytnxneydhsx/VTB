@@ -1,0 +1,37 @@
+From: VTB Project <vtb@example.invalid>
+Subject: [PATCH] rockchipmpp: bind forced IDR requests to the input frame
+
+The encoder queues converted frames before the MPP output task can submit them.
+MPP_ENC_SET_IDR_FRAME is context-wide, so issuing it while retrying a queued
+frame does not reliably bind the request to that frame on the RK3588 runtime.
+Use MPP's per-frame KEY_INPUT_IDR_REQ metadata instead. GstVideoEncoder still
+owns ForceKeyUnit event handling; the plug-in only translates the selected
+GstVideoCodecFrame into the matching MPP frame request.
+
+diff --git a/gst/rockchipmpp/gstmppenc.c b/gst/rockchipmpp/gstmppenc.c
+index 9f66731..8f59434 100644
+--- a/gst/rockchipmpp/gstmppenc.c
++++ b/gst/rockchipmpp/gstmppenc.c
+@@ -947,6 +947,7 @@ gst_mpp_enc_send_frame_locked (GstVideoEncoder * encoder)
+   GstMemory *mem;
+   MppFrame mframe;
+   MppBuffer mbuf;
++  MppMeta meta;
+   gboolean keyframe;
+   guint32 frame_number;
+ 
+@@ -966,9 +967,10 @@ gst_mpp_enc_send_frame_locked (GstVideoEncoder * encoder)
+   keyframe = GST_VIDEO_CODEC_FRAME_IS_FORCE_KEYFRAME (frame);
+   if (keyframe) {
+     GST_INFO_OBJECT (self, "forcing keyframe");
++    meta = mpp_frame_get_meta (mframe);
+ 
+-    if (self->mpi->control (self->mpp_ctx, MPP_ENC_SET_IDR_FRAME, NULL))
+-      GST_WARNING_OBJECT (self, "failed to set keyframe request");
++    if (!meta || mpp_meta_set_s32 (meta, KEY_INPUT_IDR_REQ, 1))
++      GST_WARNING_OBJECT (self, "failed to set keyframe metadata");
+   }
+ 
+   /* HACK: Get the converted input buffer from frame->output_buffer */
+-- 
+2.39.5

@@ -2,8 +2,9 @@
 
 ## 状态
 
-已实现。当前宿主把带槽位租约的 NV12 DMA-BUF 移交给 GStreamer；GStreamer 负责
-分支、线程、背压和协议输出，两个分支分别使用独立的 Rockchip MPP 编码会话。
+已被 [ADR 0006](0006-use-rockchip-gstreamer-mpp-encoders.md) 替代。本文件保留
+2026-11-16 早期实现和实机验证记录；当前实现继续使用相同的 GStreamer 分支结构，编码
+已经下沉到 Rockchip GStreamer 插件。
 
 ## 背景
 

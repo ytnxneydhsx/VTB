@@ -41,13 +41,20 @@
   `angle_x_sign` 为 `+1.0`，使水平转头与 `ParamAngleX` 保持同向。
 - `control`：HTTP 控制口。
 - `render`：Godot 工程、Live2D 模型、输出画面尺寸、帧率和帧数上限。
-- `output`：宿主输出协议配置；`rtsp_url` 必填，`uvc` 可选。启用 `uvc` 时必须提供
+- `output`：宿主输出协议配置；`rtsp_url` 必填，作为进程内 GStreamer RTSP Server 的
+  监听地址、端口和挂载点，当前示例为 `rtsp://192.168.77.2:8554/live2d`。
+  `webrtc` 和 `uvc` 可选。启用 `uvc` 时必须提供
   Gadget V4L2 Output 设备、GStreamer 1.28.9 可执行文件/库/插件路径和 MJPEG 帧率；
   UVC 帧率不能超过渲染帧率。
 - `instrumentation`：可选的周期 JSONL 指标目录和报告间隔；缺失时关闭持久化。
 
 2026-11-03 起，将原 `render.rtsp_url` 移到 `output.rtsp_url`；保留旧字段会收到明确的
 迁移错误。其他字段保持原义，板端配置需在下一次授权部署时同步迁移。
+
+设置 `output.webrtc.enabled` 为 `true` 时，`output.webrtc.web_directory` 必须
+指向包含 `index.html` 的 `gstwebrtc-api/dist` 绝对路径。WebRTC 与 RTSP 共用
+MPP 编码的 H.264，以 `output.rtsp_url` 的主机地址监听网页端口 8080 和信令端口 8443。
+RK3588 网线直连时，浏览器入口为 `http://192.168.77.2:8080/`。
 
 `VideoInputFactory` 位于 `apps/vtb-live2d`，由应用把 `VideoInputConfiguration` 转为
 后端的 `CaptureConfig`。`vtb_capture` 和 `vtb_video_core` 不依赖应用配置库。

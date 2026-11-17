@@ -159,10 +159,11 @@ vtb-live2d-gstreamer-media.metrics.jsonl
 `live2d.gpu_wait`、`live2d.rgba_publish`、`live2d.rga_transform`、
 `live2d.nv12_publish` 和 `live2d.render_total`。由于 RGBA sink 是同步回调，
 `rgba_publish` 包含宿主 RGA 转换与 raw appsrc 提交时间；MPP 已在 GStreamer 分支流线程
-执行，不再进入该同步区间。媒体文件包含 `live2d.gstreamer_raw_push`、
-`live2d.mpp_h264`、`live2d.mpp_mjpeg`、`live2d.gstreamer_network_push` 和
-`live2d.gstreamer_uvc_push`。Face 路径的 RGA、人脸检测、关键点 RKNN 和几何计算尚未
-注册到这个计时库，因此本轮持久化文件不包含这些阶段。
+执行，不再进入该同步区间。媒体文件当前只包含
+`live2d.gstreamer_raw_push`；H.264/MJPEG 输出帧、RTSP 客户端推送、无客户端帧、等待
+关键帧丢弃、raw queue 丢帧与 IDR 请求通过 `VTB_GSTREAMER_MEDIA_RESULT` 计数器报告。
+Face 路径的 RGA、人脸检测、关键点 RKNN 和
+几何计算尚未注册到这个计时库，因此本轮持久化文件不包含这些阶段。
 
 实时查看：
 
