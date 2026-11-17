@@ -502,6 +502,9 @@ if(VTB_ENABLE_EMBEDDED_GODOT)
 
     add_library(vtb_gstreamer_media_session STATIC
         apps/vtb-live2d/gstreamer_media_session.cpp
+        apps/vtb-live2d/gstreamer_media_pipeline.cpp
+        apps/vtb-live2d/gstreamer_media_rtsp.cpp
+        apps/vtb-live2d/gstreamer_media_session_support.cpp
     )
     target_include_directories(vtb_gstreamer_media_session
         PUBLIC apps/vtb-live2d
