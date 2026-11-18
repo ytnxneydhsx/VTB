@@ -171,8 +171,6 @@ public:
         media_config.webrtc_bind_address = config_.output.webrtc_bind_address;
         media_config.uvc_enabled = config_.output.uvc_enabled;
         media_config.uvc_device = config_.output.uvc_device;
-        media_config.uvc_link_path = config_.output.uvc_link_path;
-        media_config.uvc_fps = config_.output.uvc_fps;
         media_config.plugin_path = config_.output.gstreamer_plugin_path;
         media_config.metrics_path = media_metrics_path;
         media_config.metrics_report_interval = metrics_report_interval;

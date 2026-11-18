@@ -8,6 +8,12 @@ ACM_FUNCTION_NAME=${ACM_FUNCTION_NAME:-acm.usb0}
 NCM_FUNCTION_NAME=${NCM_FUNCTION_NAME:-ncm.usb0}
 UVC_FUNCTION_NAME=${UVC_FUNCTION_NAME:-uvc.usb0}
 UDC_NAME=${UDC_NAME:-fc000000.usb}
+boot_mode=${VTB_USB_BOOT_MODE:-camera}
+
+case "$boot_mode" in
+	base|camera) ;;
+	*) printf 'Unknown VTB_USB_BOOT_MODE: %s\n' "$boot_mode" >&2; exit 2 ;;
+esac
 
 WIDTH=1920
 HEIGHT=1080
@@ -33,11 +39,13 @@ uvc_config_link="$config_root/$UVC_FUNCTION_NAME"
 if [ -d "$GADGET_ROOT" ]; then
 	current_udc=$(cat "$GADGET_ROOT/UDC" 2>/dev/null || true)
 	if [ "$current_udc" = "$UDC_NAME" ] && \
-		[ -L "$uvc_config_link" ] && [ -L "$acm_config_link" ] && \
-		[ -L "$ncm_config_link" ] && \
+		[ -L "$acm_config_link" ] && [ -L "$ncm_config_link" ] && \
 		[ "$(cat "$uvc_function_root/streaming_bulk" 2>/dev/null || true)" = "1" ]; then
-		printf '%s\n' 'The ACM+NCM+UVC bulk gadget is already active.'
-		exit 0
+		if { [ "$boot_mode" = base ] && [ ! -L "$uvc_config_link" ]; } || \
+		   { [ "$boot_mode" = camera ] && [ -L "$uvc_config_link" ]; }; then
+			printf 'The gadget is already bound in %s mode.\n' "$boot_mode"
+			exit 0
+		fi
 	fi
 	printf 'Refusing to replace an existing gadget instance at %s. Reboot before changing gadget mode.\n' \
 		"$GADGET_ROOT" >&2
@@ -104,7 +112,9 @@ printf '02:35:88:00:00:02\n' > "$ncm_function_root/host_addr"
 
 # ConfigFS binds functions in link order. Reserve the UVC bulk endpoint first,
 # then add the generic ACM and NCM data endpoints.
-ln -s "$uvc_function_root" "$uvc_config_link"
+if [ "$boot_mode" = camera ]; then
+	ln -s "$uvc_function_root" "$uvc_config_link"
+fi
 ln -s "$acm_function_root" "$acm_config_link"
 ln -s "$ncm_function_root" "$ncm_config_link"
 
@@ -119,5 +129,9 @@ if [ ! -e "/sys/class/udc/$UDC_NAME" ]; then
 fi
 
 printf '%s\n' "$UDC_NAME" > "$GADGET_ROOT/UDC"
-printf 'Created and bound ACM+NCM+UVC bulk with MJPEG %sx%s at %s fps.\n' \
-	"$WIDTH" "$HEIGHT" "$FPS"
+if [ "$boot_mode" = camera ]; then
+	printf 'Created and bound ACM+NCM+UVC bulk with MJPEG %sx%s at %s fps.\n' \
+		"$WIDTH" "$HEIGHT" "$FPS"
+else
+	printf '%s\n' 'Created and bound ACM+NCM. UVC descriptors are ready for on-demand use.'
+fi

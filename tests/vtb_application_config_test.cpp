@@ -192,50 +192,26 @@ void test_uvc_output_configuration() {
             "uvc": {
                 "enabled": true,
                 "device": "/dev/video2",
-                "link_path": "/run/vtb/uvc-link.mjpeg",
                 "gst_launch_path": "/opt/vtb/gstreamer-1.28.9/bin/gst-launch-1.0",
                 "library_path": "/opt/vtb/gstreamer-1.28.9/lib/aarch64-linux-gnu",
-                "plugin_path": "/opt/vtb/gstreamer-1.28.9/lib/aarch64-linux-gnu/gstreamer-1.0",
-                "fps": 30
+                "plugin_path": "/opt/vtb/gstreamer-1.28.9/lib/aarch64-linux-gnu/gstreamer-1.0"
             })json");
 
     vtb::VtbApplicationConfigParser parser;
     const vtb::VtbApplicationConfiguration config = parser.parse(json);
     require(config.output.uvc_enabled, "UVC output was not enabled");
     require(config.output.uvc_device == "/dev/video2", "UVC device mismatch");
-    require(
-        config.output.uvc_link_path == "/run/vtb/uvc-link.mjpeg",
-        "UVC link path mismatch");
-    require(config.output.uvc_fps == 30, "UVC fps mismatch");
-}
 
-void test_uvc_fps_does_not_exceed_render_fps() {
-    std::string json = valid_configuration();
-    const std::string expected =
-        R"json("rtsp_url": "rtsp://127.0.0.1:8554/live2d")json";
-    const std::size_t position = json.find(expected);
-    require(position != std::string::npos, "output URL is missing");
-    json.replace(
-        position,
-        expected.size(),
-        expected + R"json(,
-            "uvc": {
-                "enabled": true,
-                "device": "/dev/video2",
-                "gst_launch_path": "/opt/vtb/gstreamer-1.28.9/bin/gst-launch-1.0",
-                "library_path": "/opt/vtb/gstreamer-1.28.9/lib/aarch64-linux-gnu",
-                "plugin_path": "/opt/vtb/gstreamer-1.28.9/lib/aarch64-linux-gnu/gstreamer-1.0",
-                "fps": 60
-            })json");
-
-    vtb::VtbApplicationConfigParser parser;
-    bool rejected = false;
-    try {
-        parser.parse(json);
-    } catch (const std::invalid_argument&) {
-        rejected = true;
-    }
-    require(rejected, "UVC fps above render fps was accepted");
+    const std::string uvc_device = R"json("device": "/dev/video2")json";
+    const std::size_t device_position = json.find(uvc_device);
+    require(device_position != std::string::npos, "UVC device is missing");
+    json.insert(device_position + uvc_device.size(), R"json(,
+                "link_path": "/run/vtb/uvc-link.mjpeg",
+                "fps": 60)json");
+    const vtb::VtbApplicationConfiguration legacy_config = parser.parse(json);
+    require(legacy_config.output.uvc_enabled, "Legacy UVC output was disabled");
+    require(legacy_config.render.output_fps == config.render.output_fps,
+            "Legacy UVC fps overrode the render fps");
 }
 
 void test_independent_network_outputs() {
@@ -302,7 +278,6 @@ int main() {
         test_instrumentation_section_is_optional();
         test_instrumentation_interval_range();
         test_uvc_output_configuration();
-        test_uvc_fps_does_not_exceed_render_fps();
         test_independent_network_outputs();
         std::cout << "vtb_application_config_test passed\n";
         return 0;

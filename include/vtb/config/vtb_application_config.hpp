@@ -50,11 +50,9 @@ public:
     std::string webrtc_bind_address;
     bool uvc_enabled = false;
     std::string uvc_device;
-    std::string uvc_link_path;
     std::string gst_launch_path;
     std::string gstreamer_library_path;
     std::string gstreamer_plugin_path;
-    std::uint32_t uvc_fps = 0;
 };
 
 class InstrumentationConfiguration {

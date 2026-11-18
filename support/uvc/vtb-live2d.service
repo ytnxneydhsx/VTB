@@ -1,0 +1,17 @@
+[Unit]
+Description=VTB Live2D with on-demand UVC
+Requires=rk3588-usb-gadget.service
+Conflicts=vtb-uvc-link.service
+After=rk3588-usb-gadget.service vtb-uvc-link.service
+
+[Service]
+Type=exec
+EnvironmentFile=/etc/vtb/live2d-uvc.env
+UnsetEnvironment=DISPLAY XAUTHORITY MALI_DEFAULT_WINSYS
+RuntimeDirectory=vtb-live2d
+Environment=GST_REGISTRY=/run/vtb-live2d/gstreamer-registry.bin
+ExecStartPre=/usr/local/sbin/vtb-uvc-switch camera
+ExecStart=/usr/bin/env ${VTB_LIVE2D_EXECUTABLE} --config ${VTB_LIVE2D_CONFIG} --resolution 1x1
+ExecStopPost=/usr/local/sbin/vtb-uvc-switch base
+TimeoutStartSec=30s
+TimeoutStopSec=25s

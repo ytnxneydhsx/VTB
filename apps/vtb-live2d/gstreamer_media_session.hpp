@@ -1,7 +1,6 @@
 #pragma once
 
 #include <chrono>
-#include <cstdint>
 #include <memory>
 #include <string>
 
@@ -18,8 +17,6 @@ public:
     std::string webrtc_bind_address;
     bool uvc_enabled = false;
     std::string uvc_device;
-    std::string uvc_link_path;
-    std::uint32_t uvc_fps = 0;
     std::string plugin_path;
     std::string metrics_path;
     std::chrono::milliseconds metrics_report_interval{60000};
@@ -36,7 +33,7 @@ public:
  * GstRTSPServer 当前处于活动状态的 shared media 提交一次，再由
  * GstRTSPStream 分发给多个客户端；最后一个 RTSP 客户端离开后由 media
  * factory 回收该实例，后续连接创建新的共享实例。
- * UVC 可通过进程内 uvcsink 或外置 UVC Link 接收 MJPEG。
+ * MJPEG 经过有界队列直接交给进程内的 uvcsink。
  * 最后一个 GstMemory 引用释放时，
  * Lease 析构并把 RGA 目标槽位归还缓冲池。
  */

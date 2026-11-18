@@ -159,7 +159,6 @@ private:
     GstElement* pipeline_ = nullptr;
     GstElement* raw_source_ = nullptr;
     GstElement* h264_encoder_ = nullptr;
-    GstElement* uvc_caps_filter_ = nullptr;
     GstElement* mjpeg_encoder_ = nullptr;
     GMainContext* rtsp_context_ = nullptr;
     GMainLoop* rtsp_loop_ = nullptr;

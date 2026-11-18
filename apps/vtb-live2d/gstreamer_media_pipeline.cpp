@@ -18,6 +18,9 @@ namespace {
 
 using namespace gstreamer_media_detail;
 
+constexpr guint kUvcJpegQueueCapacity = 10;
+constexpr gint64 kUvcSinkTimestampOffset = 40 * GST_MSECOND;
+
 class Nv12LeaseHolder final {
 public:
     explicit Nv12LeaseHolder(Nv12FrameLease lease)
@@ -249,28 +252,9 @@ void GStreamerMediaSession::Impl::build_mjpeg_pipeline(GstElement* nv12_tee) {
     using namespace gstreamer_media_detail;
 
     GstElement* mjpeg_queue = make_element("queue", "mjpeg-raw-queue");
-    GstElement* frame_rate = make_element("videorate", "uvc-rate");
-    uvc_caps_filter_ = make_element("capsfilter", "uvc-raw-caps");
     mjpeg_encoder_ = make_element("mppjpegenc", "mjpeg-encoder");
     GstElement* jpeg_parser = make_element("jpegparse", "mjpeg-parser");
-    GstElement* uvc_output = nullptr;
-    if (config_.uvc_link_path.empty()) {
-        uvc_output = make_element("uvcsink", "uvc-output");
-        set_uvc_device(uvc_output);
-    } else {
-        uvc_output = make_element("filesink", "uvc-link-output");
-        g_object_set(
-            uvc_output,
-            "location",
-            config_.uvc_link_path.c_str(),
-            "sync",
-            FALSE,
-            "async",
-            FALSE,
-            nullptr);
-    }
     configure_queue(mjpeg_queue, kRawQueueCapacity);
-    g_object_set(frame_rate, "drop-only", TRUE, nullptr);
     g_object_set(
         mjpeg_encoder_,
         "q-factor",
@@ -289,13 +273,15 @@ void GStreamerMediaSession::Impl::build_mjpeg_pipeline(GstElement* nv12_tee) {
         "overrun",
         G_CALLBACK(raw_queue_overrun),
         this);
-    add_elements(
-        pipeline_,
-        {mjpeg_queue, frame_rate, uvc_caps_filter_, mjpeg_encoder_,
-         jpeg_parser, uvc_output});
-    link_elements(
-        {nv12_tee, mjpeg_queue, frame_rate, uvc_caps_filter_,
-         mjpeg_encoder_, jpeg_parser, uvc_output});
+    add_elements(pipeline_, {mjpeg_queue, mjpeg_encoder_, jpeg_parser});
+    link_elements({nv12_tee, mjpeg_queue, mjpeg_encoder_, jpeg_parser});
+    GstElement* jpeg_queue = make_element("queue", "uvc-mjpeg-output-queue");
+    add_elements(pipeline_, {jpeg_queue});
+    GstElement* uvc_output = make_element("uvcsink", "uvc-output");
+    add_elements(pipeline_, {uvc_output});
+    configure_queue(jpeg_queue, kUvcJpegQueueCapacity);
+    set_uvc_device(uvc_output);
+    link_elements({jpeg_parser, jpeg_queue, uvc_output});
     add_encoder_probe(
         mjpeg_encoder_, GST_PAD_PROBE_TYPE_BUFFER, mjpeg_output_probe);
 }
@@ -335,11 +321,6 @@ void GStreamerMediaSession::Impl::initialize_stream(
         return;
     }
     validate_frame(frame);
-    if (config_.uvc_enabled &&
-        config_.uvc_fps > frame.frames_per_second) {
-        throw std::invalid_argument(
-            "UVC FPS exceeds the rendered NV12 frame rate");
-    }
     GstCaps* caps = nv12_dma_buf_caps(
         frame.width, frame.height, frame.frames_per_second);
     gst_app_src_set_caps(GST_APP_SRC(raw_source_), caps);
@@ -354,12 +335,6 @@ void GStreamerMediaSession::Impl::initialize_stream(
             kH264GopSeconds;
         g_object_set(
             h264_encoder_, "gop", static_cast<gint>(h264_gop_frames_), nullptr);
-    }
-    if (config_.uvc_enabled) {
-        GstCaps* uvc_caps = nv12_dma_buf_caps(
-            frame.width, frame.height, config_.uvc_fps);
-        g_object_set(uvc_caps_filter_, "caps", uvc_caps, nullptr);
-        gst_caps_unref(uvc_caps);
     }
     width_ = frame.width;
     height_ = frame.height;
@@ -476,7 +451,15 @@ void GStreamerMediaSession::Impl::set_uvc_device(GstElement* sink) const {
     if (child == nullptr) {
         throw std::runtime_error("uvcsink has no v4l2sink child");
     }
-    g_object_set(child, "device", config_.uvc_device.c_str(), nullptr);
+    g_object_set(
+        child,
+        "device",
+        config_.uvc_device.c_str(),
+        "sync",
+        TRUE,
+        "ts-offset",
+        kUvcSinkTimestampOffset,
+        nullptr);
     g_object_unref(child);
 }
 

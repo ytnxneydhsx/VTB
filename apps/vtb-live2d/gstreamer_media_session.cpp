@@ -130,10 +130,9 @@ void GStreamerMediaSession::Impl::validate_config() const {
         config_.webrtc_bind_address.empty()) {
         throw std::invalid_argument("WebRTC-only output requires a WebRTC bind address");
     }
-    if (config_.uvc_enabled &&
-        (config_.uvc_device.empty() || config_.uvc_fps == 0)) {
+    if (config_.uvc_enabled && config_.uvc_device.empty()) {
         throw std::invalid_argument(
-            "Enabled GStreamer UVC output requires a device and FPS");
+            "Enabled GStreamer UVC output requires a device");
     }
     if (config_.metrics_report_interval.count() <= 0) {
         throw std::invalid_argument(
@@ -234,7 +233,6 @@ void GStreamerMediaSession::Impl::cleanup() noexcept {
     cleanup_rtsp_server();
     raw_source_ = nullptr;
     h264_encoder_ = nullptr;
-    uvc_caps_filter_ = nullptr;
     mjpeg_encoder_ = nullptr;
     if (dma_buf_allocator_ != nullptr) {
         gst_object_unref(dma_buf_allocator_);

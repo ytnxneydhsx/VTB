@@ -266,11 +266,6 @@ MediaOutputConfiguration parse_output(const Json& root) {
     }
     config.uvc_device =
         required_nonempty_string(uvc, "device", "output.uvc");
-    const auto uvc_link_path = uvc.find("link_path");
-    if (uvc_link_path != uvc.end()) {
-        config.uvc_link_path =
-            required_nonempty_string(uvc, "link_path", "output.uvc");
-    }
     config.gst_launch_path =
         required_nonempty_string(uvc, "gst_launch_path", "output.uvc");
     config.gstreamer_library_path = required_nonempty_string(
@@ -279,8 +274,6 @@ MediaOutputConfiguration parse_output(const Json& root) {
         config.gstreamer_plugin_path = required_nonempty_string(
             uvc, "plugin_path", "output.uvc");
     }
-    config.uvc_fps = required_uint32(
-        uvc, "fps", "output.uvc", 1, 240);
     return config;
 }
 
@@ -331,11 +324,6 @@ VtbApplicationConfiguration VtbApplicationConfigParser::parse(
     config.control = parse_control(root);
     config.render = parse_render(root);
     config.output = parse_output(root);
-    if (config.output.uvc_enabled &&
-        config.output.uvc_fps > config.render.output_fps) {
-        throw std::invalid_argument(
-            "output.uvc.fps must not exceed render.output_fps");
-    }
     config.instrumentation = parse_instrumentation(root);
     return config;
 }
