@@ -194,9 +194,13 @@ OpenSeeFace 兼容 PnP/表情、校准和 Live2D 参数映射；Godot 只通过�
 Ayagami。产品路径不再启动 Python、JSON 或 UDP 参数桥接，浏览器校准和取景控制由
 宿主 `Live2DControlServer` 提供。
 
-输出由宿主 `MediaOutputSession` 管理，Godot 通过同步编码包回调交付 H.264 和可选
-MJPEG 数据。ABI v4 要求宿主与 LibGodot 成对构建；`output.rtsp_url` 配置网络分支，
-可选 `output.uvc` 配置 GStreamer 1.28.9 UVC 分支。
+宿主 `GStreamerMediaSession` 接收 RGA 输出的 NV12 帧，按配置创建 H.264 和 MJPEG 分支。
+`output.rtsp_enabled` 和 `output.webrtc.enabled` 独立控制两路网络输出，同时开启时共享
+一次 H.264 编码，两路关闭时跳过 H.264 分支。RTSP 默认开启，开启时需填写 `output.rtsp_url`。
+WebRTC 开启时需填写 `output.webrtc.web_directory`。只开 WebRTC 时，还需填写
+`output.webrtc.bind_address`；两路同时开启的旧配置可继续沿用 RTSP URL 中的主机地址。
+`output.uvc.enabled` 独立控制 MJPEG/UVC 分支。需要指定 GStreamer 插件目录时，可以在
+`output.gstreamer_plugin_path` 设置，原有的 `output.uvc.plugin_path` 也可继续用于启用 UVC 的配置。
 模块依赖、接口语义和构建边界见 [模块边界](docs/module-boundaries.md)。
 
 产品配置统一从 `--config` 指定的 JSON 文件读取。摄像头类型、设备、FourCC、尺寸、

@@ -9,6 +9,24 @@
 
 namespace vtb {
 
+void GStreamerMediaSession::Impl::configure_rtsp_sink(GstElement* upstream) {
+    using namespace gstreamer_media_detail;
+
+    GstElement* sink = make_element("appsink", "rtsp-server-input");
+    add_elements(pipeline_, {sink});
+    GstAppSink* app_sink = GST_APP_SINK(sink);
+    gst_app_sink_set_emit_signals(app_sink, TRUE);
+    gst_app_sink_set_max_buffers(app_sink, kEncodedQueueCapacity);
+    gst_app_sink_set_drop(app_sink, TRUE);
+    g_object_set(sink, "sync", FALSE, "enable-last-sample", FALSE, nullptr);
+
+    GstElement* queue = make_element("queue", "rtsp-h264-queue");
+    add_elements(pipeline_, {queue});
+    configure_queue(queue, kEncodedQueueCapacity);
+    link_elements({upstream, queue, sink});
+    g_signal_connect(sink, "new-sample", G_CALLBACK(h264_sample_callback), this);
+}
+
 GstFlowReturn GStreamerMediaSession::Impl::h264_sample_callback(
     GstAppSink* sink,
     gpointer user_data) noexcept {
@@ -182,7 +200,7 @@ void GStreamerMediaSession::Impl::configure_rtsp_media(
         rtsp_media_ = GST_RTSP_MEDIA(gst_object_ref(media));
         rtsp_source_ = source;
     }
-    client_idr_requested_.store(true);
+    rtsp_idr_requested_.store(true);
     std::cout << "VTB_RTSP_MEDIA_CONFIGURED shared=1 reusable=0\n";
 }
 
@@ -214,7 +232,7 @@ void GStreamerMediaSession::Impl::release_rtsp_shared_stream(
     if (retained_media != nullptr) {
         gst_object_unref(retained_media);
     }
-    client_idr_requested_.store(true);
+    rtsp_idr_requested_.store(true);
     std::cout << "VTB_RTSP_MEDIA_RELEASED shared=1 reusable=0\n";
 }
 
@@ -246,7 +264,7 @@ GstFlowReturn GStreamerMediaSession::Impl::push_rtsp_buffer(
         if (GST_CLOCK_TIME_IS_VALID(duration) && duration > 0) {
             rtsp_next_timestamp_ += duration;
         } else {
-            rtsp_next_timestamp_ += GST_SECOND / 60;
+            rtsp_next_timestamp_ += GST_SECOND / render_fps_;
         }
         if (keyframe) {
             rtsp_waiting_for_keyframe_ = false;
@@ -286,7 +304,7 @@ void GStreamerMediaSession::Impl::prime_rtsp_shared_stream(
         throw;
     }
     gst_buffer_unref(keyframe);
-    client_idr_requested_.store(true);
+    rtsp_idr_requested_.store(true);
 }
 
 GstFlowReturn GStreamerMediaSession::Impl::publish_h264_sample(

@@ -19,17 +19,11 @@ std::size_t checked_size(std::uint64_t size) {
 }
 
 void validate_frame(const Nv12FrameView& frame) {
-    if (frame.dma_buf_fd < 0 || frame.dma_buf_size == 0 ||
-        frame.buffer_id == 0 || frame.stream_generation == 0 ||
-        frame.width == 0 || frame.height == 0 ||
+    if (frame.width == 0 || frame.height == 0 ||
         frame.horizontal_stride < frame.width ||
         frame.vertical_stride < frame.height ||
-        frame.frames_per_second == 0 || frame.timestamp_ns == 0 ||
-        frame.sequence == 0) {
-        throw std::invalid_argument("GStreamer NV12 frame is invalid");
-    }
-    if (frame.end_of_stream != 0 && frame.end_of_stream != 1) {
-        throw std::invalid_argument("GStreamer NV12 EOS flag is invalid");
+        frame.frames_per_second == 0) {
+        throw std::invalid_argument("GStreamer NV12 stream layout is invalid");
     }
 }
 
@@ -47,31 +41,7 @@ void set_enum_property(
     GstElement* element,
     const char* property_name,
     const char* value_nick) {
-    GParamSpec* property = g_object_class_find_property(
-        G_OBJECT_GET_CLASS(element), property_name);
-    if (property == nullptr || !G_IS_PARAM_SPEC_ENUM(property)) {
-        throw std::runtime_error(
-            std::string("GStreamer enum property is unavailable: ") +
-            property_name);
-    }
-    GEnumClass* enum_class = G_ENUM_CLASS(
-        g_type_class_ref(G_PARAM_SPEC_VALUE_TYPE(property)));
-    if (enum_class == nullptr) {
-        throw std::runtime_error(
-            std::string("Failed to inspect GStreamer enum property: ") +
-            property_name);
-    }
-    const GEnumValue* value =
-        g_enum_get_value_by_nick(enum_class, value_nick);
-    if (value == nullptr) {
-        g_type_class_unref(enum_class);
-        throw std::runtime_error(
-            std::string("Unsupported GStreamer enum value: ") +
-            property_name + "=" + value_nick);
-    }
-    const gint enum_value = value->value;
-    g_type_class_unref(enum_class);
-    g_object_set(element, property_name, enum_value, nullptr);
+    gst_util_set_object_arg(G_OBJECT(element), property_name, value_nick);
 }
 
 void add_elements(

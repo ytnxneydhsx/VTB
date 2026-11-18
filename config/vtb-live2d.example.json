@@ -36,9 +36,11 @@
     "total_frames": 0
   },
   "output": {
+    "rtsp_enabled": true,
     "rtsp_url": "rtsp://192.168.77.2:8554/live2d",
     "webrtc": {
       "enabled": false,
+      "bind_address": "192.168.77.2",
       "web_directory": "/opt/vtb/gstreamer-1.28.9-webrtc/share/gstwebrtc-api/dist"
     },
     "uvc": {

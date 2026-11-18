@@ -226,16 +226,31 @@ RenderConfiguration parse_render(const Json& root) {
 MediaOutputConfiguration parse_output(const Json& root) {
     const Json& output = required_object(root, "output", "root");
     MediaOutputConfiguration config;
-    config.rtsp_url = required_nonempty_string(output, "rtsp_url", "output");
+    if (output.contains("rtsp_enabled")) {
+        config.rtsp_enabled = required_value<bool>(output, "rtsp_enabled", "output");
+    }
+    if (config.rtsp_enabled) {
+        config.rtsp_url = required_nonempty_string(output, "rtsp_url", "output");
+    }
     const auto webrtc = output.find("webrtc");
     if (webrtc != output.end()) {
         if (!webrtc->is_object()) {
             throw std::invalid_argument("output.webrtc must be an object");
         }
-        if (required_value<bool>(*webrtc, "enabled", "output.webrtc")) {
+        config.webrtc_enabled =
+            required_value<bool>(*webrtc, "enabled", "output.webrtc");
+        if (config.webrtc_enabled) {
             config.webrtc_web_directory =
                 required_nonempty_string(*webrtc, "web_directory", "output.webrtc");
+            if (!config.rtsp_enabled || webrtc->contains("bind_address")) {
+                config.webrtc_bind_address = required_nonempty_string(
+                    *webrtc, "bind_address", "output.webrtc");
+            }
         }
+    }
+    if (output.contains("gstreamer_plugin_path")) {
+        config.gstreamer_plugin_path = required_nonempty_string(
+            output, "gstreamer_plugin_path", "output");
     }
     const auto uvc_iterator = output.find("uvc");
     if (uvc_iterator == output.end()) {
@@ -260,8 +275,10 @@ MediaOutputConfiguration parse_output(const Json& root) {
         required_nonempty_string(uvc, "gst_launch_path", "output.uvc");
     config.gstreamer_library_path = required_nonempty_string(
         uvc, "library_path", "output.uvc");
-    config.gstreamer_plugin_path = required_nonempty_string(
-        uvc, "plugin_path", "output.uvc");
+    if (config.gstreamer_plugin_path.empty()) {
+        config.gstreamer_plugin_path = required_nonempty_string(
+            uvc, "plugin_path", "output.uvc");
+    }
     config.uvc_fps = required_uint32(
         uvc, "fps", "output.uvc", 1, 240);
     return config;

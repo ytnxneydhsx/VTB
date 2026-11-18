@@ -81,6 +81,10 @@ private:
     static std::int32_t submit_callback(
         void* context,
         Nv12FrameLease* frame) noexcept;
+    static GstPadProbeReturn h264_input_probe(
+        GstPad* pad,
+        GstPadProbeInfo* info,
+        gpointer user_data) noexcept;
     static GstPadProbeReturn h264_output_probe(
         GstPad* pad,
         GstPadProbeInfo* info,
@@ -117,9 +121,11 @@ private:
         GstElement* encoder,
         GstPadProbeType type,
         GstPadProbeCallback callback);
-    static void configure_appsink(GstElement* sink);
-    void add_webrtc_output(GstElement* parser);
     void build_pipeline();
+    void build_h264_pipeline(GstElement* nv12_tee);
+    void build_mjpeg_pipeline(GstElement* nv12_tee);
+    void configure_rtsp_sink(GstElement* upstream);
+    void configure_webrtc_sink(GstElement* upstream);
 
     void start_rtsp_server();
     void configure_rtsp_media(GstRTSPMedia* media);
@@ -134,7 +140,6 @@ private:
 
     void initialize_stream(const Nv12FrameView& frame);
     void require_stream_contract(const Nv12FrameView& frame) const;
-    void request_h264_idr(GstClockTime timestamp);
     void push(Nv12FrameLease frame);
     void set_uvc_device(GstElement* sink) const;
 
@@ -154,7 +159,6 @@ private:
     GstElement* pipeline_ = nullptr;
     GstElement* raw_source_ = nullptr;
     GstElement* h264_encoder_ = nullptr;
-    GstElement* h264_sink_ = nullptr;
     GstElement* uvc_caps_filter_ = nullptr;
     GstElement* mjpeg_encoder_ = nullptr;
     GMainContext* rtsp_context_ = nullptr;
@@ -172,7 +176,7 @@ private:
     std::exception_ptr failure_;
     std::mutex finish_mutex_;
     std::atomic<bool> input_eos_{false};
-    std::atomic<bool> client_idr_requested_{false};
+    std::atomic<bool> rtsp_idr_requested_{false};
     std::atomic<std::uint64_t> submitted_frames_{0};
     std::atomic<std::uint64_t> h264_frames_{0};
     std::atomic<std::uint64_t> mjpeg_frames_{0};
@@ -187,6 +191,7 @@ private:
     std::uint32_t vertical_stride_ = 0;
     std::uint32_t render_fps_ = 0;
     std::uint64_t h264_gop_frames_ = 0;
+    std::uint64_t h264_input_frames_ = 0;
     std::uint64_t stream_generation_ = 0;
     std::uint64_t base_timestamp_ns_ = 0;
     GstClockTime rtsp_next_timestamp_ = 0;

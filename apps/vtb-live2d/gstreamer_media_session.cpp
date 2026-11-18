@@ -16,6 +16,11 @@ GStreamerMediaSession::Impl::Impl(GStreamerMediaSessionConfig config)
     : config_(std::move(config)),
       raw_push_timer_(timers_.register_timer("live2d.gstreamer_raw_push")) {
     validate_config();
+    if (config_.webrtc_enabled && config_.webrtc_bind_address.empty()) {
+        // 旧配置同时启用两路时，WebRTC 沿用 RTSP URL 的主机地址。
+        config_.webrtc_bind_address =
+            gstreamer_media_detail::parse_rtsp_endpoint(config_.rtsp_url).address;
+    }
     configure_plugin_path();
     gst_init(nullptr, nullptr);
     if (!config_.plugin_path.empty()) {
@@ -118,8 +123,12 @@ std::int32_t GStreamerMediaSession::Impl::submit_callback(
 }
 
 void GStreamerMediaSession::Impl::validate_config() const {
-    if (config_.rtsp_url.empty()) {
-        throw std::invalid_argument("GStreamer RTSP URL is required");
+    if (config_.rtsp_enabled && config_.rtsp_url.empty()) {
+        throw std::invalid_argument("Enabled GStreamer RTSP output requires a URL");
+    }
+    if (config_.webrtc_enabled && !config_.rtsp_enabled &&
+        config_.webrtc_bind_address.empty()) {
+        throw std::invalid_argument("WebRTC-only output requires a WebRTC bind address");
     }
     if (config_.uvc_enabled &&
         (config_.uvc_device.empty() || config_.uvc_fps == 0)) {
@@ -225,7 +234,6 @@ void GStreamerMediaSession::Impl::cleanup() noexcept {
     cleanup_rtsp_server();
     raw_source_ = nullptr;
     h264_encoder_ = nullptr;
-    h264_sink_ = nullptr;
     uvc_caps_filter_ = nullptr;
     mjpeg_encoder_ = nullptr;
     if (dma_buf_allocator_ != nullptr) {

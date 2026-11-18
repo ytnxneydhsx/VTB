@@ -79,6 +79,8 @@ void test_valid_configuration() {
         "RGA DMA heap mismatch");
     require(config.control.port == 11575, "control port mismatch");
     require(config.render.output_fps == 30, "output fps mismatch");
+    require(config.output.rtsp_enabled, "legacy RTSP output was disabled");
+    require(!config.output.webrtc_enabled, "default WebRTC output was enabled");
     require(config.output.rtsp_url == "rtsp://127.0.0.1:8554/live2d", "output URL mismatch");
     require(
         config.instrumentation.metrics_persistence_enabled(),
@@ -236,6 +238,59 @@ void test_uvc_fps_does_not_exceed_render_fps() {
     require(rejected, "UVC fps above render fps was accepted");
 }
 
+void test_independent_network_outputs() {
+    const auto parse_outputs = [](const std::string& fields) {
+        std::string json = valid_configuration();
+        const std::string marker =
+            R"json("rtsp_url": "rtsp://127.0.0.1:8554/live2d")json";
+        const auto position = json.find(marker);
+        require(position != std::string::npos, "output URL is missing");
+        json.replace(position, marker.size(), fields);
+        return vtb::VtbApplicationConfigParser{}.parse(json).output;
+    };
+
+    const auto disabled = parse_outputs(R"json("rtsp_enabled": false)json");
+    require(!disabled.rtsp_enabled, "RTSP output was enabled");
+    require(!disabled.webrtc_enabled, "WebRTC output was enabled");
+
+    const auto webrtc_only = parse_outputs(R"json(
+        "rtsp_enabled": false,
+        "webrtc": {
+            "enabled": true,
+            "bind_address": "192.168.77.2",
+            "web_directory": "/runtime/webrtc"
+        },
+        "gstreamer_plugin_path": "/runtime/gstreamer")json");
+    require(!webrtc_only.rtsp_enabled && webrtc_only.rtsp_url.empty(),
+            "WebRTC-only mode depends on RTSP");
+    require(webrtc_only.webrtc_enabled, "WebRTC output was disabled");
+    require(webrtc_only.webrtc_bind_address == "192.168.77.2",
+            "WebRTC bind address mismatch");
+    require(webrtc_only.webrtc_web_directory == "/runtime/webrtc",
+            "WebRTC web directory mismatch");
+    require(webrtc_only.gstreamer_plugin_path == "/runtime/gstreamer",
+            "standalone GStreamer plugin directory mismatch");
+
+    const auto both = parse_outputs(R"json(
+        "rtsp_url": "rtsp://127.0.0.1:8554/live2d",
+        "webrtc": {"enabled": true, "web_directory": "/runtime/webrtc"})json");
+    require(both.rtsp_enabled && both.webrtc_enabled,
+            "legacy dual-output configuration was rejected");
+    require(both.webrtc_bind_address.empty(),
+            "legacy configuration should defer WebRTC address resolution");
+
+    bool rejected = false;
+    try {
+        parse_outputs(R"json(
+            "rtsp_enabled": false,
+            "webrtc": {"enabled": true, "web_directory": "/runtime/webrtc"})json");
+    } catch (const std::invalid_argument& error) {
+        rejected = std::string(error.what()).find("output.webrtc.bind_address") !=
+            std::string::npos;
+    }
+    require(rejected, "WebRTC-only mode accepted a missing bind address");
+}
+
 }  // namespace
 
 int main() {
@@ -248,6 +303,7 @@ int main() {
         test_instrumentation_interval_range();
         test_uvc_output_configuration();
         test_uvc_fps_does_not_exceed_render_fps();
+        test_independent_network_outputs();
         std::cout << "vtb_application_config_test passed\n";
         return 0;
     } catch (const std::exception& error) {

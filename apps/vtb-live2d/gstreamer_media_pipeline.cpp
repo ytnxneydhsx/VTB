@@ -45,6 +45,39 @@ void destroy_lease_holder(gpointer data) {
 
 }  // namespace
 
+GstPadProbeReturn GStreamerMediaSession::Impl::h264_input_probe(
+    GstPad* pad,
+    GstPadProbeInfo* info,
+    gpointer user_data) noexcept {
+    auto& self = *static_cast<Impl*>(user_data);
+    const std::uint64_t received = self.h264_input_frames_++;
+    const bool rtsp_request = self.rtsp_idr_requested_.exchange(false);
+    const bool periodic_request =
+        received != 0 && received % self.h264_gop_frames_ == 0;
+    if (!rtsp_request && !periodic_request) {
+        return GST_PAD_PROBE_OK;
+    }
+
+    try {
+        GstBuffer* buffer = gst_pad_probe_info_get_buffer(info);
+        GstEvent* event = gst_video_event_new_downstream_force_key_unit(
+            GST_BUFFER_PTS(buffer),
+            GST_CLOCK_TIME_NONE,
+            GST_CLOCK_TIME_NONE,
+            TRUE,
+            self.key_unit_count_++);
+        // 在 H.264 队列线程中先发事件，再将当前帧交给编码器。
+        if (!gst_pad_push_event(pad, event)) {
+            throw std::runtime_error(
+                "GStreamer H.264 encoder rejected a ForceKeyUnit event");
+        }
+        self.idr_requests_.fetch_add(1);
+    } catch (...) {
+        self.remember_failure(std::current_exception());
+    }
+    return GST_PAD_PROBE_OK;
+}
+
 GstPadProbeReturn GStreamerMediaSession::Impl::h264_output_probe(
     GstPad*,
     GstPadProbeInfo* info,
@@ -101,22 +134,7 @@ void GStreamerMediaSession::Impl::add_encoder_probe(
     gst_object_unref(source_pad);
 }
 
-void GStreamerMediaSession::Impl::configure_appsink(GstElement* sink) {
-    GstAppSink* app_sink = GST_APP_SINK(sink);
-    gst_app_sink_set_emit_signals(app_sink, TRUE);
-    gst_app_sink_set_max_buffers(
-        app_sink, gstreamer_media_detail::kEncodedQueueCapacity);
-    gst_app_sink_set_drop(app_sink, TRUE);
-    g_object_set(
-        sink,
-        "sync",
-        FALSE,
-        "enable-last-sample",
-        FALSE,
-        nullptr);
-}
-
-void GStreamerMediaSession::Impl::add_webrtc_output(GstElement* parser) {
+void GStreamerMediaSession::Impl::configure_webrtc_sink(GstElement* upstream) {
     using namespace gstreamer_media_detail;
 
     const std::string& web_directory = config_.webrtc_web_directory;
@@ -127,25 +145,18 @@ void GStreamerMediaSession::Impl::add_webrtc_output(GstElement* parser) {
             "WebRTC web_directory must be absolute and contain index.html");
     }
 
-    RtspEndpoint endpoint = parse_rtsp_endpoint(config_.rtsp_url);
-    if (endpoint.address.find(':') != std::string::npos &&
-        endpoint.address.front() != '[') {
-        endpoint.address = "[" + endpoint.address + "]";
+    std::string address = config_.webrtc_bind_address;
+    if (address.find(':') != std::string::npos && address.front() != '[') {
+        address = "[" + address + "]";
     }
     // The bundled gstwebrtc-api page uses the page host and port 8443 for signalling.
-    const std::string web_address =
-        "http://" + endpoint.address + ":8080/";
+    const std::string web_address = "http://" + address + ":8080/";
 
     GstElement* sink = make_element("webrtcsink", "live2d-webrtc");
     add_elements(pipeline_, {sink});
-    GstElement* tee = make_element("tee", "encoded-h264-tee");
-    add_elements(pipeline_, {tee});
-    GstElement* rtsp_queue = make_element("queue", "rtsp-h264-queue");
-    add_elements(pipeline_, {rtsp_queue});
     GstElement* webrtc_queue = make_element("queue", "webrtc-h264-queue");
     add_elements(pipeline_, {webrtc_queue});
 
-    configure_queue(rtsp_queue, kEncodedQueueCapacity);
     configure_queue(webrtc_queue, kEncodedQueueCapacity);
     GstCaps* caps = gst_caps_new_empty_simple("video/x-h264");
     GstStructure* meta = gst_structure_new(
@@ -156,7 +167,7 @@ void GStreamerMediaSession::Impl::add_webrtc_output(GstElement* parser) {
         "meta", meta,
         "stun-server", static_cast<const gchar*>(nullptr),
         "run-signalling-server", TRUE,
-        "signalling-server-host", endpoint.address.c_str(),
+        "signalling-server-host", address.c_str(),
         "signalling-server-port", static_cast<guint>(8443),
         "run-web-server", TRUE,
         "web-server-host-addr", web_address.c_str(),
@@ -167,28 +178,22 @@ void GStreamerMediaSession::Impl::add_webrtc_output(GstElement* parser) {
     // MPP already produced the H.264 stream with a fixed QP.
     set_enum_property(sink, "congestion-control", "disabled");
 
-    link_elements({parser, tee, rtsp_queue, h264_sink_});
-    link_elements({tee, webrtc_queue});
+    link_elements({upstream, webrtc_queue});
     if (!gst_element_link_pads(webrtc_queue, "src", sink, "video_%u")) {
         throw std::runtime_error("Failed to link H.264 to webrtcsink");
     }
 }
 
-void GStreamerMediaSession::Impl::build_pipeline() {
+void GStreamerMediaSession::Impl::build_h264_pipeline(GstElement* nv12_tee) {
     using namespace gstreamer_media_detail;
 
-    pipeline_ = gst_pipeline_new("vtb-media");
-    if (pipeline_ == nullptr) {
-        throw std::runtime_error("Failed to create GStreamer media pipeline");
-    }
-    raw_source_ = make_element("appsrc", "nv12-source");
-    GstElement* tee = make_element("tee", "nv12-tee");
     GstElement* h264_queue = make_element("queue", "h264-raw-queue");
+    add_elements(pipeline_, {h264_queue});
     h264_encoder_ = make_element("mpph264enc", "h264-encoder");
+    add_elements(pipeline_, {h264_encoder_});
     GstElement* h264_parser = make_element("h264parse", "h264-parser");
-    h264_sink_ = make_element("appsink", "rtsp-server-input");
+    add_elements(pipeline_, {h264_parser});
 
-    configure_appsrc(raw_source_, kRawAppSrcCapacity);
     configure_queue(h264_queue, kRawQueueCapacity);
     set_enum_property(h264_encoder_, "rc-mode", "fixqp");
     set_enum_property(h264_encoder_, "profile", "high");
@@ -203,87 +208,121 @@ void GStreamerMediaSession::Impl::build_pipeline() {
         FALSE,
         nullptr);
     g_object_set(h264_parser, "config-interval", -1, nullptr);
-    configure_appsink(h264_sink_);
     g_signal_connect(
         h264_queue,
         "overrun",
         G_CALLBACK(raw_queue_overrun),
         this);
 
-    add_elements(
-        pipeline_,
-        {raw_source_, tee, h264_queue, h264_encoder_, h264_parser,
-         h264_sink_});
-    link_elements({raw_source_, tee});
-    link_elements({tee, h264_queue, h264_encoder_, h264_parser});
-    if (config_.webrtc_web_directory.empty()) {
-        link_elements({h264_parser, h264_sink_});
-    } else {
-        add_webrtc_output(h264_parser);
+    link_elements({nv12_tee, h264_queue, h264_encoder_, h264_parser});
+    GstPad* h264_queue_src = gst_element_get_static_pad(h264_queue, "src");
+    if (h264_queue_src == nullptr) {
+        throw std::runtime_error("GStreamer H.264 queue has no source pad");
     }
-    g_signal_connect(
-        h264_sink_,
-        "new-sample",
-        G_CALLBACK(h264_sample_callback),
-        this);
+    gst_pad_add_probe(
+        h264_queue_src, GST_PAD_PROBE_TYPE_BUFFER, h264_input_probe, this, nullptr);
+    gst_object_unref(h264_queue_src);
+
+    GstElement* output_source = h264_parser;
+    // 两路同时启用时共用一次 H.264 编码，各自的队列隔离下游。
+    const bool shared_output = config_.rtsp_enabled && config_.webrtc_enabled;
+    if (shared_output) {
+        output_source = make_element("tee", "encoded-h264-tee");
+        add_elements(pipeline_, {output_source});
+        link_elements({h264_parser, output_source});
+    }
+    if (config_.rtsp_enabled) {
+        configure_rtsp_sink(output_source);
+    }
+    if (config_.webrtc_enabled) {
+        configure_webrtc_sink(output_source);
+    }
     add_encoder_probe(
         h264_encoder_, GST_PAD_PROBE_TYPE_BUFFER, h264_output_probe);
     add_encoder_probe(
         h264_encoder_,
         GST_PAD_PROBE_TYPE_EVENT_UPSTREAM,
         h264_upstream_event_probe);
+}
 
-    if (config_.uvc_enabled) {
-        GstElement* mjpeg_queue = make_element("queue", "mjpeg-raw-queue");
-        GstElement* frame_rate = make_element("videorate", "uvc-rate");
-        uvc_caps_filter_ = make_element("capsfilter", "uvc-raw-caps");
-        mjpeg_encoder_ = make_element("mppjpegenc", "mjpeg-encoder");
-        GstElement* jpeg_parser = make_element("jpegparse", "mjpeg-parser");
-        GstElement* uvc_output = nullptr;
-        if (config_.uvc_link_path.empty()) {
-            uvc_output = make_element("uvcsink", "uvc-output");
-            set_uvc_device(uvc_output);
-        } else {
-            uvc_output = make_element("filesink", "uvc-link-output");
-            g_object_set(
-                uvc_output,
-                "location",
-                config_.uvc_link_path.c_str(),
-                "sync",
-                FALSE,
-                "async",
-                FALSE,
-                nullptr);
-        }
-        configure_queue(mjpeg_queue, kRawQueueCapacity);
-        g_object_set(frame_rate, "drop-only", TRUE, nullptr);
+void GStreamerMediaSession::Impl::build_mjpeg_pipeline(GstElement* nv12_tee) {
+    using namespace gstreamer_media_detail;
+
+    GstElement* mjpeg_queue = make_element("queue", "mjpeg-raw-queue");
+    GstElement* frame_rate = make_element("videorate", "uvc-rate");
+    uvc_caps_filter_ = make_element("capsfilter", "uvc-raw-caps");
+    mjpeg_encoder_ = make_element("mppjpegenc", "mjpeg-encoder");
+    GstElement* jpeg_parser = make_element("jpegparse", "mjpeg-parser");
+    GstElement* uvc_output = nullptr;
+    if (config_.uvc_link_path.empty()) {
+        uvc_output = make_element("uvcsink", "uvc-output");
+        set_uvc_device(uvc_output);
+    } else {
+        uvc_output = make_element("filesink", "uvc-link-output");
         g_object_set(
-            mjpeg_encoder_,
-            "q-factor",
-            static_cast<guint>(80),
-            "qf-min",
-            static_cast<guint>(1),
-            "qf-max",
-            static_cast<guint>(99),
-            "max-pending",
-            kEncoderPendingFrames,
-            "zero-copy-pkt",
+            uvc_output,
+            "location",
+            config_.uvc_link_path.c_str(),
+            "sync",
+            FALSE,
+            "async",
             FALSE,
             nullptr);
-        g_signal_connect(
-            mjpeg_queue,
-            "overrun",
-            G_CALLBACK(raw_queue_overrun),
-            this);
-        add_elements(
-            pipeline_,
-            {mjpeg_queue, frame_rate, uvc_caps_filter_, mjpeg_encoder_,
-             jpeg_parser, uvc_output});
-        link_elements(
-            {tee, mjpeg_queue, frame_rate, uvc_caps_filter_,
-             mjpeg_encoder_, jpeg_parser, uvc_output});
-        add_encoder_probe(
-            mjpeg_encoder_, GST_PAD_PROBE_TYPE_BUFFER, mjpeg_output_probe);
+    }
+    configure_queue(mjpeg_queue, kRawQueueCapacity);
+    g_object_set(frame_rate, "drop-only", TRUE, nullptr);
+    g_object_set(
+        mjpeg_encoder_,
+        "q-factor",
+        static_cast<guint>(80),
+        "qf-min",
+        static_cast<guint>(1),
+        "qf-max",
+        static_cast<guint>(99),
+        "max-pending",
+        kEncoderPendingFrames,
+        "zero-copy-pkt",
+        FALSE,
+        nullptr);
+    g_signal_connect(
+        mjpeg_queue,
+        "overrun",
+        G_CALLBACK(raw_queue_overrun),
+        this);
+    add_elements(
+        pipeline_,
+        {mjpeg_queue, frame_rate, uvc_caps_filter_, mjpeg_encoder_,
+         jpeg_parser, uvc_output});
+    link_elements(
+        {nv12_tee, mjpeg_queue, frame_rate, uvc_caps_filter_,
+         mjpeg_encoder_, jpeg_parser, uvc_output});
+    add_encoder_probe(
+        mjpeg_encoder_, GST_PAD_PROBE_TYPE_BUFFER, mjpeg_output_probe);
+}
+
+void GStreamerMediaSession::Impl::build_pipeline() {
+    using namespace gstreamer_media_detail;
+
+    const bool h264_enabled = config_.rtsp_enabled || config_.webrtc_enabled;
+    if (!h264_enabled && !config_.uvc_enabled) {
+        return;
+    }
+    pipeline_ = gst_pipeline_new("vtb-media");
+    if (pipeline_ == nullptr) {
+        throw std::runtime_error("Failed to create GStreamer media pipeline");
+    }
+    raw_source_ = make_element("appsrc", "nv12-source");
+    add_elements(pipeline_, {raw_source_});
+    GstElement* tee = make_element("tee", "nv12-tee");
+    add_elements(pipeline_, {tee});
+    configure_appsrc(raw_source_, kRawAppSrcCapacity);
+    link_elements({raw_source_, tee});
+    if (h264_enabled) {
+        build_h264_pipeline(tee);
+    }
+
+    if (config_.uvc_enabled) {
+        build_mjpeg_pipeline(tee);
     }
 }
 
@@ -295,6 +334,7 @@ void GStreamerMediaSession::Impl::initialize_stream(
         require_stream_contract(frame);
         return;
     }
+    validate_frame(frame);
     if (config_.uvc_enabled &&
         config_.uvc_fps > frame.frames_per_second) {
         throw std::invalid_argument(
@@ -304,18 +344,17 @@ void GStreamerMediaSession::Impl::initialize_stream(
         frame.width, frame.height, frame.frames_per_second);
     gst_app_src_set_caps(GST_APP_SRC(raw_source_), caps);
     gst_caps_unref(caps);
-    if (frame.frames_per_second >
-        static_cast<std::uint32_t>(G_MAXINT / kH264GopSeconds)) {
-        throw std::invalid_argument("H.264 frame rate is too large for GOP");
+    if (h264_encoder_ != nullptr) {
+        if (frame.frames_per_second >
+            static_cast<std::uint32_t>(G_MAXINT / kH264GopSeconds)) {
+            throw std::invalid_argument("H.264 frame rate is too large for GOP");
+        }
+        h264_gop_frames_ =
+            static_cast<std::uint64_t>(frame.frames_per_second) *
+            kH264GopSeconds;
+        g_object_set(
+            h264_encoder_, "gop", static_cast<gint>(h264_gop_frames_), nullptr);
     }
-    h264_gop_frames_ =
-        static_cast<std::uint64_t>(frame.frames_per_second) *
-        kH264GopSeconds;
-    g_object_set(
-        h264_encoder_,
-        "gop",
-        static_cast<gint>(h264_gop_frames_),
-        nullptr);
     if (config_.uvc_enabled) {
         GstCaps* uvc_caps = nv12_dma_buf_caps(
             frame.width, frame.height, config_.uvc_fps);
@@ -329,7 +368,7 @@ void GStreamerMediaSession::Impl::initialize_stream(
     render_fps_ = frame.frames_per_second;
     stream_generation_ = frame.stream_generation;
     base_timestamp_ns_ = frame.timestamp_ns;
-    set_pipeline_playing(pipeline_, "NV12 MPP RTSP/UVC");
+    set_pipeline_playing(pipeline_, "VTB media output");
     stream_initialized_ = true;
 }
 
@@ -345,27 +384,6 @@ void GStreamerMediaSession::Impl::require_stream_contract(
     }
 }
 
-void GStreamerMediaSession::Impl::request_h264_idr(GstClockTime timestamp) {
-    GstPad* sink_pad = gst_element_get_static_pad(h264_encoder_, "sink");
-    if (sink_pad == nullptr) {
-        throw std::runtime_error("GStreamer H.264 encoder has no sink pad");
-    }
-    GstEvent* event = gst_video_event_new_downstream_force_key_unit(
-        timestamp,
-        GST_CLOCK_TIME_NONE,
-        GST_CLOCK_TIME_NONE,
-        TRUE,
-        key_unit_count_);
-    ++key_unit_count_;
-    const gboolean accepted = gst_pad_send_event(sink_pad, event);
-    gst_object_unref(sink_pad);
-    if (!accepted) {
-        throw std::runtime_error(
-            "GStreamer H.264 encoder rejected a ForceKeyUnit event");
-    }
-    idr_requests_.fetch_add(1);
-}
-
 void GStreamerMediaSession::Impl::push(Nv12FrameLease frame) {
     using namespace gstreamer_media_detail;
 
@@ -373,11 +391,15 @@ void GStreamerMediaSession::Impl::push(Nv12FrameLease frame) {
         throw std::logic_error("GStreamer media session is finished");
     }
     rethrow_if_failed();
+    if (raw_source_ == nullptr) {
+        // 所有输出关闭时，帧租约在本次调用结束时归还。
+        return;
+    }
     const Nv12FrameView view = frame.view();
-    validate_frame(view);
     initialize_stream(view);
     const bool end_of_stream = view.end_of_stream != 0;
 
+    const std::size_t dma_buf_size = checked_size(view.dma_buf_size);
     const int duplicate_fd =
         fcntl(view.dma_buf_fd, F_DUPFD_CLOEXEC, 0);
     if (duplicate_fd < 0) {
@@ -386,7 +408,7 @@ void GStreamerMediaSession::Impl::push(Nv12FrameLease frame) {
             std::strerror(errno));
     }
     GstMemory* memory = gst_dmabuf_allocator_alloc(
-        dma_buf_allocator_, duplicate_fd, checked_size(view.dma_buf_size));
+        dma_buf_allocator_, duplicate_fd, dma_buf_size);
     if (memory == nullptr) {
         close(duplicate_fd);
         throw std::runtime_error("Failed to wrap NV12 DMA-BUF");
@@ -427,15 +449,6 @@ void GStreamerMediaSession::Impl::push(Nv12FrameLease frame) {
     GST_BUFFER_DTS(buffer) = GST_BUFFER_PTS(buffer);
     GST_BUFFER_DURATION(buffer) = GST_SECOND / view.frames_per_second;
     GST_BUFFER_OFFSET(buffer) = view.sequence - 1;
-
-    const std::uint64_t submitted = submitted_frames_.load();
-    bool request_idr = client_idr_requested_.exchange(false);
-    if (submitted != 0 && submitted % h264_gop_frames_ == 0) {
-        request_idr = true;
-    }
-    if (request_idr) {
-        request_h264_idr(GST_BUFFER_PTS(buffer));
-    }
 
     GstFlowReturn result;
     {

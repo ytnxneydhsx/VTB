@@ -164,8 +164,11 @@ public:
             config_.instrumentation,
             "vtb-live2d-gstreamer-media.metrics.jsonl");
         GStreamerMediaSessionConfig media_config;
+        media_config.rtsp_enabled = config_.output.rtsp_enabled;
         media_config.rtsp_url = config_.output.rtsp_url;
+        media_config.webrtc_enabled = config_.output.webrtc_enabled;
         media_config.webrtc_web_directory = config_.output.webrtc_web_directory;
+        media_config.webrtc_bind_address = config_.output.webrtc_bind_address;
         media_config.uvc_enabled = config_.output.uvc_enabled;
         media_config.uvc_device = config_.output.uvc_device;
         media_config.uvc_link_path = config_.output.uvc_link_path;

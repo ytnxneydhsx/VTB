@@ -43,8 +43,11 @@ public:
 
 class MediaOutputConfiguration {
 public:
+    bool rtsp_enabled = true;
     std::string rtsp_url;
+    bool webrtc_enabled = false;
     std::string webrtc_web_directory;
+    std::string webrtc_bind_address;
     bool uvc_enabled = false;
     std::string uvc_device;
     std::string uvc_link_path;
