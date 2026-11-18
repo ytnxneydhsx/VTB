@@ -27,6 +27,11 @@ libdir=lib/aarch64-linux-gnu
 toolchain_root="$VTB_GODOT_SDK"
 target_sysroot="$VTB_GODOT_SDK/aarch64-godot-linux-gnu/sysroot"
 script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+webrtc_viewer="$script_dir/../../web/live2d-webrtc.html"
+if [ ! -f "$webrtc_viewer" ]; then
+	printf 'Missing Live2D WebRTC viewer: %s\n' "$webrtc_viewer" >&2
+	exit 1
+fi
 cross_file="$GSTREAMER_BUILD_ROOT/aarch64-godot-linux-gnu.ini"
 gst_plugins_bad_source="$GSTREAMER_SOURCE_ROOT/gst-plugins-bad-1.28.9"
 gst_plugins_good_source="$GSTREAMER_SOURCE_ROOT/gst-plugins-good-1.28.9"
@@ -417,7 +422,11 @@ webrtc_web_root="$GSTREAMER_RS_SOURCE/net/webrtc/gstwebrtc-api"
 	npm run build
 )
 test -f "$webrtc_web_root/dist/index.html"
-mkdir -p "$GSTREAMER_STAGING_ROOT$prefix/share/gstwebrtc-api"
+test -f "$webrtc_web_root/dist/gstwebrtc-api-3.0.0.esm.js"
+webrtc_staging_dir="$GSTREAMER_STAGING_ROOT$prefix/share/gstwebrtc-api"
+mkdir -p "$webrtc_staging_dir"
 cp -a \
 	"$webrtc_web_root/dist" \
-	"$GSTREAMER_STAGING_ROOT$prefix/share/gstwebrtc-api/"
+	"$webrtc_staging_dir/"
+mv "$webrtc_staging_dir/dist/index.html" "$webrtc_staging_dir/dist/diagnostics.html"
+cp "$webrtc_viewer" "$webrtc_staging_dir/dist/index.html"

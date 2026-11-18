@@ -24,6 +24,16 @@ the high-level sink and signalling server. `webrtcbin` uses the libnice
 and the internal usrsctp build for SCTP. The script builds libnice after
 GStreamer core and base so it can compile its GStreamer elements.
 
+The web assets install the [Live2D viewer](../../web/live2d-webrtc.html) as
+`dist/index.html` and keep the upstream example at `dist/diagnostics.html`.
+The viewer auto-subscribes to `live2d` on the page host's WebRTC signalling
+port, 8443. It fits the video to the browser viewport without cropping.
+Double-click the picture or press F to toggle browser fullscreen.
+
+To update an installed runtime's viewer, copy the HTML to `index.html` in the
+directory selected by `output.webrtc.web_directory`. Keep
+`gstwebrtc-api-3.0.0.esm.js` in that same directory.
+
 The build applies numbered patch groups to their owning source trees before
 configuration. `0001-uvcsink-configfs-caps.patch` handles the RK3588 Linux
 5.10 UVC gadget node returning `ENOTTY` for

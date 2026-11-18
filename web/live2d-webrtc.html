@@ -1,0 +1,210 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Live2D</title>
+  <style>
+    html,
+    body {
+      margin: 0;
+      overflow: hidden;
+      background: black;
+      color: white;
+      font: 15px system-ui, sans-serif;
+    }
+
+    #viewer {
+      position: fixed;
+      inset: 0;
+      display: grid;
+      place-items: center;
+      background: black;
+    }
+
+    video {
+      position: absolute;
+      inset: 0;
+      width: 100%;
+      height: 100%;
+      object-fit: contain;
+    }
+
+    #notice {
+      z-index: 1;
+      padding: 1rem;
+      text-align: center;
+      pointer-events: none;
+    }
+
+    button {
+      margin-top: 0.75rem;
+      padding: 0.5rem 1rem;
+      font: inherit;
+      pointer-events: auto;
+    }
+  </style>
+</head>
+<body>
+  <main id="viewer">
+    <video id="live2d" autoplay muted playsinline aria-label="Live2D 画面"></video>
+    <div id="notice">
+      <div id="status" role="status">正在连接 Live2D…</div>
+      <button id="play" type="button" hidden>点击播放</button>
+    </div>
+  </main>
+  <script type="module">
+    const viewer = document.querySelector("#viewer");
+    const video = document.querySelector("#live2d");
+    const notice = document.querySelector("#notice");
+    const status = document.querySelector("#status");
+    const playButton = document.querySelector("#play");
+
+    function showStatus(message, canPlay = false) {
+      status.textContent = message;
+      playButton.hidden = !canPlay;
+      notice.hidden = !message;
+    }
+
+    async function playVideo() {
+      const stream = video.srcObject;
+      try {
+        await video.play();
+      } catch {
+        if (stream && video.srcObject === stream) {
+          showStatus("等待播放 Live2D 画面", true);
+        }
+      }
+    }
+
+    async function toggleFullscreen() {
+      try {
+        if (document.fullscreenElement) {
+          await document.exitFullscreen();
+        } else if (viewer.requestFullscreen) {
+          await viewer.requestFullscreen();
+        } else {
+          video.webkitEnterFullscreen?.();
+        }
+      } catch (error) {
+        console.warn("Cannot enter or exit fullscreen", error);
+      }
+    }
+
+    playButton.addEventListener("click", playVideo);
+    video.addEventListener("playing", () => {
+      if (video.srcObject) {
+        showStatus("");
+      }
+    });
+    viewer.addEventListener("dblclick", toggleFullscreen);
+    document.addEventListener("keydown", (event) => {
+      if (event.key.toLowerCase() === "f" && !event.repeat && !event.altKey &&
+          !event.ctrlKey && !event.metaKey && !event.shiftKey) {
+        toggleFullscreen();
+      }
+    });
+
+    function connect(GstWebRTCAPI) {
+      const signalProtocol = location.protocol === "https:" ? "wss:" : "ws:";
+      const signalingServerUrl = signalProtocol + "//" + location.hostname + ":8443";
+      const api = new GstWebRTCAPI({ signalingServerUrl });
+      let connected = false;
+      let active = null;
+      let retryTimer = null;
+
+      function closeActive() {
+        const previous = active;
+        active = null;
+        video.srcObject = null;
+        previous?.session.close();
+      }
+
+      function retry() {
+        if (!connected || retryTimer !== null) {
+          return;
+        }
+        retryTimer = setTimeout(() => {
+          retryTimer = null;
+          subscribe();
+        }, 1500);
+      }
+
+      function subscribe() {
+        if (!connected || active || retryTimer !== null) {
+          return;
+        }
+        const producer = api.getAvailableProducers().find((peer) => peer.meta?.name === "live2d");
+        if (!producer) {
+          showStatus("正在等待 Live2D 推流…");
+          return;
+        }
+        showStatus("正在连接 Live2D 画面…");
+        const session = api.createConsumerSession(producer.id);
+        if (!session) {
+          retry();
+          return;
+        }
+        const subscription = { producerId: producer.id, session };
+        active = subscription;
+
+        function reconnect() {
+          if (active !== subscription) {
+            return;
+          }
+          closeActive();
+          showStatus("视频连接中断，正在重连…");
+          retry();
+        }
+
+        session.addEventListener("error", reconnect);
+        session.addEventListener("closed", reconnect);
+        session.addEventListener("streamsChanged", () => {
+          if (active !== subscription) {
+            return;
+          }
+          const stream = session.streams.find((item) => item.getVideoTracks().length > 0);
+          if (stream && video.srcObject !== stream) {
+            video.srcObject = stream;
+            playVideo();
+          }
+        });
+        if (!session.connect()) {
+          reconnect();
+        }
+      }
+
+      api.registerConnectionListener({
+        connected() {
+          connected = true;
+          subscribe();
+        },
+        disconnected() {
+          connected = false;
+          clearTimeout(retryTimer);
+          retryTimer = null;
+          closeActive();
+          showStatus("信令连接中断，正在重连…");
+        },
+      });
+      api.registerPeerListener({
+        producerAdded: subscribe,
+        producerRemoved(producer) {
+          if (producer.id === active?.producerId) {
+            closeActive();
+            subscribe();
+          }
+        },
+      });
+    }
+
+    try {
+      const { default: GstWebRTCAPI } = await import("./gstwebrtc-api-3.0.0.esm.js");
+      connect(GstWebRTCAPI);
+    } catch (error) {
+      showStatus("无法加载 Live2D 播放器");
+      console.error(error);
+    }
+  </script>
+</body>
+</html>
