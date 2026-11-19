@@ -26,6 +26,14 @@
 - 项目中的 `std::atomic` 操作统一使用标准库默认内存序。`load()`、`store()`、`exchange()`、`fetch_add()` 等调用不显式传入 `std::memory_order_*` 参数。
 - 新增或修改原子变量时，不使用 `memory_order_relaxed`、`memory_order_acquire`、`memory_order_release` 或 `memory_order_acq_rel`；需要不同并发协议时，先调整设计并明确说明。
 
+## VTB Qt 界面设计
+
+- `apps/vtb-qt` 的设计源为 Mac 本机 Docker Penpot 的「VTB Qt 上位机 → 界面与交互」。从 [主流程界面](http://localhost:9001/#/workspace?team-id=568a29fc-d1ae-80e2-8008-cb2465e0be85&file-id=965777a7-3802-8037-8008-f7244ff649c1&page-id=97b20de5-f2a0-8019-8008-f7265b6beda2) 进入。Compose 项目为 `penpot-local`，目录为 `~/.local/share/penpot/local-runtime`。
+- 监控相关改动使用 [03 · 板卡监控](http://localhost:9001/#/workspace?team-id=568a29fc-d1ae-80e2-8008-cb2465e0be85&file-id=965777a7-3802-8037-8008-f7244ff649c1&page-id=8fac8658-3aeb-80f5-8008-f7ccba1c8844)，页面包含基础监控、扩展监控和权限不足画板。
+- 新增或修改 Qt 页面、布局、可见状态或交互时，先在这个文件中更新对应的可编辑画板，复用现有布局和公共组件，再按确认的稿件修改 Qt Widgets。只要求设计稿时，交付 Penpot 画板。
+- 本机 MCP 入口为 `http://localhost:9001/mcp/stream`。全局 MCP 指向远端时，临时连接本机入口。写入前回读文件 ID `965777a7-3802-8037-8008-f7244ff649c1` 和目标页，确认正在编辑本机原稿。
+- 实现时沿用 `apps/vtb-qt/src/theme.cc` 和 `apps/vtb-qt/src/widgets.hh` 的主题与控件。设计稿中的指标读数标记为示例，状态文案区分采样中、真实零值、权限不足和数据过期。
+
 ## Mac 浏览器推流监看
 
 - 用户要求启动推流并在 Mac 浏览器查看时，默认使用项目已有的双流交互监看页面 `web/dual-stream-monitor.html`，通过 `scripts/run-dual-stream-monitor.sh` 提供本地页面；默认入口为 `http://192.168.77.1:8900/dual-stream-monitor.html`。
