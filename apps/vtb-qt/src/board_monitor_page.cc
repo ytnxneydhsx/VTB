@@ -1,7 +1,11 @@
 #include "board_monitor_page.hh"
 
 #include "board_monitor.hh"
+#include "monitor_io.hh"
+#include "monitor_processes.hh"
+#include "monitor_widgets.hh"
 #include "theme.hh"
+#include "widgets.hh"
 
 #include <QDateTime>
 #include <QFrame>
@@ -10,6 +14,9 @@
 #include <QLabel>
 #include <QLocale>
 #include <QProgressBar>
+#include <QScrollBar>
+#include <QStackedWidget>
+#include <QTabBar>
 
 #include <cmath>
 
@@ -34,28 +41,8 @@ namespace {
         SensorLabel{ "center-thermal", "中心" },
     };
 
-    auto label(const QString& value, const char* role = "") -> QLabel* {
-        auto* widget = new QLabel(value);
-        widget->setProperty("role", role);
-        widget->setTextFormat(Qt::PlainText);
-        return widget;
-    }
-
     auto value_label(const char* role = "") -> QLabel* {
-        return label(QString::fromUtf8(kUnavailable), role);
-    }
-
-    auto panel(QBoxLayout& parent, const QString& title) -> QVBoxLayout* {
-        auto* frame = new QFrame;
-        frame->setProperty("panel", "surface");
-        auto* content = new QVBoxLayout(frame);
-        content->setContentsMargins(16, 12, 16, 14);
-        content->setSpacing(6);
-        if (!title.isEmpty()) {
-            content->addWidget(label(title, "heading"));
-        }
-        parent.addWidget(frame, 1);
-        return content;
+        return monitorLabel(QString::fromUtf8(kUnavailable), role);
     }
 
     auto meter(const QString& name) -> QProgressBar* {
@@ -104,45 +91,81 @@ namespace {
 } // namespace
 
 BoardMonitorPage::BoardMonitorPage(QWidget* parent)
-    : QScrollArea(parent) {
+    : QScrollArea(parent)
+    , state_(MonitorState::CONNECTING) {
     setObjectName(QStringLiteral("boardMonitorPage"));
     setFrameShape(QFrame::NoFrame);
     setWidgetResizable(true);
     auto* body = new QWidget;
     body->setObjectName(QStringLiteral("page"));
     setWidget(body);
-    auto* content = new QVBoxLayout(body);
-    content->setContentsMargins(
+    auto* page = new QVBoxLayout(body);
+    page->setContentsMargins(
         metrics::kContentMargin, metrics::kContentMargin, metrics::kContentMargin,
         metrics::kContentMargin);
-    content->setSpacing(metrics::kSpacing);
+    page->setSpacing(metrics::kSpacing);
 
     auto* heading = new QHBoxLayout;
-    heading->addWidget(label(QStringLiteral("板卡监控"), "title"));
+    heading->addWidget(monitorLabel(QStringLiteral("板卡监控"), "title"));
     heading->addStretch();
-    stream_state_ = label(QStringLiteral("等待板端采样"), "muted");
+    stream_state_ = monitorLabel(QStringLiteral("等待板端采样"), "muted");
     stream_state_->setObjectName(QStringLiteral("monitorStreamState"));
     heading->addWidget(stream_state_, 0, Qt::AlignVCenter);
-    content->addLayout(heading);
+    page->addLayout(heading);
+
+    tabs_ = new QTabBar;
+    tabs_->setObjectName(QStringLiteral("monitorTabs"));
+    tabs_->setAccessibleName(QStringLiteral("板卡监控页签"));
+    tabs_->setDrawBase(false);
+    tabs_->setExpanding(false);
+    tabs_->addTab(QStringLiteral("概览"));
+    const int processes_tab = tabs_->addTab(QStringLiteral("进程"));
+    const int io_tab = tabs_->addTab(QStringLiteral("网络与磁盘"));
+    auto* tab_row = new QVBoxLayout;
+    tab_row->setSpacing(6);
+    tab_row->addWidget(tabs_);
+    auto* divider = new QFrame;
+    divider->setObjectName(QStringLiteral("monitorDivider"));
+    divider->setFixedHeight(1);
+    tab_row->addWidget(divider);
+    page->addLayout(tab_row);
+
+    auto* sections = new QStackedWidget;
+    page->addWidget(sections, 1);
+    auto* hardware = new QWidget;
+    auto* content = new QVBoxLayout(hardware);
+    content->setContentsMargins(0, 0, 0, 0);
+    content->setSpacing(metrics::kSpacing);
+    sections->addWidget(hardware);
+    processes_ = new MonitorProcesses;
+    io_ = new MonitorIo;
+    sections->addWidget(processes_);
+    sections->addWidget(io_);
+
+    connect(tabs_, &QTabBar::currentChanged, this, [this, sections](int index) {
+        sections->setCurrentIndex(index);
+        verticalScrollBar()->setValue(0);
+        updateStreamLabel();
+    });
 
     auto* overview = new QHBoxLayout;
     overview->setSpacing(metrics::kSpacing);
     content->addLayout(overview);
 
-    auto* cpu = panel(*overview, {});
-    cpu->addWidget(label(QStringLiteral("CPU 总占用"), "sub"));
+    auto* cpu = monitorPanel(*overview, {});
+    cpu->addWidget(monitorLabel(QStringLiteral("CPU 总占用"), "sub"));
     cpu_total_ = value_label("monitorValue");
     cpu_total_->setObjectName(QStringLiteral("monitorCpuTotal"));
     cpu->addWidget(cpu_total_);
     cpu_meter_ = meter(QStringLiteral("CPU 总占用"));
     cpu->addWidget(cpu_meter_);
 
-    auto* ram = panel(*overview, {});
-    ram->addWidget(label(QStringLiteral("RAM"), "sub"));
+    auto* ram = monitorPanel(*overview, {});
+    ram->addWidget(monitorLabel(QStringLiteral("RAM"), "sub"));
     auto* memory_values = new QHBoxLayout;
     memory_values->setSpacing(6);
     memory_used_ = value_label("monitorValue");
-    memory_total_ = label({}, "muted");
+    memory_total_ = monitorLabel({}, "muted");
     memory_usage_ = value_label("muted");
     memory_values->addWidget(memory_used_, 0, Qt::AlignBaseline);
     memory_values->addWidget(memory_total_, 0, Qt::AlignBaseline);
@@ -152,11 +175,11 @@ BoardMonitorPage::BoardMonitorPage(QWidget* parent)
     memory_meter_ = meter(QStringLiteral("RAM 使用率"));
     ram->addWidget(memory_meter_);
 
-    auto* soc = panel(*overview, {});
-    soc->addWidget(label(QStringLiteral("SoC 温度"), "sub"));
+    auto* soc = monitorPanel(*overview, {});
+    soc->addWidget(monitorLabel(QStringLiteral("SoC 温度"), "sub"));
     soc_temperature_ = value_label("monitorValue");
     soc->addWidget(soc_temperature_);
-    soc->addWidget(label(QStringLiteral("soc-thermal"), "muted"));
+    soc->addWidget(monitorLabel(QStringLiteral("soc-thermal"), "muted"));
 
     auto* details = new QHBoxLayout;
     details->setSpacing(metrics::kSpacing);
@@ -166,22 +189,21 @@ BoardMonitorPage::BoardMonitorPage(QWidget* parent)
     details->addLayout(left, 6);
     details->addLayout(right, 5);
     content->addLayout(details);
-    content->addStretch();
 
-    auto* cpu_details = panel(*left, {});
+    auto* cpu_details = monitorPanel(*left, {});
     auto* cpu_title = new QHBoxLayout;
-    cpu_title->addWidget(label(QStringLiteral("CPU 逐核"), "heading"));
+    cpu_title->addWidget(monitorLabel(QStringLiteral("CPU 逐核"), "heading"));
     cpu_title->addStretch();
-    cpu_title->addWidget(label(QStringLiteral("8 核"), "muted"));
+    cpu_title->addWidget(monitorLabel(QStringLiteral("8 核"), "muted"));
     cpu_details->addLayout(cpu_title);
 
     auto* cpu_table = new QGridLayout;
     cpu_table->setVerticalSpacing(3);
     cpu_table->setHorizontalSpacing(9);
     cpu_table->setColumnStretch(1, 1);
-    cpu_table->addWidget(label(QStringLiteral("核心"), "muted"), 0, 0);
-    cpu_table->addWidget(label(QStringLiteral("占用"), "muted"), 0, 1);
-    cpu_table->addWidget(label(QStringLiteral("频率（GHz）"), "muted"), 0, 3, Qt::AlignRight);
+    cpu_table->addWidget(monitorLabel(QStringLiteral("核心"), "muted"), 0, 0);
+    cpu_table->addWidget(monitorLabel(QStringLiteral("占用"), "muted"), 0, 1);
+    cpu_table->addWidget(monitorLabel(QStringLiteral("频率（GHz）"), "muted"), 0, 3, Qt::AlignRight);
     for (std::size_t id = 0; id < cores_.size(); ++id) {
         const auto name = QStringLiteral("CPU %1").arg(id);
         const int row = 1 + static_cast<int>(id) * 2;
@@ -195,7 +217,7 @@ BoardMonitorPage::BoardMonitorPage(QWidget* parent)
         core.load->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
         core.load->setMinimumWidth(40);
         core.frequency = value_label("sub");
-        auto* name_widget = label(name, "sub");
+        auto* name_widget = monitorLabel(name, "sub");
         name_widget->setMinimumHeight(22);
         cpu_table->addWidget(name_widget, row + 1, 0);
         cpu_table->addWidget(core.meter, row + 1, 1, Qt::AlignVCenter);
@@ -205,16 +227,16 @@ BoardMonitorPage::BoardMonitorPage(QWidget* parent)
     cpu_details->addLayout(cpu_table);
     left->addStretch();
 
-    auto* gpu = panel(*right, {});
+    auto* gpu = monitorPanel(*right, {});
     auto* gpu_top = new QHBoxLayout;
-    gpu_top->addWidget(label(QStringLiteral("GPU"), "heading"));
+    gpu_top->addWidget(monitorLabel(QStringLiteral("GPU"), "heading"));
     gpu_top->addStretch();
     gpu_frequency_ = value_label("monitorFrequency");
     gpu_top->addWidget(gpu_frequency_);
     gpu->addLayout(gpu_top);
     auto* gpu_bottom = new QHBoxLayout;
     gpu_bottom->setSpacing(12);
-    gpu_bottom->addWidget(label(QStringLiteral("负载"), "sub"));
+    gpu_bottom->addWidget(monitorLabel(QStringLiteral("负载"), "sub"));
     gpu_meter_ = meter(QStringLiteral("GPU 负载"));
     gpu_bottom->addWidget(gpu_meter_, 1, Qt::AlignVCenter);
     gpu_load_ = value_label("sub");
@@ -223,23 +245,23 @@ BoardMonitorPage::BoardMonitorPage(QWidget* parent)
     gpu_bottom->addWidget(gpu_load_);
     gpu->addLayout(gpu_bottom);
 
-    auto* npu = panel(*right, {});
+    auto* npu = monitorPanel(*right, {});
     auto* npu_top = new QHBoxLayout;
-    npu_top->addWidget(label(QStringLiteral("NPU"), "heading"));
+    npu_top->addWidget(monitorLabel(QStringLiteral("NPU"), "heading"));
     npu_top->addStretch();
     npu_frequency_ = value_label("monitorFrequency");
     npu_top->addWidget(npu_frequency_);
     npu->addLayout(npu_top);
-    npu->addWidget(label(QStringLiteral("当前频率"), "muted"));
+    npu->addWidget(monitorLabel(QStringLiteral("当前频率"), "muted"));
 
-    auto* temperature_details = panel(*right, QStringLiteral("温度传感器"));
+    auto* temperature_details = monitorPanel(*right, QStringLiteral("温度传感器"));
     auto* sensor_grid = new QGridLayout;
     sensor_grid->setHorizontalSpacing(8);
     sensor_grid->setVerticalSpacing(3);
     for (std::size_t id = 0; id < kSensors.size(); ++id) {
         const auto col = static_cast<int>(id % 3);
         const auto row = static_cast<int>(id / 3);
-        auto* name = label(QString::fromUtf8(kSensors[id].label), "muted");
+        auto* name = monitorLabel(QString::fromUtf8(kSensors[id].label), "muted");
         temperatures_[id] = value_label("sub");
         sensor_grid->addWidget(name, row * 2, col);
         sensor_grid->addWidget(temperatures_[id], row * 2 + 1, col);
@@ -247,6 +269,20 @@ BoardMonitorPage::BoardMonitorPage(QWidget* parent)
     }
     temperature_details->addLayout(sensor_grid);
     right->addStretch();
+
+    auto* summaries = new QHBoxLayout;
+    summaries->setSpacing(metrics::kSpacing);
+    content->addLayout(summaries);
+    auto* open_processes = new ActionButton({QStringLiteral("查看进程"), ButtonKind::TONAL});
+    auto* open_io = new ActionButton({QStringLiteral("查看速率"), ButtonKind::TONAL});
+    open_processes->setObjectName(QStringLiteral("monitorJump"));
+    open_io->setObjectName(QStringLiteral("monitorJump"));
+    processes_->addOverview(*summaries, open_processes);
+    io_->addOverview(*summaries, open_io);
+    connect(open_processes, &QPushButton::clicked, this,
+        [this, processes_tab] { tabs_->setCurrentIndex(processes_tab); });
+    connect(open_io, &QPushButton::clicked, this, [this, io_tab] { tabs_->setCurrentIndex(io_tab); });
+    content->addStretch();
 }
 
 auto BoardMonitorPage::showSnapshot(const QJsonObject& snapshot) -> void {
@@ -304,26 +340,60 @@ auto BoardMonitorPage::showSnapshot(const QJsonObject& snapshot) -> void {
     npu_frequency_->setText(frequency_mhz(npu.value(QStringLiteral("frequencyHz"))));
     const auto sample_time = snapshot.value(QStringLiteral("sampleTimeMs")).toInteger();
     last_update_ = QDateTime::fromMSecsSinceEpoch(sample_time).toString(QStringLiteral("HH:mm:ss"));
+    details_supported_ = snapshot.value(QStringLiteral("details")).toBool();
+    if (snapshot.value(QStringLiteral("io")).isObject()) {
+        io_->showSample(snapshot.value(QStringLiteral("io")).toObject());
+        last_details_update_ = last_update_;
+    }
+}
+
+auto BoardMonitorPage::showProcesses(const QJsonArray& rows, bool readable) -> void {
+    processes_->showProcesses(rows, readable);
+}
+
+auto BoardMonitorPage::showServiceStatus(const BoardStatus& status) -> void {
+    processes_->showStatus(status);
 }
 
 auto BoardMonitorPage::showStreamState(MonitorState state, const QString& detail) -> void {
+    state_ = state;
     stream_state_->setToolTip(detail);
-    switch (state) {
+    const bool stale = state == MonitorState::STALE;
+    processes_->showAvailability(details_supported_, stale);
+    io_->showAvailability(details_supported_, stale);
+    updateStreamLabel();
+}
+
+auto BoardMonitorPage::updateStreamLabel() -> void {
+    const bool overview = tabs_->currentIndex() == 0;
+    auto last = last_details_update_;
+    if (overview) {
+        last = last_update_;
+    }
+    switch (state_) {
     case MonitorState::CONNECTING:
-        if (last_update_.isEmpty()) {
+        if (last.isEmpty()) {
             stream_state_->setText(QStringLiteral("等待板端采样"));
         } else {
-            stream_state_->setText(QStringLiteral("正在连接 · 上次 %1").arg(last_update_));
+            stream_state_->setText(QStringLiteral("正在连接 · 上次 %1").arg(last));
         }
         break;
     case MonitorState::LIVE:
-        stream_state_->setText(QStringLiteral("每秒采样 · %1").arg(last_update_));
+        if (overview) {
+            stream_state_->setText(QStringLiteral("每秒采样 · %1").arg(last));
+        } else if (!details_supported_) {
+            stream_state_->setText(QStringLiteral("需更新板端采集器"));
+        } else if (last.isEmpty()) {
+            stream_state_->setText(QStringLiteral("等待板端采样"));
+        } else {
+            stream_state_->setText(QStringLiteral("每 2 秒更新 · %1").arg(last));
+        }
         break;
     case MonitorState::STALE:
-        if (last_update_.isEmpty()) {
+        if (last.isEmpty()) {
             stream_state_->setText(QStringLiteral("板端监控不可用"));
         } else {
-            stream_state_->setText(QStringLiteral("数据过期 · 上次 %1").arg(last_update_));
+            stream_state_->setText(QStringLiteral("数据过期 · 上次 %1").arg(last));
         }
         break;
     }

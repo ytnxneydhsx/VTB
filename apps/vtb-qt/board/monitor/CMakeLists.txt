@@ -19,7 +19,7 @@ if(NOT TARGET nlohmann_json::nlohmann_json)
     FetchContent_MakeAvailable(nlohmann_json)
 endif()
 
-add_executable(vtb-board-monitor main.cc)
+add_executable(vtb-board-monitor main.cc details.cc)
 target_compile_features(vtb-board-monitor PRIVATE cxx_std_20)
 target_compile_options(vtb-board-monitor PRIVATE -Wall -Wextra -Wpedantic)
 target_link_libraries(vtb-board-monitor PRIVATE nlohmann_json::nlohmann_json)

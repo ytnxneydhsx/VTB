@@ -228,6 +228,7 @@ auto BoardClient::publish(const QJsonObject& value) -> void {
     status_.load_state = value.value(QStringLiteral("loadState")).toString();
     status_.service_state = value.value(QStringLiteral("activeState")).toString();
     status_.service_result = value.value(QStringLiteral("serviceResult")).toString();
+    status_.main_pid = value.value(QStringLiteral("mainPid")).toInt();
     status_.revision = value.value(QStringLiteral("revision")).toString();
     status_.config_error = value.value(QStringLiteral("configError")).toString();
     status_.bind_address = value.value(QStringLiteral("bindAddress")).toString();
@@ -258,9 +259,11 @@ auto BoardClient::simulate(const Request& request) -> void {
         case Operation::START:
         case Operation::APPLY:
             status_.service_state = QStringLiteral("active");
+            status_.main_pid = 49467;
             break;
         case Operation::STOP:
             status_.service_state = QStringLiteral("inactive");
+            status_.main_pid = 0;
             break;
         case Operation::LOGS:
             detail

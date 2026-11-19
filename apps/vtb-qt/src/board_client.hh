@@ -28,6 +28,7 @@ public:
     bool rtsp_listening = false;
     bool webrtc_enabled = false;
     bool signalling_listening = false;
+    int main_pid = 0;
     int web_port = 8080;
     int signalling_port = 8443;
 

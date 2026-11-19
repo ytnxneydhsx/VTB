@@ -26,6 +26,8 @@ qt_add_executable(vtb-qt MACOSX_BUNDLE
     src/board_monitor.cc
     src/board_monitor.hh
     src/board_monitor_page.cc
+    src/monitor_io.cc
+    src/monitor_processes.cc
     src/video_preview.cc
     src/mac_preview.mm
     src/rtsp_receiver.cc

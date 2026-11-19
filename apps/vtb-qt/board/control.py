@@ -32,7 +32,7 @@ def run(*command, timeout=65):
 
 def read_service():
     value = run("/usr/bin/systemctl", "show", UNIT, "-p", "LoadState", "-p",
-                "ActiveState", "-p", "SubState", "-p", "Result", timeout=8)
+                "ActiveState", "-p", "SubState", "-p", "Result", "-p", "MainPID", timeout=8)
     return dict(line.split("=", 1) for line in value.splitlines() if "=" in line)
 
 
@@ -89,6 +89,7 @@ def status():
         "activeState": unit["ActiveState"],
         "subState": unit["SubState"],
         "serviceResult": unit["Result"],
+        "mainPid": int(unit.get("MainPID", "0")),
         "webPort": WEB_PORT,
         "signallingPort": SIGNALLING_PORT,
     }

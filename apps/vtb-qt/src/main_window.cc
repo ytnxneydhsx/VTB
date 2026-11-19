@@ -334,8 +334,12 @@ private:
         connect(webrtc_nav_, &QPushButton::clicked, &window_, [this] { show_page(Page::WEBRTC); });
         connect(&monitor_, &BoardMonitor::snapshotReceived, monitor_page_,
             &BoardMonitorPage::showSnapshot);
+        connect(&monitor_, &BoardMonitor::processesReceived, monitor_page_,
+            &BoardMonitorPage::showProcesses);
         connect(&monitor_, &BoardMonitor::stateChanged, monitor_page_,
             &BoardMonitorPage::showStreamState);
+        connect(&board_, &BoardClient::statusChanged, monitor_page_,
+            &BoardMonitorPage::showServiceStatus);
         connect(refresh_, &QPushButton::clicked, &board_, &BoardClient::refresh);
         connect(theme_, &QPushButton::toggled, &window_, [this](bool dark) {
             if (dark) {
@@ -371,6 +375,9 @@ private:
                 }
             }
             status_ = state;
+            if (demo_) {
+                monitor_.setDemoMainPid(state.main_pid);
+            }
             if (state.connected) {
                 connection_detail_.clear();
             }

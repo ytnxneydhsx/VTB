@@ -1,4 +1,4 @@
-#include <nlohmann/json.hpp>
+#include "details.hh"
 
 #include <charconv>
 #include <chrono>
@@ -214,11 +214,29 @@ auto sample(const CpuTimes& previous, const CpuTimes& current) -> Json {
 
 } // namespace
 
-int main() {
+int main(int argc, char** argv) {
+    using namespace std::chrono;
+    const bool with_details = argc == 2 && std::string_view(argv[1]) == "--details";
+    MonitorDetails details;
+    auto next_details = steady_clock::now();
     CpuTimes previous;
     for (;;) {
         auto current = read_cpu_times();
-        std::cout << sample(previous, current).dump() << '\n' << std::flush;
+        auto snapshot = sample(previous, current);
+        const auto now = steady_clock::now();
+        const bool collect_details = with_details && now >= next_details;
+        if (with_details) {
+            snapshot["details"] = true;
+        }
+        if (collect_details) {
+            next_details = now + seconds(2);
+            snapshot["io"] = details.collect();
+        }
+        std::cout << snapshot.dump() << '\n';
+        if (collect_details) {
+            details.writeProcesses(std::cout, snapshot["sampleTimeMs"].get<std::int64_t>());
+        }
+        std::cout << std::flush;
         if (!std::cout) {
             return 1;
         }

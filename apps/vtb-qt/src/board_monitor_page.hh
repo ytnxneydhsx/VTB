@@ -5,18 +5,25 @@
 #include <array>
 
 class QJsonObject;
+class QJsonArray;
 class QLabel;
 class QProgressBar;
+class QTabBar;
 
 namespace vtb::desktop {
 
 enum class MonitorState;
+class BoardStatus;
+class MonitorIo;
+class MonitorProcesses;
 
 class BoardMonitorPage final : public QScrollArea {
 public:
     explicit BoardMonitorPage(QWidget* parent = nullptr);
 
     auto showSnapshot(const QJsonObject& snapshot) -> void;
+    auto showProcesses(const QJsonArray& rows, bool readable) -> void;
+    auto showServiceStatus(const BoardStatus& status) -> void;
     auto showStreamState(MonitorState state, const QString& detail) -> void;
 
 private:
@@ -27,6 +34,11 @@ private:
         QLabel* frequency = nullptr;
     };
 
+    auto updateStreamLabel() -> void;
+
+    QTabBar* tabs_ = nullptr;
+    MonitorProcesses* processes_ = nullptr;
+    MonitorIo* io_ = nullptr;
     QLabel* stream_state_ = nullptr;
     QLabel* cpu_total_ = nullptr;
     QProgressBar* cpu_meter_ = nullptr;
@@ -42,6 +54,9 @@ private:
     std::array<CoreRow, 8> cores_ {};
     std::array<QLabel*, 6> temperatures_ {};
     QString last_update_;
+    QString last_details_update_;
+    MonitorState state_;
+    bool details_supported_ = true;
 };
 
 } // namespace vtb::desktop
