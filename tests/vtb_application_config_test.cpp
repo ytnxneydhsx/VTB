@@ -77,6 +77,9 @@ void test_valid_configuration() {
         config.face_pipeline.rga_dma_heap ==
             "/dev/dma_heap/system-uncached",
         "RGA DMA heap mismatch");
+    require(
+        config.render.rga_dma_heap == config.face_pipeline.rga_dma_heap,
+        "legacy render configuration did not inherit the RGA DMA heap");
     require(config.control.port == 11575, "control port mismatch");
     require(config.render.output_fps == 30, "output fps mismatch");
     require(config.output.rtsp_enabled, "legacy RTSP output was disabled");
@@ -91,6 +94,21 @@ void test_valid_configuration() {
     require(
         config.instrumentation.report_interval_ms == 5000,
         "metrics report interval mismatch");
+}
+
+void test_independent_render_dma_heap() {
+    std::string json = valid_configuration();
+    const std::string marker = "\"godot_project_dir\"";
+    const auto position = json.find(marker);
+    require(position != std::string::npos, "render section is missing");
+    json.insert(position, "\"rga_dma_heap\":\"/dev/dma_heap/system\",");
+
+    vtb::VtbApplicationConfigParser parser;
+    const auto config = parser.parse(json);
+    require(config.render.rga_dma_heap == "/dev/dma_heap/system",
+            "render RGA DMA heap override was ignored");
+    require(config.face_pipeline.rga_dma_heap == "/dev/dma_heap/system-uncached",
+            "render RGA DMA heap override changed the face pipeline heap");
 }
 
 void test_unsupported_input_type() {
@@ -272,6 +290,7 @@ void test_independent_network_outputs() {
 int main() {
     try {
         test_valid_configuration();
+        test_independent_render_dma_heap();
         test_unsupported_input_type();
         test_compressed_camera_format_requires_decoder();
         test_render_output_url_requires_migration();

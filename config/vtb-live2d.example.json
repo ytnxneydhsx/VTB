@@ -11,7 +11,7 @@
   "face_pipeline": {
     "detector_model": "/home/huangnv/VTB/models/openseeface/mnv3_detection_fp16.rknn",
     "landmark_model": "/home/huangnv/VTB/models/openseeface/lm_model3_fp16.rknn",
-    "rga_dma_heap": "/dev/dma_heap/system-uncached",
+    "rga_dma_heap": "/dev/dma_heap/system",
     "redetect_interval_frames": 0,
     "minimum_tracking_confidence": 0.6
   },
@@ -28,6 +28,7 @@
     "allowed_origin": "http://192.168.77.1:8900"
   },
   "render": {
+    "rga_dma_heap": "/dev/dma_heap/system-uncached",
     "godot_project_dir": "/home/huangnv/VTB/runtime/cpp-host-libgodot-20261030-01/project",
     "live2d_model": "/home/huangnv/open-vt-model/阿芙洛狄忒模型文件/fense_vts/fense.model3.json",
     "output_width": 1920,

@@ -9,9 +9,11 @@
 #include <fcntl.h>
 #include <fstream>
 #include <limits>
+#include <linux/dma-buf.h>
 #include <memory>
 #include <stdexcept>
 #include <string>
+#include <sys/ioctl.h>
 #include <system_error>
 #include <sys/mman.h>
 #include <unistd.h>
@@ -32,6 +34,16 @@ void require_rknn_success(int result, const std::string& operation) {
 
 [[noreturn]] void throw_errno(const std::string& operation) {
     throw std::system_error(errno, std::generic_category(), operation);
+}
+
+void sync_dma_buf_cpu_read(int fd, std::uint64_t phase) {
+    dma_buf_sync sync{};
+    sync.flags = DMA_BUF_SYNC_READ | phase;
+    while (ioctl(fd, DMA_BUF_IOCTL_SYNC, &sync) < 0) {
+        if (errno != EINTR && errno != EAGAIN) {
+            throw_errno("DMA_BUF_IOCTL_SYNC for RKNN input");
+        }
+    }
 }
 
 void require_unit_interval(float value, const std::string& description) {
@@ -514,7 +526,9 @@ public:
             throw std::invalid_argument("RKNN input buffer is incomplete");
         }
 
-        if (frame.memory_type() == FrameMemoryType::dma_buf) {
+        const bool dma_buf_input =
+            frame.memory_type() == FrameMemoryType::dma_buf;
+        if (dma_buf_input) {
             if (used_cpu_input_) {
                 throw std::logic_error(
                     "RKNN model input transport cannot change from CPU to DMA-BUF");
@@ -549,8 +563,16 @@ public:
                 rknn_inputs_set(context_, 1, &rknn_model_input),
                 "rknn_inputs_set " + model_path_);
         }
-        require_rknn_success(
-            rknn_run(context_, nullptr), "rknn_run " + model_path_);
+        // RGA has finished writing. RKNN may read the mapped RGB8 input
+        // on the CPU while converting it to the native tensor format.
+        if (dma_buf_input) {
+            sync_dma_buf_cpu_read(plane.dma_buf_fd(), DMA_BUF_SYNC_START);
+        }
+        const int run_result = rknn_run(context_, nullptr);
+        if (dma_buf_input) {
+            sync_dma_buf_cpu_read(plane.dma_buf_fd(), DMA_BUF_SYNC_END);
+        }
+        require_rknn_success(run_result, "rknn_run " + model_path_);
 
         require_rknn_success(
             rknn_outputs_get(

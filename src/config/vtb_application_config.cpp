@@ -193,9 +193,16 @@ ControlConfiguration parse_control(const Json& root) {
     return config;
 }
 
-RenderConfiguration parse_render(const Json& root) {
+RenderConfiguration parse_render(
+    const Json& root,
+    const std::string& default_rga_dma_heap) {
     const Json& render = required_object(root, "render", "root");
     RenderConfiguration config;
+    config.rga_dma_heap = default_rga_dma_heap;
+    if (render.contains("rga_dma_heap")) {
+        config.rga_dma_heap =
+            required_nonempty_string(render, "rga_dma_heap", "render");
+    }
     config.godot_project_dir =
         required_nonempty_string(render, "godot_project_dir", "render");
     config.live2d_model =
@@ -322,7 +329,7 @@ VtbApplicationConfiguration VtbApplicationConfigParser::parse(
     config.face_pipeline = parse_face_pipeline(root);
     config.mapping = parse_mapping(root);
     config.control = parse_control(root);
-    config.render = parse_render(root);
+    config.render = parse_render(root, config.face_pipeline.rga_dma_heap);
     config.output = parse_output(root);
     config.instrumentation = parse_instrumentation(root);
     return config;

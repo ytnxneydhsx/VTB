@@ -64,10 +64,14 @@ RK3588 网线直连时，浏览器入口为 `http://192.168.77.2:8080/`。
 `YUYV`、`NV12` 和 `NV21` 原始帧。`MJPG`、H.264 等压缩格式需要先接入解码器，
 配置解析器会在启动时明确拒绝这些格式，避免把压缩字节当成像素帧。
 
-`face_pipeline.rga_dma_heap` 指定 Face 与 Godot 各自 RGA Session 的目标缓冲区所用
-DMA heap，例如 `/dev/dma_heap/system-uncached`。路径由 JSON 提供；
-`RgaModelInputTransformer` 与 `RgaNv12FrameTransformer` 不在代码中猜测设备节点。
-启动时无法打开该 heap、摄像头缓冲区无法导出 DMA-BUF，或
+`face_pipeline.rga_dma_heap` 指定人脸框和 66 点模型的 RGA RGB8 输出缓冲区。
+示例使用可缓存的 `/dev/dma_heap/system`，供 RKNN Runtime 读取 RGB8 并转换为模型输入。
+RKNN 推理在 RGA 写入完成后对 DMA-BUF 执行 CPU 读同步。
+`render.rga_dma_heap` 指定 Godot 渲染的 RGA NV12 输出缓冲区，示例使用
+`/dev/dma_heap/system-uncached`。旧配置省略该字段时继承
+`face_pipeline.rga_dma_heap`。
+
+启动时无法打开配置的 heap、摄像头缓冲区无法导出 DMA-BUF，或
 RGA 不支持请求的格式、stride、ROI 与缩放比例时，模型管线会明确报错并停止。
 
 `instrumentation.metrics_directory` 启用项目自有的指标持久化。目录会在启动时创建，

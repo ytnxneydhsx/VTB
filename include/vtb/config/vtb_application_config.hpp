@@ -33,6 +33,7 @@ public:
 
 class RenderConfiguration {
 public:
+    std::string rga_dma_heap;
     std::string godot_project_dir;
     std::string live2d_model;
     std::uint32_t output_width = 0;

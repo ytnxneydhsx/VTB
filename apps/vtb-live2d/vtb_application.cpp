@@ -196,7 +196,7 @@ public:
         GodotRenderPipelineConfig godot_render_config;
         godot_render_config.render = config_.render;
         godot_render_config.rga_dma_heap_path =
-            config_.face_pipeline.rga_dma_heap;
+            config_.render.rga_dma_heap;
         godot_render_config.metrics_path = render_metrics_path;
         godot_render_config.metrics_report_interval = metrics_report_interval;
         std::unique_ptr<GodotRenderPipeline> godot_render_pipeline =

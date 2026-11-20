@@ -42,6 +42,11 @@
  * 所有者线程在每个步骤上等待 `Semaphore` 完成通知。RGBA 发布回调复制一个非拥有
  * `RgbaFrameView`，随后所有者线程在下一次 Godot iteration 前同步完成 RGA 转换。
  *
+ * RenderConfiguration 的 `rga_dma_heap` 成员来自 `render.rga_dma_heap`，用于分配
+ * RGA 的 NV12 目标缓冲区。示例配置将渲染输出设为 `/dev/dma_heap/system-uncached`，
+ * 将人脸模型的 RGB8 缓冲区设为可缓存的 `/dev/dma_heap/system`。
+ * 旧配置省略 `render.rga_dma_heap` 时继承 `face_pipeline.rga_dma_heap`。
+ *
  * @par Godot 直接渲染、RGBA 与 NV12 的完整时序
  *
  * @mermaid{live2d_render_frame_sequence} "跟踪快照经 Godot render thread、RGBA 借用和同步 RGA 形成 NV12 租约"
