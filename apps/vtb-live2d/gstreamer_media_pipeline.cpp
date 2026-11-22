@@ -4,6 +4,7 @@
 #include <cstring>
 #include <fcntl.h>
 #include <memory>
+#include <optional>
 #include <stdexcept>
 #include <string>
 #include <utility>
@@ -13,6 +14,8 @@
 #include <gst/video/video.h>
 #include <unistd.h>
 
+#include "vtb/trace/frame_trace.hpp"
+
 namespace vtb {
 namespace {
 
@@ -20,6 +23,8 @@ using namespace gstreamer_media_detail;
 
 constexpr guint kUvcJpegQueueCapacity = 10;
 constexpr gint64 kUvcSinkTimestampOffset = 40 * GST_MSECOND;
+constexpr char kH264RawQueue[] = "h264-raw-queue";
+constexpr char kMjpegRawQueue[] = "mjpeg-raw-queue";
 
 class Nv12LeaseHolder final {
 public:
@@ -45,6 +50,74 @@ GQuark lease_holder_quark() {
 void destroy_lease_holder(gpointer data) {
     delete static_cast<Nv12LeaseHolder*>(data);
 }
+
+#ifdef VTB_FRAME_TRACING
+constexpr char kAppsrcFlow[] = "nv12-appsrc";
+
+std::optional<std::uint64_t> nv12_probe_sequence(GstPadProbeInfo* info) {
+    GstBuffer* buffer = gst_pad_probe_info_get_buffer(info);
+    if (buffer == nullptr || !GST_BUFFER_OFFSET_IS_VALID(buffer)) {
+        return std::nullopt;
+    }
+    // push() stores the one-based render sequence as a zero-based buffer offset.
+    return GST_BUFFER_OFFSET(buffer) + 1;
+}
+
+GstPadProbeReturn trace_appsrc_output(
+    GstPad*, GstPadProbeInfo* info, gpointer data) {
+    if (!TRACE_EVENT_CATEGORY_ENABLED(VTB_FRAME_TRACE_CATEGORY)) {
+        return GST_PAD_PROBE_OK;
+    }
+    const auto sequence = nv12_probe_sequence(info);
+    if (!sequence) {
+        return GST_PAD_PROBE_OK;
+    }
+    const auto& config = *static_cast<const GStreamerMediaSessionConfig*>(data);
+    VTB_FRAME_EVENT(
+        "media.appsrc.output", frame_trace_track(), "sequence", *sequence,
+        [&](perfetto::EventContext context) {
+            perfetto::TerminatingFlow::ProcessScoped(*sequence, kAppsrcFlow)(context);
+            if (config.rtsp_enabled || config.webrtc_enabled) {
+                perfetto::Flow::ProcessScoped(*sequence, kH264RawQueue)(context);
+            }
+            if (config.uvc_enabled) {
+                perfetto::Flow::ProcessScoped(*sequence, kMjpegRawQueue)(context);
+            }
+        });
+    return GST_PAD_PROBE_OK;
+}
+
+GstPadProbeReturn trace_raw_queue(
+    GstPad* pad, GstPadProbeInfo* info, gpointer data) {
+    if (!TRACE_EVENT_CATEGORY_ENABLED(VTB_FRAME_TRACE_CATEGORY)) {
+        return GST_PAD_PROBE_OK;
+    }
+    const auto sequence = nv12_probe_sequence(info);
+    if (!sequence) {
+        return GST_PAD_PROBE_OK;
+    }
+    const auto* queue = static_cast<const char*>(data);
+    if (gst_pad_get_direction(pad) == GST_PAD_SINK) {
+        VTB_FRAME_EVENT(
+            "media.raw_queue.input", frame_trace_track(),
+            perfetto::Flow::ProcessScoped(*sequence, queue),
+            "queue", queue, "sequence", *sequence);
+    } else {
+        VTB_FRAME_EVENT(
+            "media.raw_queue.output", frame_trace_track(),
+            perfetto::TerminatingFlow::ProcessScoped(*sequence, queue),
+            "queue", queue, "sequence", *sequence);
+    }
+    return GST_PAD_PROBE_OK;
+}
+
+void trace_nv12_queue(GstElement* queue, const char* queue_name) {
+    // GStreamer retains the pointer to a static label without modifying it.
+    auto* label = const_cast<char*>(queue_name);
+    add_frame_probe(queue, "sink", trace_raw_queue, label);
+    add_frame_probe(queue, "src", trace_raw_queue, label);
+}
+#endif
 
 }  // namespace
 
@@ -74,67 +147,10 @@ GstPadProbeReturn GStreamerMediaSession::Impl::h264_input_probe(
             throw std::runtime_error(
                 "GStreamer H.264 encoder rejected a ForceKeyUnit event");
         }
-        self.idr_requests_.fetch_add(1);
     } catch (...) {
         self.remember_failure(std::current_exception());
     }
     return GST_PAD_PROBE_OK;
-}
-
-GstPadProbeReturn GStreamerMediaSession::Impl::h264_output_probe(
-    GstPad*,
-    GstPadProbeInfo* info,
-    gpointer user_data) noexcept {
-    auto& self = *static_cast<Impl*>(user_data);
-    if ((GST_PAD_PROBE_INFO_TYPE(info) & GST_PAD_PROBE_TYPE_BUFFER) != 0) {
-        self.h264_frames_.fetch_add(1);
-    }
-    return GST_PAD_PROBE_OK;
-}
-
-GstPadProbeReturn GStreamerMediaSession::Impl::mjpeg_output_probe(
-    GstPad*,
-    GstPadProbeInfo* info,
-    gpointer user_data) noexcept {
-    auto& self = *static_cast<Impl*>(user_data);
-    if ((GST_PAD_PROBE_INFO_TYPE(info) & GST_PAD_PROBE_TYPE_BUFFER) != 0) {
-        self.mjpeg_frames_.fetch_add(1);
-    }
-    return GST_PAD_PROBE_OK;
-}
-
-GstPadProbeReturn GStreamerMediaSession::Impl::h264_upstream_event_probe(
-    GstPad*,
-    GstPadProbeInfo* info,
-    gpointer user_data) noexcept {
-    auto& self = *static_cast<Impl*>(user_data);
-    if ((GST_PAD_PROBE_INFO_TYPE(info) & GST_PAD_PROBE_TYPE_EVENT_UPSTREAM) !=
-        0) {
-        GstEvent* event = gst_pad_probe_info_get_event(info);
-        if (event != nullptr && gst_video_event_is_force_key_unit(event)) {
-            self.idr_requests_.fetch_add(1);
-        }
-    }
-    return GST_PAD_PROBE_OK;
-}
-
-void GStreamerMediaSession::Impl::raw_queue_overrun(
-    GstElement*,
-    gpointer user_data) noexcept {
-    auto& self = *static_cast<Impl*>(user_data);
-    self.raw_dropped_frames_.fetch_add(1);
-}
-
-void GStreamerMediaSession::Impl::add_encoder_probe(
-    GstElement* encoder,
-    GstPadProbeType type,
-    GstPadProbeCallback callback) {
-    GstPad* source_pad = gst_element_get_static_pad(encoder, "src");
-    if (source_pad == nullptr) {
-        throw std::runtime_error("GStreamer encoder has no source pad");
-    }
-    gst_pad_add_probe(source_pad, type, callback, this, nullptr);
-    gst_object_unref(source_pad);
 }
 
 void GStreamerMediaSession::Impl::configure_webrtc_sink(GstElement* upstream) {
@@ -190,7 +206,7 @@ void GStreamerMediaSession::Impl::configure_webrtc_sink(GstElement* upstream) {
 void GStreamerMediaSession::Impl::build_h264_pipeline(GstElement* nv12_tee) {
     using namespace gstreamer_media_detail;
 
-    GstElement* h264_queue = make_element("queue", "h264-raw-queue");
+    GstElement* h264_queue = make_element("queue", kH264RawQueue);
     add_elements(pipeline_, {h264_queue});
     h264_encoder_ = make_element("mpph264enc", "h264-encoder");
     add_elements(pipeline_, {h264_encoder_});
@@ -211,13 +227,11 @@ void GStreamerMediaSession::Impl::build_h264_pipeline(GstElement* nv12_tee) {
         FALSE,
         nullptr);
     g_object_set(h264_parser, "config-interval", -1, nullptr);
-    g_signal_connect(
-        h264_queue,
-        "overrun",
-        G_CALLBACK(raw_queue_overrun),
-        this);
 
     link_elements({nv12_tee, h264_queue, h264_encoder_, h264_parser});
+#ifdef VTB_FRAME_TRACING
+    trace_nv12_queue(h264_queue, kH264RawQueue);
+#endif
     GstPad* h264_queue_src = gst_element_get_static_pad(h264_queue, "src");
     if (h264_queue_src == nullptr) {
         throw std::runtime_error("GStreamer H.264 queue has no source pad");
@@ -240,23 +254,17 @@ void GStreamerMediaSession::Impl::build_h264_pipeline(GstElement* nv12_tee) {
     if (config_.webrtc_enabled) {
         configure_webrtc_sink(output_source);
     }
-    add_encoder_probe(
-        h264_encoder_, GST_PAD_PROBE_TYPE_BUFFER, h264_output_probe);
-    add_encoder_probe(
-        h264_encoder_,
-        GST_PAD_PROBE_TYPE_EVENT_UPSTREAM,
-        h264_upstream_event_probe);
 }
 
 void GStreamerMediaSession::Impl::build_mjpeg_pipeline(GstElement* nv12_tee) {
     using namespace gstreamer_media_detail;
 
-    GstElement* mjpeg_queue = make_element("queue", "mjpeg-raw-queue");
-    mjpeg_encoder_ = make_element("mppjpegenc", "mjpeg-encoder");
+    GstElement* mjpeg_queue = make_element("queue", kMjpegRawQueue);
+    GstElement* mjpeg_encoder = make_element("mppjpegenc", "mjpeg-encoder");
     GstElement* jpeg_parser = make_element("jpegparse", "mjpeg-parser");
     configure_queue(mjpeg_queue, kRawQueueCapacity);
     g_object_set(
-        mjpeg_encoder_,
+        mjpeg_encoder,
         "q-factor",
         static_cast<guint>(80),
         "qf-min",
@@ -268,13 +276,11 @@ void GStreamerMediaSession::Impl::build_mjpeg_pipeline(GstElement* nv12_tee) {
         "zero-copy-pkt",
         FALSE,
         nullptr);
-    g_signal_connect(
-        mjpeg_queue,
-        "overrun",
-        G_CALLBACK(raw_queue_overrun),
-        this);
-    add_elements(pipeline_, {mjpeg_queue, mjpeg_encoder_, jpeg_parser});
-    link_elements({nv12_tee, mjpeg_queue, mjpeg_encoder_, jpeg_parser});
+    add_elements(pipeline_, {mjpeg_queue, mjpeg_encoder, jpeg_parser});
+    link_elements({nv12_tee, mjpeg_queue, mjpeg_encoder, jpeg_parser});
+#ifdef VTB_FRAME_TRACING
+    trace_nv12_queue(mjpeg_queue, kMjpegRawQueue);
+#endif
     GstElement* jpeg_queue = make_element("queue", "uvc-mjpeg-output-queue");
     add_elements(pipeline_, {jpeg_queue});
     GstElement* uvc_output = make_element("uvcsink", "uvc-output");
@@ -282,8 +288,6 @@ void GStreamerMediaSession::Impl::build_mjpeg_pipeline(GstElement* nv12_tee) {
     configure_queue(jpeg_queue, kUvcJpegQueueCapacity);
     set_uvc_device(uvc_output);
     link_elements({jpeg_parser, jpeg_queue, uvc_output});
-    add_encoder_probe(
-        mjpeg_encoder_, GST_PAD_PROBE_TYPE_BUFFER, mjpeg_output_probe);
 }
 
 void GStreamerMediaSession::Impl::build_pipeline() {
@@ -303,6 +307,9 @@ void GStreamerMediaSession::Impl::build_pipeline() {
     add_elements(pipeline_, {tee});
     configure_appsrc(raw_source_, kRawAppSrcCapacity);
     link_elements({raw_source_, tee});
+#ifdef VTB_FRAME_TRACING
+    add_frame_probe(raw_source_, "src", trace_appsrc_output, &config_);
+#endif
     if (h264_enabled) {
         build_h264_pipeline(tee);
     }
@@ -425,17 +432,17 @@ void GStreamerMediaSession::Impl::push(Nv12FrameLease frame) {
     GST_BUFFER_DURATION(buffer) = GST_SECOND / view.frames_per_second;
     GST_BUFFER_OFFSET(buffer) = view.sequence - 1;
 
-    GstFlowReturn result;
-    {
-        auto scope = raw_push_timer_.scope();
-        result = gst_app_src_push_buffer(GST_APP_SRC(raw_source_), buffer);
-    }
+    VTB_FRAME_EVENT(
+        "media.appsrc.submit", frame_trace_track(),
+        perfetto::Flow::ProcessScoped(view.sequence, kAppsrcFlow),
+        "sequence", view.sequence);
+    const GstFlowReturn result =
+        gst_app_src_push_buffer(GST_APP_SRC(raw_source_), buffer);
     if (result != GST_FLOW_OK) {
         throw std::runtime_error(
             std::string("Failed to queue NV12 GstBuffer: ") +
             gst_flow_get_name(result));
     }
-    submitted_frames_.fetch_add(1);
     poll_pipeline_error(pipeline_);
     if (end_of_stream && !input_eos_.exchange(true)) {
         gst_app_src_end_of_stream(GST_APP_SRC(raw_source_));

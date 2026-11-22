@@ -40,7 +40,7 @@
  *     participant Worker as 帧消费线程
  *     participant Consumer as VideoFrameConsumer
  *
- *     Note over Camera,Pool: 前置：V4l2BufferPool 已完成 MMAP、初始 QBUF 和 STREAMON
+ *     Note over Camera,Pool: 前置：V4l2BufferPool 已完成 MMAP 和初始 QBUF
  *     Note over Capture,Worker: 红色边界=DecodedFrameLease 跨线程交接；蓝色箭头=就绪通知；黄色曲线=控制判断
  *     Control->>Protocol: exchange(begin_source, generation)
  *     Protocol-->>Worker: wait_request() → begin_source
@@ -52,6 +52,9 @@
  *     par 采集线程：循环读取并发布最新 Lease
  *         loop 每次 CameraSource::read()
  *             Capture->>Pool: CameraSource::read() → V4l2BufferPool::dequeue()
+ *             opt 首次读取
+ *                 Pool->>Driver: VIDIOC_STREAMON：开始采集
+ *             end
  *             Pool->>Driver: poll(fd)：等待可读取的 Capture Buffer
  *             Camera-->>Driver: USB/UVC 到达一帧图像
  *             Driver->>Driver: 填充一个已 QBUF 的 Capture Buffer
@@ -204,7 +207,7 @@
  *
  *     Open(["open_and_configure()<br/>open + QUERYCAP + S_FMT + S_PARM"])
  *     Allocate(["initialize()<br/>REQBUFS → QUERYBUF → mmap → EXPBUF"])
- *     Prime(["每个 index 初始 VIDIOC_QBUF<br/>随后 VIDIOC_STREAMON"])
+ *     Prime(["每个 index 初始 VIDIOC_QBUF<br/>首次 dequeue() 时执行 VIDIOC_STREAMON"])
  *     Shutdown(["shutdown()<br/>STREAMOFF → mappings_.clear()"])
  *     Close(["V4l2Camera 析构<br/>close(device fd)"])
  *
@@ -217,7 +220,7 @@
  *
  *     Open -->|"灰色：创建"| DeviceFd
  *     Allocate -->|"灰色：创建 N 个 Mapping"| Mappings
- *     Prime -->|"灰色：把全部 slot 交给驱动填充"| Mapping
+ *     Prime -->|"灰色：登记全部 slot，开流后由驱动填充"| Mapping
  *     Shutdown -->|"灰色：释放 Mapping 资源"| Mappings
  *     Close -->|"灰色：最终释放"| DeviceFd
  *

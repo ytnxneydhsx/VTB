@@ -51,9 +51,5 @@
       "library_path": "/opt/vtb/gstreamer-1.28.9/lib/aarch64-linux-gnu",
       "plugin_path": "/opt/vtb/gstreamer-1.28.9/lib/aarch64-linux-gnu/gstreamer-1.0"
     }
-  },
-  "instrumentation": {
-    "metrics_directory": "/home/huangnv/VTB/runtime/cpp-host-libgodot-20261030-01/metrics",
-    "report_interval_ms": 5000
   }
 }

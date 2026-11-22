@@ -74,6 +74,10 @@ separate resource root with `--path`. The host CMake target is enabled with
 `VTB_GODOT_SOURCE_ROOT`, and
 `VTB_LIBGODOT_LIBRARY`. `VTB_EMBEDDED_RPATH_LINK` contains the pinned OpenCV,
 FFmpeg, Rockchip, and RKNN ARM64 library directories used while linking the host.
+The embedded host enables Perfetto frame tracing by default. Set
+`VTB_PERFETTO_SDK_ROOT` to the target SDK, or configure
+`VTB_ENABLE_FRAME_TRACING=OFF` for a build without Perfetto. See the
+[board trace setup](../../../support/perfetto/README.md).
 OpenCV supplies only the PnP geometry implementation; camera capture uses the
 project's direct V4L2 MMAP/DQBUF path and does not link OpenCV videoio.
 The resulting executable has an `$ORIGIN` runtime search path.

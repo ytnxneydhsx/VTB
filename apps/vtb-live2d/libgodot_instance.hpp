@@ -41,7 +41,6 @@ public:
      */
     RgbaFrameView publish_rgba_frame(std::uint64_t timestamp_ns);
     bool should_stop() const noexcept;
-    std::uint64_t completed_frames() const noexcept;
     void finish();
     void shutdown() noexcept;
 

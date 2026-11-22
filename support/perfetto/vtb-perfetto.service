@@ -1,0 +1,12 @@
+[Unit]
+Description=VTB Perfetto tracing service
+
+[Service]
+Type=exec
+RuntimeDirectory=vtb-perfetto
+RuntimeDirectoryMode=0750
+Environment=PERFETTO_PRODUCER_SOCK_NAME=/run/vtb-perfetto/producer
+Environment=PERFETTO_CONSUMER_SOCK_NAME=/run/vtb-perfetto/consumer
+ExecStart=/opt/vtb/perfetto-v59.1/tracebox traced --set-socket-permissions root:0660:root:0660
+Restart=on-failure
+RestartSec=2s

@@ -3,6 +3,11 @@
 #include <optional>
 #include <stdexcept>
 #include <utility>
+#include "vtb/trace/frame_trace.hpp"
+
+#if defined(__linux__)
+#include <pthread.h>
+#endif
 
 namespace vtb {
 
@@ -71,6 +76,9 @@ std::uint64_t VideoCaptureStage::dropped_frame_count() const noexcept {
 }
 
 void VideoCaptureStage::thread_main() noexcept {
+#if defined(__linux__)
+    (void)pthread_setname_np(pthread_self(), "vtb-capture");
+#endif
     bool reached_end_of_stream = false;
     try {
         while (!stop_requested_.load()) {
@@ -82,8 +90,13 @@ void VideoCaptureStage::thread_main() noexcept {
                 break;
             }
 
+            VTB_FRAME_EVENT(
+                "capture.enqueue", frame_trace_track(), "frame_id", frame->view().frame_id());
             const messaging::ChannelPublishResult result =
                 output_channel_.publish(std::move(frame.value()));
+            if (result == messaging::ChannelPublishResult::published_after_dropping_oldest) {
+                VTB_FRAME_EVENT("capture.drop_oldest", frame_trace_track());
+            }
             if (result == messaging::ChannelPublishResult::closed ||
                 result == messaging::ChannelPublishResult::finished) {
                 break;

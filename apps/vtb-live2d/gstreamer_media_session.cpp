@@ -3,7 +3,6 @@
 #include <cerrno>
 #include <cstdlib>
 #include <cstring>
-#include <iostream>
 #include <stdexcept>
 #include <string>
 #include <utility>
@@ -13,8 +12,7 @@
 namespace vtb {
 
 GStreamerMediaSession::Impl::Impl(GStreamerMediaSessionConfig config)
-    : config_(std::move(config)),
-      raw_push_timer_(timers_.register_timer("live2d.gstreamer_raw_push")) {
+    : config_(std::move(config)) {
     validate_config();
     if (config_.webrtc_enabled && config_.webrtc_bind_address.empty()) {
         // 旧配置同时启用两路时，WebRTC 沿用 RTSP URL 的主机地址。
@@ -30,15 +28,6 @@ GStreamerMediaSession::Impl::Impl(GStreamerMediaSessionConfig config)
     dma_buf_allocator_ = gst_dmabuf_allocator_new();
     if (dma_buf_allocator_ == nullptr) {
         throw std::runtime_error("Failed to create DMA-BUF allocator");
-    }
-    if (!config_.metrics_path.empty()) {
-        metrics_reporter_ =
-            std::make_unique<instrumentation::MetricsJsonlReporter>(
-                timers_,
-                "vtb-live2d.gstreamer_media",
-                config_.metrics_path,
-                config_.metrics_report_interval);
-        metrics_reporter_->start();
     }
     try {
         build_pipeline();
@@ -92,17 +81,6 @@ void GStreamerMediaSession::Impl::finish() {
     }
 
     cleanup();
-    finish_metrics();
-    std::cout << "VTB_GSTREAMER_MEDIA_RESULT"
-              << " submitted=" << submitted_frames_.load()
-              << " h264=" << h264_frames_.load()
-              << " mjpeg=" << mjpeg_frames_.load()
-              << " rtsp_pushed=" << rtsp_pushed_frames_.load()
-              << " rtsp_no_client=" << rtsp_no_client_frames_.load()
-              << " rtsp_wait_keyframe_dropped="
-              << rtsp_waiting_keyframe_drops_.load()
-              << " raw_dropped=" << raw_dropped_frames_.load()
-              << " idr_requests=" << idr_requests_.load() << "\n";
     rethrow_if_failed();
 }
 
@@ -133,10 +111,6 @@ void GStreamerMediaSession::Impl::validate_config() const {
     if (config_.uvc_enabled && config_.uvc_device.empty()) {
         throw std::invalid_argument(
             "Enabled GStreamer UVC output requires a device");
-    }
-    if (config_.metrics_report_interval.count() <= 0) {
-        throw std::invalid_argument(
-            "GStreamer metrics interval must be positive");
     }
 }
 
@@ -233,30 +207,10 @@ void GStreamerMediaSession::Impl::cleanup() noexcept {
     cleanup_rtsp_server();
     raw_source_ = nullptr;
     h264_encoder_ = nullptr;
-    mjpeg_encoder_ = nullptr;
     if (dma_buf_allocator_ != nullptr) {
         gst_object_unref(dma_buf_allocator_);
         dma_buf_allocator_ = nullptr;
     }
-}
-
-void GStreamerMediaSession::Impl::finish_metrics() noexcept {
-    if (!metrics_reporter_ || metrics_finished_) {
-        return;
-    }
-    metrics_reporter_->stop();
-    metrics_finished_ = true;
-    std::cout << "VTB_METRICS_RESULT source="
-              << metrics_reporter_->source()
-              << " path=" << metrics_reporter_->output_path()
-              << " records=" << metrics_reporter_->record_count()
-              << " failed=";
-    if (metrics_reporter_->failed()) {
-        std::cout << "1 error=" << metrics_reporter_->last_error();
-    } else {
-        std::cout << "0";
-    }
-    std::cout << "\n";
 }
 
 GStreamerMediaSession::GStreamerMediaSession(

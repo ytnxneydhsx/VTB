@@ -17,8 +17,6 @@
 #include <gst/rtsp-server/rtsp-server.h>
 
 #include "gstreamer_media_session.hpp"
-#include "vtb/instrumentation/metrics_jsonl_reporter.hpp"
-#include "vtb/instrumentation/timer.hpp"
 
 namespace vtb {
 namespace gstreamer_media_detail {
@@ -50,6 +48,13 @@ void add_elements(
 void link_elements(std::initializer_list<GstElement*> elements);
 void configure_queue(GstElement* queue, guint capacity);
 void configure_appsrc(GstElement* source, guint64 capacity);
+#ifdef VTB_FRAME_TRACING
+void add_frame_probe(
+    GstElement* element,
+    const char* pad_name,
+    GstPadProbeCallback callback,
+    gpointer data);
+#endif
 void set_pipeline_playing(GstElement* pipeline, const char* name);
 std::runtime_error pipeline_error(GstMessage* message);
 GstCaps* nv12_dma_buf_caps(
@@ -85,10 +90,6 @@ private:
         GstPad* pad,
         GstPadProbeInfo* info,
         gpointer user_data) noexcept;
-    static GstPadProbeReturn h264_output_probe(
-        GstPad* pad,
-        GstPadProbeInfo* info,
-        gpointer user_data) noexcept;
     static GstFlowReturn h264_sample_callback(
         GstAppSink* sink,
         gpointer user_data) noexcept;
@@ -103,24 +104,9 @@ private:
         GstAppSrc* source,
         guint length,
         gpointer user_data) noexcept;
-    static GstPadProbeReturn mjpeg_output_probe(
-        GstPad* pad,
-        GstPadProbeInfo* info,
-        gpointer user_data) noexcept;
-    static GstPadProbeReturn h264_upstream_event_probe(
-        GstPad* pad,
-        GstPadProbeInfo* info,
-        gpointer user_data) noexcept;
-    static void raw_queue_overrun(
-        GstElement* queue,
-        gpointer user_data) noexcept;
 
     void validate_config() const;
     void configure_plugin_path() const;
-    void add_encoder_probe(
-        GstElement* encoder,
-        GstPadProbeType type,
-        GstPadProbeCallback callback);
     void build_pipeline();
     void build_h264_pipeline(GstElement* nv12_tee);
     void build_mjpeg_pipeline(GstElement* nv12_tee);
@@ -149,17 +135,12 @@ private:
     void cleanup_pipeline(GstElement*& pipeline) noexcept;
     void cleanup_rtsp_server() noexcept;
     void cleanup() noexcept;
-    void finish_metrics() noexcept;
 
     GStreamerMediaSessionConfig config_;
-    instrumentation::TimerRegistry timers_;
-    instrumentation::TimerHandle raw_push_timer_;
-    std::unique_ptr<instrumentation::MetricsJsonlReporter> metrics_reporter_;
     GstAllocator* dma_buf_allocator_ = nullptr;
     GstElement* pipeline_ = nullptr;
     GstElement* raw_source_ = nullptr;
     GstElement* h264_encoder_ = nullptr;
-    GstElement* mjpeg_encoder_ = nullptr;
     GMainContext* rtsp_context_ = nullptr;
     GMainLoop* rtsp_loop_ = nullptr;
     GstRTSPServer* rtsp_server_ = nullptr;
@@ -176,14 +157,6 @@ private:
     std::mutex finish_mutex_;
     std::atomic<bool> input_eos_{false};
     std::atomic<bool> rtsp_idr_requested_{false};
-    std::atomic<std::uint64_t> submitted_frames_{0};
-    std::atomic<std::uint64_t> h264_frames_{0};
-    std::atomic<std::uint64_t> mjpeg_frames_{0};
-    std::atomic<std::uint64_t> rtsp_pushed_frames_{0};
-    std::atomic<std::uint64_t> rtsp_no_client_frames_{0};
-    std::atomic<std::uint64_t> rtsp_waiting_keyframe_drops_{0};
-    std::atomic<std::uint64_t> raw_dropped_frames_{0};
-    std::atomic<std::uint64_t> idr_requests_{0};
     std::uint32_t width_ = 0;
     std::uint32_t height_ = 0;
     std::uint32_t horizontal_stride_ = 0;
@@ -198,7 +171,6 @@ private:
     bool rtsp_waiting_for_keyframe_ = true;
     bool stream_initialized_ = false;
     bool finished_ = false;
-    bool metrics_finished_ = false;
 };
 
 }  // namespace vtb

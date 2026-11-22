@@ -2,7 +2,6 @@
 
 #include <atomic>
 #include <condition_variable>
-#include <cstdint>
 #include <exception>
 #include <memory>
 #include <mutex>
@@ -58,7 +57,6 @@ private:
     std::condition_variable condition_;
     std::exception_ptr failure_;
     std::thread worker_;
-    std::uint64_t completed_frames_ = 0;
     unsigned long iterations_ = 0;
     bool initialization_finished_ = false;
     bool frames_permitted_ = false;

@@ -66,6 +66,7 @@ public:
     V4l2BufferPool(V4l2BufferPool&&) = delete;
     V4l2BufferPool& operator=(V4l2BufferPool&&) = delete;
 
+    /** @brief 首次取帧时执行 VIDIOC_STREAMON，之后等待并取出一帧。 */
     std::optional<DecodedFrameLease> dequeue();
     void request_stop() noexcept;
 

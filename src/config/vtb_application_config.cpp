@@ -284,26 +284,6 @@ MediaOutputConfiguration parse_output(const Json& root) {
     return config;
 }
 
-InstrumentationConfiguration parse_instrumentation(const Json& root) {
-    InstrumentationConfiguration config;
-    const auto iterator = root.find("instrumentation");
-    if (iterator == root.end()) {
-        return config;
-    }
-    if (!iterator->is_object()) {
-        throw std::invalid_argument("root.instrumentation must be an object");
-    }
-    config.metrics_directory = required_nonempty_string(
-        *iterator, "metrics_directory", "instrumentation");
-    config.report_interval_ms = required_uint32(
-        *iterator,
-        "report_interval_ms",
-        "instrumentation",
-        1000,
-        3600000);
-    return config;
-}
-
 }  // namespace
 
 VtbApplicationConfiguration VtbApplicationConfigParser::parse(
@@ -331,7 +311,6 @@ VtbApplicationConfiguration VtbApplicationConfigParser::parse(
     config.control = parse_control(root);
     config.render = parse_render(root, config.face_pipeline.rga_dma_heap);
     config.output = parse_output(root);
-    config.instrumentation = parse_instrumentation(root);
     return config;
 }
 

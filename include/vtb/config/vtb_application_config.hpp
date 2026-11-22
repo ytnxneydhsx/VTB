@@ -56,16 +56,6 @@ public:
     std::string gstreamer_plugin_path;
 };
 
-class InstrumentationConfiguration {
-public:
-    std::string metrics_directory;
-    std::uint32_t report_interval_ms = 60000;
-
-    bool metrics_persistence_enabled() const noexcept {
-        return !metrics_directory.empty();
-    }
-};
-
 class VtbApplicationConfiguration {
 public:
     VideoInputConfiguration video_input;
@@ -74,7 +64,6 @@ public:
     ControlConfiguration control;
     RenderConfiguration render;
     MediaOutputConfiguration output;
-    InstrumentationConfiguration instrumentation;
 };
 
 class VtbApplicationConfigParser final {

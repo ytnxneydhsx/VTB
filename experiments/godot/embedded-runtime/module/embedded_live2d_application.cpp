@@ -133,7 +133,6 @@ Error EmbeddedLive2DApplication::submit_live2d_frame(
 	pending_view_offset_x_ = p_view_offset_x;
 	pending_view_offset_y_ = p_view_offset_y;
 	pending_produced_timestamp_ns_ = p_produced_timestamp_ns;
-	pending_snapshot_generation_ = p_snapshot_generation;
 	has_pending_parameters_ = true;
 	return OK;
 }
@@ -147,7 +146,6 @@ Error EmbeddedLive2DApplication::apply_pending_parameters(uint64_t p_monotonic_t
 		if (view_error != OK) {
 			return fail(view_error, "Live2D view update failed: " + render_session_->last_error());
 		}
-		last_snapshot_generation_ = pending_snapshot_generation_;
 		// View-only snapshots carry the same production time; they cannot renew freshness
 		// or replace already-decaying parameters with the old pre-decay value.
 		if (pending_produced_timestamp_ns_ > last_produced_timestamp_ns_) {
@@ -233,10 +231,6 @@ Error EmbeddedLive2DApplication::publish_rgba_frame(uint64_t p_ready_timestamp_n
 	}
 	output_frame_state_ = OutputFrameState::IDLE;
 	++completed_frames_;
-	if (completed_frames_ == 1 || completed_frames_ % static_cast<uint64_t>(output_fps_) == 0) {
-		print_line("VTB_CPP_FRAME_CAPTURED frame=" + itos(static_cast<int64_t>(completed_frames_)) +
-				" snapshot_generation=" + itos(static_cast<int64_t>(last_snapshot_generation_)));
-	}
 	if (current_frame_end_of_stream_) {
 		// The host synchronously runs RGA after this callback returns. Keep the
 		// direct-render DMA-BUF alive until application shutdown completes.

@@ -242,7 +242,7 @@ USB 摄像头
 
 ## 7. 时间戳、性能与诊断
 
-本节源码：[MonotonicClock](/Users/huangnv/Desktop/VTB/include/vtb/time/monotonic_clock.hpp)、[计时说明](/Users/huangnv/Desktop/VTB/docs/instrumentation.md)、[JSONL 报告器](/Users/huangnv/Desktop/VTB/src/instrumentation/metrics_jsonl_reporter.cpp)。
+本节源码：[MonotonicClock](/Users/huangnv/Desktop/VTB/include/vtb/time/monotonic_clock.hpp)。
 
 ### Q32 · P0：为什么跨模块时间戳统一使用 CLOCK_MONOTONIC？
 
@@ -258,9 +258,9 @@ USB 摄像头
 
 ### Q34 · P1：日志和性能统计会不会影响被测系统？
 
-回答要点：热路径只更新内存统计，JSONL 在报告线程完成序列化和写盘。这样减少业务线程直接等待磁盘的机会，但报告线程仍占 CPU、缓存和带宽。应比较关闭统计、仅内存统计和开启持久化的结果。
+回答要点：计时本身需要读取时钟，聚合样本也会占用 CPU 和缓存。若应用还会持久化记录，可将序列化和文件写入交给独立线程。对照关闭统计、内存聚合和持久化三种条件，可以量化测量开销。
 
-继续追问：运行中写盘失败怎样处理？flush 能否保证断电不丢日志？无限追加文件有什么运维问题？当前哪些推理阶段还没有接入统一计时库？
+继续追问：运行中写盘失败怎样处理？flush 能否保证断电不丢日志？无限追加文件有什么运维问题？怎样设计对照实验来测量写盘开销？
 
 ## 8. 信号、退出与动态库接口
 

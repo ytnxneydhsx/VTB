@@ -1,0 +1,164 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>VTB · Live2D 帧追踪</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      font: 14px system-ui, sans-serif;
+      color: #eef2f9;
+      background: #151e2c;
+    }
+    body {
+      margin: 0;
+      display: grid;
+      grid-template-rows: auto minmax(260px, 1fr);
+      height: 100dvh;
+    }
+    .overview {
+      padding: 13px clamp(12px, 2vw, 26px);
+      background: #141d2a;
+      border-bottom: 1px solid #364359;
+    }
+    header, .frame-info {
+      display: flex;
+      align-items: center;
+      flex-wrap: wrap;
+      gap: 8px 18px;
+    }
+    h1 {
+      font-size: 17px;
+      margin: 0;
+      font-weight: 650;
+    }
+    #status, .frame-info, .card small, .card > span:first-child, thead {
+      color: #b8c7da;
+    }
+    #status {
+      flex: 1 1 235px;
+      margin: 0;
+    }
+    button {
+      min-width: 100px;
+      border: 1px solid #bed7ff;
+      border-radius: 7px;
+      padding: 7px 12px;
+      font: inherit;
+      font-weight: 650;
+      color: #122340;
+      background: #bed7ff;
+      cursor: pointer;
+    }
+    button:hover:not(:disabled) { background: #dfebff; }
+    button:disabled { opacity: .66; cursor: wait; }
+    button:focus-visible, summary:focus-visible { outline: 2px solid #b9dbff; outline-offset: 3px; }
+    .metrics {
+      display: grid;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      gap: 8px;
+      margin: 12px 0 9px;
+    }
+    .card {
+      display: grid;
+      align-content: start;
+      gap: 4px;
+      min-width: 0;
+      padding: 9px 11px;
+      background: #202c3d;
+      border: 1px solid #34465c;
+      border-radius: 7px;
+    }
+    .card strong {
+      font-size: clamp(19px, 2.3vw, 27px);
+      line-height: 1.1;
+      font-variant-numeric: tabular-nums;
+    }
+    .unit { font-size: 12px; font-weight: 500; color: #b8c7da; }
+    .frame-info { font-size: 12px; justify-content: space-between; }
+    .frame-info p { margin: 0; }
+    #frame-path { color: #d5e6ff; font-variant-numeric: tabular-nums; }
+    details { margin-top: 7px; font-size: 13px; }
+    summary { cursor: pointer; width: fit-content; color: #d5e6ff; }
+    table { margin-top: 6px; border-collapse: collapse; width: min(100%, 630px); }
+    th, td {
+      padding: 3px 8px;
+      text-align: right;
+      border-bottom: 1px solid #34465c;
+      font-variant-numeric: tabular-nums;
+    }
+    th:first-child, td:first-child { text-align: left; }
+    .timeline-panel { display: grid; grid-template-rows: auto minmax(0, 1fr); }
+    #timeline-status {
+      margin: 0;
+      padding: 4px clamp(12px, 2vw, 26px);
+      color: #b8c7da;
+      font-size: 12px;
+    }
+    iframe { display: block; width: 100%; height: 100%; border: 0; }
+    @media (max-width: 650px) {
+      .metrics { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    }
+  </style>
+  <script src="/viewer.js" defer></script>
+</head>
+<body>
+  <section class="overview" aria-label="Live2D 帧统计">
+    <header>
+      <h1>Live2D 帧追踪</h1>
+      <p id="status" role="status">正在连接板端…</p>
+      <button id="refresh" type="button">刷新片段</button>
+    </header>
+    <div class="metrics">
+      <div class="card" data-rate="v4l2.dequeue">
+        <span>V4L2 采集</span>
+        <strong><span class="value">—</span> <span class="unit">FPS</span></strong>
+        <small class="count">— 帧</small>
+      </div>
+      <div class="card" data-rate="tracking.frame">
+        <span>跟踪处理</span>
+        <strong><span class="value">—</span> <span class="unit">FPS</span></strong>
+        <small class="count">— 帧</small>
+      </div>
+      <div class="card" data-rate="render.nv12_ready">
+        <span>RGA NV12 输出</span>
+        <strong><span class="value">—</span> <span class="unit">FPS</span></strong>
+        <small class="count">— 帧</small>
+      </div>
+      <div class="card">
+        <span>采集 → 首张 NV12 · P95</span>
+        <strong><span id="latency">—</span> <span class="unit">ms</span></strong>
+        <small id="linked">— 帧匹配</small>
+      </div>
+    </div>
+    <div class="frame-info">
+      <p id="frame-path">等待帧关联数据。</p>
+      <p id="drops">队列淘汰 · 采集 — · 快照 —</p>
+    </div>
+    <details>
+      <summary>分段耗时</summary>
+      <table>
+        <thead>
+          <tr><th scope="col">阶段</th><th scope="col">P50 (ms)</th><th scope="col">P95 (ms)</th><th scope="col">样本</th></tr>
+        </thead>
+        <tbody>
+          <tr data-stage="capture.queue_wait"><td>采集帧排队</td><td class="p50">—</td><td class="p95">—</td><td class="samples">—</td></tr>
+          <tr data-stage="tracking.frame"><td>跟踪处理</td><td class="p50">—</td><td class="p95">—</td><td class="samples">—</td></tr>
+          <tr data-stage="tracking.rknn_detector"><td>RKNN 人脸检测</td><td class="p50">—</td><td class="p95">—</td><td class="samples">—</td></tr>
+          <tr data-stage="tracking.rknn_landmarks"><td>RKNN 人脸关键点</td><td class="p50">—</td><td class="p95">—</td><td class="samples">—</td></tr>
+          <tr data-stage="render.queue_wait"><td>跟踪快照排队</td><td class="p50">—</td><td class="p95">—</td><td class="samples">—</td></tr>
+          <tr data-stage="render.wait_gpu"><td>Godot 等待 GPU</td><td class="p50">—</td><td class="p95">—</td><td class="samples">—</td></tr>
+          <tr data-stage="rga.nv12_sync"><td>RGA 同步转换 NV12</td><td class="p50">—</td><td class="p95">—</td><td class="samples">—</td></tr>
+          <tr data-stage="capture_to_nv12"><td>采集 → 首张关联 NV12</td><td class="p50">—</td><td class="p95">—</td><td class="samples">—</td></tr>
+        </tbody>
+      </table>
+    </details>
+  </section>
+  <section class="timeline-panel" aria-label="Perfetto">
+    <p id="timeline-status">正在载入 Perfetto 时间线…</p>
+    <iframe id="timeline" title="Perfetto 时间线"
+            src="https://ui.perfetto.dev/#!/?mode=embedded"></iframe>
+  </section>
+</body>
+</html>

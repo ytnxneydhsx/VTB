@@ -150,7 +150,7 @@
  *     Channel["Live2DTrackingChannel<br/>被动输入通道"]
  *     Stop["process_stop_requested_<br/>外部 atomic 借用"]
  *     Pipeline["thread_main() 局部 unique_ptr<br/>GodotRenderPipeline"]
- *     Impl["GodotRenderPipeline::Impl<br/>编排、计时与输出回调"]
+ *     Impl["GodotRenderPipeline::Impl<br/>编排、转换与帧交付"]
  *     Godot["unique_ptr&lt;LibGodotInstance&gt;<br/>所有者线程内创建和销毁"]
  *     Embedded["EmbeddedLive2DApplication<br/>Live2DRenderSession"]
  *     Capture["OpenVTDmaBufCapture<br/>render-thread 调度门面"]

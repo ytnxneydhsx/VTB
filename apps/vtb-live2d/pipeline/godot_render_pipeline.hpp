@@ -1,7 +1,6 @@
 #pragma once
 
 #include <chrono>
-#include <cstdint>
 #include <memory>
 #include <string>
 #include <vector>
@@ -16,8 +15,6 @@ class GodotRenderPipelineConfig final {
 public:
     RenderConfiguration render;
     std::string rga_dma_heap_path;
-    std::string metrics_path;
-    std::chrono::milliseconds metrics_report_interval{60000};
 };
 
 /**
@@ -52,7 +49,6 @@ public:
     void initialize();
     void submit(const Live2DTrackingSnapshot& snapshot);
     bool run_frame();
-    std::uint64_t completed_frames() const noexcept;
     void finish();
 
     unsigned long iteration_limit() const noexcept;

@@ -18,8 +18,7 @@ option(VTB_ENABLE_OPENCV_FACE_PIPELINE
     "Build the OpenCV-based OpenSeeFace geometry estimator" ON)
 option(VTB_ENABLE_EMBEDDED_GODOT
     "Build the VTB-owned LibGodot host executable" OFF)
-option(VTB_ENABLE_FRAME_TRACING
-    "Enable Perfetto frame tracing in the Live2D RTSP output" OFF)
+option(VTB_ENABLE_FRAME_TRACING "Enable Perfetto frame trace events in vtb-live2d" ON)
 set(VTB_PERFETTO_SDK_ROOT "" CACHE PATH
     "Target SDK root containing include/perfetto.h and lib/libperfetto.a")
 set(VTB_ROCKCHIP_SYSROOT "" CACHE PATH
@@ -99,15 +98,6 @@ target_link_libraries(vtb_application_config
     PRIVATE nlohmann_json::nlohmann_json)
 vtb_configure_target(vtb_application_config)
 
-add_library(vtb_instrumentation STATIC
-    src/instrumentation/metrics_jsonl_reporter.cpp
-    src/instrumentation/timer.cpp
-)
-add_library(vtb::instrumentation ALIAS vtb_instrumentation)
-target_include_directories(vtb_instrumentation PUBLIC include)
-target_link_libraries(vtb_instrumentation PUBLIC Threads::Threads)
-vtb_configure_target(vtb_instrumentation)
-
 add_library(vtb_output_core STATIC
     src/output/av_synchronizer.cpp
     src/output/media.cpp
@@ -160,7 +150,6 @@ if(VTB_ENABLE_RTSP_OUTPUT)
         )
         target_link_libraries(vtb-mpp-output-publisher
             PRIVATE
-                vtb_instrumentation
                 vtb_output_core
                 vtb_output_rtsp
                 PkgConfig::VTB_FFMPEG
@@ -518,7 +507,7 @@ if(VTB_ENABLE_EMBEDDED_GODOT)
             "${VTB_GLIB_CONFIG_INCLUDE_DIR}"
     )
     target_link_libraries(vtb_gstreamer_media_session
-        PUBLIC vtb_instrumentation vtb_rga_core
+        PUBLIC vtb_rga_core
         PRIVATE
             Threads::Threads
             ${VTB_GSTREAMER_LIBRARIES}
@@ -548,11 +537,11 @@ if(VTB_ENABLE_EMBEDDED_GODOT)
             vtb_application_config
             vtb_application_video_input
             vtb_face_pipeline
-            vtb_instrumentation
             "${VTB_LIBGODOT_LIBRARY}"
     )
     if(VTB_ENABLE_FRAME_TRACING)
-        if(NOT EXISTS "${VTB_PERFETTO_SDK_ROOT}/include/perfetto.h" OR
+        if(VTB_PERFETTO_SDK_ROOT STREQUAL "" OR
+           NOT EXISTS "${VTB_PERFETTO_SDK_ROOT}/include/perfetto.h" OR
            NOT EXISTS "${VTB_PERFETTO_SDK_ROOT}/lib/libperfetto.a")
             message(FATAL_ERROR
                 "VTB_PERFETTO_SDK_ROOT must point to the target Perfetto SDK")
@@ -566,6 +555,10 @@ if(VTB_ENABLE_EMBEDDED_GODOT)
             "${VTB_PERFETTO_SDK_ROOT}/lib/libperfetto.a"
             Threads::Threads ${CMAKE_DL_LIBS})
         vtb_configure_target(vtb_frame_trace)
+        target_link_libraries(vtb_capture PRIVATE vtb_frame_trace)
+        target_link_libraries(vtb_face_pipeline PRIVATE vtb_frame_trace)
+        target_link_libraries(vtb_rga_core PRIVATE vtb_frame_trace)
+        target_link_libraries(vtb_live2d_stages PRIVATE vtb_frame_trace)
         target_link_libraries(vtb_gstreamer_media_session PRIVATE vtb_frame_trace)
         target_link_libraries(vtb-live2d PRIVATE vtb_frame_trace)
     endif()
@@ -606,20 +599,10 @@ if(BUILD_TESTING)
     vtb_configure_target(vtb-application-config-test)
     add_test(NAME vtb-application-config COMMAND vtb-application-config-test)
 
-    add_executable(instrumentation-timer-test tests/instrumentation_timer_test.cpp)
-    target_link_libraries(instrumentation-timer-test PRIVATE vtb_instrumentation)
-    vtb_configure_target(instrumentation-timer-test)
-    add_test(NAME instrumentation-timer COMMAND instrumentation-timer-test)
-
     add_executable(monotonic-clock-test tests/monotonic_clock_test.cpp)
     target_include_directories(monotonic-clock-test PRIVATE include)
     vtb_configure_target(monotonic-clock-test)
     add_test(NAME monotonic-clock COMMAND monotonic-clock-test)
-
-    add_executable(metrics-jsonl-reporter-test tests/metrics_jsonl_reporter_test.cpp)
-    target_link_libraries(metrics-jsonl-reporter-test PRIVATE vtb_instrumentation)
-    vtb_configure_target(metrics-jsonl-reporter-test)
-    add_test(NAME metrics-jsonl-reporter COMMAND metrics-jsonl-reporter-test)
 
     add_executable(output-manager-test tests/output_manager_test.cpp)
     target_link_libraries(output-manager-test PRIVATE vtb_output_core)

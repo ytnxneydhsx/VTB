@@ -74,8 +74,6 @@ private:
 	uint64_t last_parameter_update_timestamp_ns_ = 0;
 	uint64_t last_produced_timestamp_ns_ = 0;
 	uint64_t pending_produced_timestamp_ns_ = 0;
-	uint64_t last_snapshot_generation_ = 0;
-	uint64_t pending_snapshot_generation_ = 0;
 	uint64_t completed_frames_ = 0;
 	float pending_view_zoom_ = 1.0F;
 	float pending_view_offset_x_ = 0.0F;

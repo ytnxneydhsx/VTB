@@ -3,6 +3,11 @@
 #include <cmath>
 #include <stdexcept>
 #include <utility>
+#include "vtb/trace/frame_trace.hpp"
+
+#if defined(__linux__)
+#include <pthread.h>
+#endif
 
 namespace vtb {
 namespace {
@@ -144,6 +149,9 @@ std::uint64_t FaceTrackingStage::processed_frame_count() const noexcept {
 }
 
 void FaceTrackingStage::thread_main() noexcept {
+#if defined(__linux__)
+    (void)pthread_setname_np(pthread_self(), "vtb-tracking");
+#endif
     bool source_began = false;
     bool completed = false;
     try {
@@ -179,6 +187,11 @@ void FaceTrackingStage::thread_main() noexcept {
 }
 
 void FaceTrackingStage::process_frame(DecodedFrameLease frame) {
+    const std::uint64_t source_frame_id = frame.view().frame_id();
+    VTB_FRAME_SLICE(
+        "tracking.frame", frame_trace_track(),
+        perfetto::TerminatingFlow::ProcessScoped(source_frame_id, "camera"),
+        "frame_id", source_frame_id);
     const std::uint64_t requested_reset =
         reset_generation_.load();
     if (requested_reset != applied_reset_generation_) {
@@ -192,6 +205,7 @@ void FaceTrackingStage::process_frame(DecodedFrameLease frame) {
 
     std::lock_guard<std::mutex> lock(state_mutex_);
     latest_mapping_ = std::move(mapping);
+    latest_source_frame_id_ = source_frame_id;
     ++snapshot_generation_;
     const messaging::ChannelPublishResult result =
         publish_snapshot_locked();
@@ -204,8 +218,18 @@ void FaceTrackingStage::process_frame(DecodedFrameLease frame) {
 
 messaging::ChannelPublishResult
 FaceTrackingStage::publish_snapshot_locked() {
-    return output_channel_.publish(Live2DTrackingSnapshot(
-        snapshot_generation_, latest_mapping_.value(), view_));
+    VTB_FRAME_EVENT(
+        "tracking.snapshot_enqueue", frame_trace_track(),
+        perfetto::Flow::ProcessScoped(snapshot_generation_, "snapshot"),
+        "snapshot_generation", snapshot_generation_,
+        "frame_id", latest_source_frame_id_,
+        "tracking_valid", latest_mapping_->tracking_valid());
+    const auto result = output_channel_.publish(Live2DTrackingSnapshot(
+        snapshot_generation_, latest_source_frame_id_, latest_mapping_.value(), view_));
+    if (result == messaging::ChannelPublishResult::published_after_dropping_oldest) {
+        VTB_FRAME_EVENT("tracking.drop_oldest", frame_trace_track());
+    }
+    return result;
 }
 
 void FaceTrackingStage::mark_initialization_finished() noexcept {

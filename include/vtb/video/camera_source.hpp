@@ -14,7 +14,7 @@ class V4l2BufferPool;
 /**
  * @brief 面向 VideoSource 接口的 V4L2 摄像头采集入口。
  *
- * CameraSource 共享持有 V4l2BufferPool。read() 从缓冲池取得一帧租约；close()
+ * CameraSource 共享持有 V4l2BufferPool。首次 read() 启动 V4L2 数据流并取得帧租约；close()
  * 释放本对象持有的 shared_ptr。已经交给下游的租约仍可继续持有缓冲池，直到最后
  * 一帧归还后才释放 MMAP、DMA-BUF fd 和摄像头 fd。
  *

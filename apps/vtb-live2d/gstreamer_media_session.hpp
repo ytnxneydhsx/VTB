@@ -1,6 +1,5 @@
 #pragma once
 
-#include <chrono>
 #include <memory>
 #include <string>
 
@@ -18,8 +17,6 @@ public:
     bool uvc_enabled = false;
     std::string uvc_device;
     std::string plugin_path;
-    std::string metrics_path;
-    std::chrono::milliseconds metrics_report_interval{60000};
 };
 
 /**

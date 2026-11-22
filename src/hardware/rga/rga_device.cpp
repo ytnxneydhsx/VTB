@@ -13,6 +13,7 @@
 
 #include <linux/dma-heap.h>
 #include <rga/im2d.h>
+#include "vtb/trace/frame_trace.hpp"
 
 namespace vtb {
 namespace {
@@ -409,6 +410,7 @@ void RgaDevice::convert_rgba_to_nv12_flipped_vertically(
             pattern_rect,
             IM_HAL_TRANSFORM_FLIP_V),
         "RGA vertically flipped RGBA-to-NV12 conversion check");
+    VTB_FRAME_SLICE("rga.nv12_sync", frame_trace_track());
     require_rga_success(
         improcess(
             source_buffer,

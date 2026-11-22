@@ -33,6 +33,7 @@ class Live2DTrackingSnapshot {
 public:
     Live2DTrackingSnapshot(
         std::uint64_t snapshot_generation,
+        std::uint64_t source_frame_id,
         Live2DMappingResult mapping,
         Live2DTrackingViewState view);
     ~Live2DTrackingSnapshot() = default;
@@ -43,11 +44,13 @@ public:
     Live2DTrackingSnapshot& operator=(Live2DTrackingSnapshot&&) noexcept = default;
 
     std::uint64_t snapshot_generation() const noexcept;
+    std::uint64_t source_frame_id() const noexcept;
     const Live2DMappingResult& mapping() const noexcept;
     const Live2DTrackingViewState& view() const noexcept;
 
 private:
     std::uint64_t snapshot_generation_ = 0;
+    std::uint64_t source_frame_id_ = 0;
     Live2DMappingResult mapping_;
     Live2DTrackingViewState view_;
 };

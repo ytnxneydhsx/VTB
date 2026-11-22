@@ -47,10 +47,6 @@ const char* valid_configuration() {
         },
         "output": {
             "rtsp_url": "rtsp://127.0.0.1:8554/live2d"
-        },
-        "instrumentation": {
-            "metrics_directory": "/runtime/metrics",
-            "report_interval_ms": 5000
         }
     })json";
 }
@@ -85,15 +81,6 @@ void test_valid_configuration() {
     require(config.output.rtsp_enabled, "legacy RTSP output was disabled");
     require(!config.output.webrtc_enabled, "default WebRTC output was enabled");
     require(config.output.rtsp_url == "rtsp://127.0.0.1:8554/live2d", "output URL mismatch");
-    require(
-        config.instrumentation.metrics_persistence_enabled(),
-        "metrics persistence was not enabled");
-    require(
-        config.instrumentation.metrics_directory == "/runtime/metrics",
-        "metrics directory mismatch");
-    require(
-        config.instrumentation.report_interval_ms == 5000,
-        "metrics report interval mismatch");
 }
 
 void test_independent_render_dma_heap() {
@@ -159,42 +146,19 @@ void test_render_output_url_requires_migration() {
     require(rejected, "legacy render output URL lacked a migration error");
 }
 
-void test_instrumentation_section_is_optional() {
+void test_legacy_instrumentation_is_ignored() {
     std::string json = valid_configuration();
-    const std::string section = R"json(,
+    json.insert(json.rfind("\n    }"), R"json(,
         "instrumentation": {
             "metrics_directory": "/runtime/metrics",
             "report_interval_ms": 5000
-        })json";
-    const std::size_t position = json.find(section);
-    require(position != std::string::npos, "instrumentation section is missing");
-    json.erase(position, section.size());
+        }
+    )json");
 
     vtb::VtbApplicationConfigParser parser;
     const vtb::VtbApplicationConfiguration config = parser.parse(json);
-    require(
-        !config.instrumentation.metrics_persistence_enabled(),
-        "missing instrumentation section enabled persistence");
-    require(
-        config.instrumentation.report_interval_ms == 60000,
-        "default metrics interval mismatch");
-}
-
-void test_instrumentation_interval_range() {
-    std::string json = valid_configuration();
-    const std::string expected = "\"report_interval_ms\": 5000";
-    const std::size_t position = json.find(expected);
-    require(position != std::string::npos, "metrics interval is missing");
-    json.replace(position, expected.size(), "\"report_interval_ms\": 999");
-
-    vtb::VtbApplicationConfigParser parser;
-    bool rejected = false;
-    try {
-        parser.parse(json);
-    } catch (const std::invalid_argument&) {
-        rejected = true;
-    }
-    require(rejected, "sub-second metrics interval was accepted");
+    require(config.output.rtsp_url == "rtsp://127.0.0.1:8554/live2d",
+            "legacy instrumentation affected output configuration");
 }
 
 void test_uvc_output_configuration() {
@@ -294,8 +258,7 @@ int main() {
         test_unsupported_input_type();
         test_compressed_camera_format_requires_decoder();
         test_render_output_url_requires_migration();
-        test_instrumentation_section_is_optional();
-        test_instrumentation_interval_range();
+        test_legacy_instrumentation_is_ignored();
         test_uvc_output_configuration();
         test_independent_network_outputs();
         std::cout << "vtb_application_config_test passed\n";

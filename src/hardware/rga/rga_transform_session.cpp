@@ -6,6 +6,7 @@
 #include <stdexcept>
 #include <utility>
 #include <vector>
+#include "vtb/trace/frame_trace.hpp"
 
 namespace vtb {
 namespace {
@@ -248,7 +249,10 @@ public:
 
         const std::shared_ptr<RgaBuffer> source_buffer =
             source_buffer_for(source);
-        RgaTransformLease destination = destination_pool_->acquire(spec);
+        RgaTransformLease destination = [&] {
+            VTB_FRAME_SLICE("rga.acquire_destination", frame_trace_track());
+            return destination_pool_->acquire(spec);
+        }();
         RgaTransformRequest request(
             spec.operation(),
             source_buffer,

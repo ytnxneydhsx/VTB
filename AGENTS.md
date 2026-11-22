@@ -60,6 +60,14 @@
 - 不使用 `root@192.168.77.2`，也不使用绕过别名配置的裸地址登录。连接异常时先只读检查有线接口、到 `192.168.77.2` 的路由和 `ssh -o BatchMode=yes rk3588-direct`，再判断是否需要调整认证或网络配置。
 - SSH 连通只授权只读检查。部署、启动服务、写入板端文件、重启、刷写或其他设备状态变更仍需遵守对应任务的授权边界。
 
+## 在 Mac 拉取 RK3588 Perfetto Trace
+
+- 需要手动导出 RK3588 的完整 Perfetto trace 时，在 Mac 的项目根目录统一执行 `./support/perfetto/pull-frame-trace.sh`。脚本使用 `rk3588-direct` 导出当前采集会话的快照，板端继续录制。
+- 默认保存到 `~/Downloads/VTB-Traces/`。可以传入一个目录覆盖保存位置。脚本会打印本地 `.pftrace` 文件路径，在 [Perfetto Web UI](https://ui.perfetto.dev/) 中打开该文件查看。
+
+- 在 Mac 查看短片段时，从项目根目录运行 `python3 support/perfetto/watch-frame-trace.py`，打开 `http://127.0.0.1:8770/`。打开页面采集一次 9 秒片段，后续点「刷新片段」才重新采集。页面显示帧统计和官方 Perfetto 时间线，关闭页面取消正在进行的采集。
+- Mac 端用 Perfetto `trace_processor_shell` 解析帧统计。将可执行文件放在 `build/perfetto-viewer/bin/` 或 `PATH` 中，也可用 `--trace-processor` 指定路径。
+
 ## 远端编译与产物取回
 
 - 本项目所有涉及编译、交叉编译和构建的工作，默认统一交给远端编译服务器完成，包括 C/C++、Rust、应用程序、第三方原生扩展、Linux 内核、内核模块、设备树和覆盖层（DTB/DTBO）、U-Boot、ATF 等。Mac 是固定的源码编辑、构建控制、传输、产物取回与校验端：从 Mac 直接 SSH 到远端编译服务器并使用 `rsync`/`scp` 传输源码和产物。编译链路不得经过树莓派，不使用树莓派上的 `x86-build` 或其他树莓派中转通道。树莓派和 RK3588 仅承担任务明确要求的设备侧部署、运行和调试。Mac 直连远端编译服务器失败时，先保留真实连接错误，然后允许回退到 Mac 进行本地编译或交叉编译。回退前必须核对目标操作系统、架构、ABI、编译器、sysroot 和第三方库版本；RK3588 Linux 产物必须使用可用的 AArch64 Linux 交叉工具链和匹配 sysroot，不得将 Mac 默认生成的 macOS/Mach-O 产物当作板端 Linux 产物。Mac 缺少匹配交叉环境时停止并报告；不自动改用树莓派或 RK3588 本地编译，除非用户明确要求。

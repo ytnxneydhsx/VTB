@@ -19,6 +19,7 @@
 
 #include "vtb/time/monotonic_clock.hpp"
 #include "vtb/v4l2_camera.hpp"
+#include "vtb/trace/frame_trace.hpp"
 
 namespace vtb {
 namespace {
@@ -81,6 +82,15 @@ V4l2BufferPool::~V4l2BufferPool() {
 
 std::optional<DecodedFrameLease> V4l2BufferPool::dequeue() {
     const int device_fd = camera_.fd();
+    if (!streaming_ && !stop_requested_.load()) {
+        v4l2_buf_type type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+        if (ioctl(device_fd, VIDIOC_STREAMON, &type) < 0) {
+            throw_errno("VIDIOC_STREAMON");
+        }
+        streaming_ = true;
+        VTB_FRAME_EVENT("v4l2.stream_on", frame_trace_track());
+    }
+
     while (!stop_requested_.load()) {
         const int saved_requeue_error = requeue_error_.load();
         if (saved_requeue_error != 0) {
@@ -117,6 +127,10 @@ std::optional<DecodedFrameLease> V4l2BufferPool::dequeue() {
             }
             throw_errno("VIDIOC_DQBUF");
         }
+        VTB_FRAME_EVENT(
+            "v4l2.dequeue", frame_trace_track(),
+            perfetto::Flow::ProcessScoped(buffer.sequence, "camera"),
+            "frame_id", buffer.sequence, "buffer_index", buffer.index);
         if (buffer.index >= mappings_.size()) {
             throw std::runtime_error(
                 "VIDIOC_DQBUF returned an invalid buffer index");
@@ -245,12 +259,6 @@ void V4l2BufferPool::initialize(
             throw_errno("initial VIDIOC_QBUF");
         }
     }
-
-    v4l2_buf_type type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
-    if (ioctl(device_fd, VIDIOC_STREAMON, &type) < 0) {
-        throw_errno("VIDIOC_STREAMON");
-    }
-    streaming_ = true;
 }
 
 void V4l2BufferPool::requeue(std::uint32_t index) noexcept {

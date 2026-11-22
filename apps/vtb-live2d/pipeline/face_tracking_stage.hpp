@@ -68,6 +68,7 @@ private:
 
     mutable std::mutex state_mutex_;
     std::optional<Live2DMappingResult> latest_mapping_;
+    std::uint64_t latest_source_frame_id_ = 0;
     std::uint64_t snapshot_generation_ = 0;
     Live2DTrackingViewState view_;
 

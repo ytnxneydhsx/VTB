@@ -233,10 +233,6 @@ public:
         return openvt_libgodot_application_should_stop() != 0;
     }
 
-    std::uint64_t completed_frames() const noexcept {
-        return openvt_libgodot_application_completed_frames();
-    }
-
     void finish() {
         const int application_result = finish_application();
         std::string failure_message;
@@ -353,10 +349,6 @@ RgbaFrameView LibGodotInstance::publish_rgba_frame(
 
 bool LibGodotInstance::should_stop() const noexcept {
     return impl_->should_stop();
-}
-
-std::uint64_t LibGodotInstance::completed_frames() const noexcept {
-    return impl_->completed_frames();
 }
 
 void LibGodotInstance::finish() {

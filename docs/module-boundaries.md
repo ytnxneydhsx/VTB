@@ -211,15 +211,9 @@ buffer 浅拷贝分发给客户端 RTP pipeline；应用不解析或复制编码
    目标池租约归还后退休资源。
 3. `GStreamerMediaSession::finish()` 停止接收 RTSP 客户端，向 raw appsrc 发送 EOS，
    等待两个编码分支和输出端消费在途帧。
-4. pipeline 进入 NULL，释放全部 `GstBuffer`、`GstMemory`、NV12 Lease 和两个编码元件，
-   随后关闭指标报告器。
+4. pipeline 进入 NULL，释放全部 `GstBuffer`、`GstMemory`、NV12 Lease 和两个编码元件。
 
 应用保存运行或清理阶段出现的第一次异常，在以上步骤全部执行后重新抛出。
-
-渲染/GPU、RGA、编码和 GStreamer 提交指标均由宿主持有；退出时
-`VTB_GSTREAMER_MEDIA_RESULT` 报告提交、两路编码、raw queue 丢帧以及周期性/下游触发的
-IDR 请求计数。
-编码完成与网络或 USB 主机实际消费仍是不同的验收层级。
 
 ## 配置与构建兼容性
 

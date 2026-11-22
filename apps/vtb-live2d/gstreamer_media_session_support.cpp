@@ -94,6 +94,22 @@ void configure_appsrc(GstElement* source, guint64 capacity) {
         nullptr);
 }
 
+#ifdef VTB_FRAME_TRACING
+void add_frame_probe(
+    GstElement* element,
+    const char* pad_name,
+    GstPadProbeCallback callback,
+    gpointer data) {
+    GstPad* pad = gst_element_get_static_pad(element, pad_name);
+    if (pad == nullptr) {
+        throw std::runtime_error(
+            std::string("GStreamer frame probe pad is missing: ") + pad_name);
+    }
+    gst_pad_add_probe(pad, GST_PAD_PROBE_TYPE_BUFFER, callback, data, nullptr);
+    gst_object_unref(pad);
+}
+#endif
+
 void set_pipeline_playing(GstElement* pipeline, const char* name) {
     const GstStateChangeReturn result =
         gst_element_set_state(pipeline, GST_STATE_PLAYING);

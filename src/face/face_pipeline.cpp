@@ -9,6 +9,7 @@
 #include "vtb/face/openseeface_geometry_estimator.hpp"
 #include "vtb/hardware/rga/rga_model_input_transformer.hpp"
 #include "vtb/hardware/rknn/rknn_face_models.hpp"
+#include "vtb/trace/frame_trace.hpp"
 
 namespace vtb {
 namespace {
@@ -94,10 +95,15 @@ std::optional<FaceTrackingResult> FacePipeline::process(const FrameView& frame) 
     }
 
     if (must_detect) {
-        ModelInputLease detector_input = model_input_transformer_->prepare(
-            frame, full_frame_crop(frame), detector_->input_spec());
-        std::optional<FaceDetection> detection =
-            detector_->detect(detector_input.view());
+        ModelInputLease detector_input = [&] {
+            VTB_FRAME_SLICE("tracking.detector_rgb", frame_trace_track());
+            return model_input_transformer_->prepare(
+                frame, full_frame_crop(frame), detector_->input_spec());
+        }();
+        const auto detection = [&] {
+            VTB_FRAME_SLICE("tracking.rknn_detector", frame_trace_track());
+            return detector_->detect(detector_input.view());
+        }();
         if (!detection ||
             detection->confidence() < config_.minimum_tracking_confidence) {
             reset_tracking();
@@ -108,12 +114,15 @@ std::optional<FaceTrackingResult> FacePipeline::process(const FrameView& frame) 
         frames_since_detection_ = 0;
     }
 
-    ModelInputLease landmark_input = model_input_transformer_->prepare(
-        frame,
-        face_crop(frame, *tracked_box_),
-        landmark_estimator_->input_spec());
-    LandmarkEstimate landmarks =
-        landmark_estimator_->estimate(landmark_input.view());
+    ModelInputLease landmark_input = [&] {
+        VTB_FRAME_SLICE("tracking.landmark_rgb", frame_trace_track());
+        return model_input_transformer_->prepare(
+            frame, face_crop(frame, *tracked_box_), landmark_estimator_->input_spec());
+    }();
+    const auto landmarks = [&] {
+        VTB_FRAME_SLICE("tracking.rknn_landmarks", frame_trace_track());
+        return landmark_estimator_->estimate(landmark_input.view());
+    }();
     if (landmarks.confidence() <= config_.minimum_tracking_confidence) {
         reset_tracking();
         return std::nullopt;

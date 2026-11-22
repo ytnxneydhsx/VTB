@@ -46,7 +46,6 @@
   `webrtc` 和 `uvc` 可选。启用 `uvc` 时必须提供
   Gadget V4L2 Output 设备、GStreamer 1.28.9 可执行文件/库/插件路径和 MJPEG 帧率；
   UVC 帧率不能超过渲染帧率。
-- `instrumentation`：可选的周期 JSONL 指标目录和报告间隔；缺失时关闭持久化。
 
 2026-11-03 起，将原 `render.rtsp_url` 移到 `output.rtsp_url`；保留旧字段会收到明确的
 迁移错误。其他字段保持原义，板端配置需在下一次授权部署时同步迁移。
@@ -74,16 +73,7 @@ RKNN 推理在 RGA 写入完成后对 DMA-BUF 执行 CPU 读同步。
 启动时无法打开配置的 heap、摄像头缓冲区无法导出 DMA-BUF，或
 RGA 不支持请求的格式、stride、ROI 与缩放比例时，模型管线会明确报错并停止。
 
-`instrumentation.metrics_directory` 启用项目自有的指标持久化。目录会在启动时创建，
-`report_interval_ms` 接受 1000～3600000 ms。渲染、编码与输出统计分别追加到：
-
-```text
-<metrics_directory>/vtb-live2d-render.metrics.jsonl
-<metrics_directory>/vtb-live2d-gstreamer-media.metrics.jsonl
-```
-
-每次启动保留历史行；当前不自动轮转。格式和查看命令见
-[`instrumentation.md`](instrumentation.md)。
+解析器兼容包含旧 `instrumentation` 段的配置，并忽略该段。
 
 ## 摄像头验证
 
@@ -94,9 +84,10 @@ RGA 不支持请求的格式、stride、ROI 与缩放比例时，模型管线会
 2. `VIDIOC_S_FMT` 后读取实际 FourCC、宽度和高度。
 3. `VIDIOC_S_PARM` 后读取实际帧间隔。
 4. 实际结果与 JSON 请求逐项比较；驱动发生回退时启动失败并报告请求值和实际值。
-5. `CameraSource` 直接申请 V4L2 MMAP 缓冲区，执行 `VIDIOC_QUERYBUF`、
-   `VIDIOC_QBUF`、`VIDIOC_STREAMON` 和逐帧 `VIDIOC_DQBUF`。驱动通过
-   `VIDIOC_REQBUFS` 返回的缓冲区数量必须与 JSON 的 `buffer_count` 完全一致。
+5. `CameraSource` 构造时申请、映射并用 `VIDIOC_QBUF` 登记 V4L2 MMAP 缓冲区。
+   驱动通过 `VIDIOC_REQBUFS` 返回的数量必须与 JSON 的 `buffer_count` 完全一致。
+   Live2D 先初始化渲染和跟踪阶段，再启动采集线程。采集线程第一次调用
+   `CameraSource::read()` 时执行 `VIDIOC_STREAMON`，随后逐帧 `VIDIOC_DQBUF`。
 6. 驱动支持 `VIDIOC_EXPBUF` 时导出 DMA-BUF fd；帧租约释放时再执行
    `VIDIOC_QBUF` 归还对应缓冲区。
 

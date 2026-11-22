@@ -273,7 +273,7 @@
  *     Worker["worker_ / thread_main()<br/>Godot所有者线程"]
  *     Channel["Live2DTrackingChannel<br/>输入通道"]
  *     Pipeline["GodotRenderPipeline<br/>同步任务主体"]
- *     Impl["GodotRenderPipeline::Impl<br/>编排与计时资源"]
+ *     Impl["GodotRenderPipeline::Impl<br/>编排与渲染资源"]
  *     Godot["LibGodotInstance 独立模块<br/>LibGodot ABI 与资源"]
  *     Convert["RgaNv12FrameTransformer<br/>宿主 RGBA→NV12"]
  *     GodotSession["RgaTransformSession<br/>Godot 私有缓存与 NV12 池"]

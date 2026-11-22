@@ -1,0 +1,16 @@
+[Unit]
+Description=VTB Live2D frame recording for one service run
+Wants=vtb-perfetto.service
+After=vtb-perfetto.service
+
+[Service]
+Type=notify
+NotifyAccess=all
+StateDirectory=vtb-frame-trace
+StateDirectoryMode=0750
+UMask=0027
+Environment=PERFETTO_CONSUMER_SOCK_NAME=/run/vtb-perfetto/consumer
+ExecStart=/usr/bin/python3 /opt/vtb/perfetto-v59.1/record-frame-trace.py /opt/vtb/perfetto-v59.1/tracebox /opt/vtb/perfetto-v59.1/frame-trace.pbtxt /var/lib/vtb-frame-trace
+KillMode=mixed
+TimeoutStartSec=35s
+TimeoutStopSec=15s

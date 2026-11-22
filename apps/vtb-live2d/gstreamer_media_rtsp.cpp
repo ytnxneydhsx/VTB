@@ -24,17 +24,6 @@ constexpr char kRtspAppsrcFlow[] = "rtsp-appsrc";
 
 std::atomic<guint64> next_rtsp_trace_id{1};
 
-void add_rtsp_frame_probe(
-    GstElement* element, const char* pad_name, GstPadProbeCallback callback) {
-    GstPad* pad = gst_element_get_static_pad(element, pad_name);
-    if (pad == nullptr) {
-        throw std::runtime_error(
-            std::string("GStreamer RTSP frame probe pad is missing: ") + pad_name);
-    }
-    gst_pad_add_probe(pad, GST_PAD_PROBE_TYPE_BUFFER, callback, nullptr, nullptr);
-    gst_object_unref(pad);
-}
-
 GstStructure* rtsp_trace_fields(GstBuffer* buffer) {
     GstCustomMeta* meta = gst_buffer_get_custom_meta(buffer, kRtspTraceMeta);
     if (meta == nullptr) {
@@ -169,8 +158,8 @@ void GStreamerMediaSession::Impl::configure_rtsp_sink(GstElement* upstream) {
     configure_queue(queue, kEncodedQueueCapacity);
     link_elements({upstream, queue, sink});
 #ifdef VTB_FRAME_TRACING
-    add_rtsp_frame_probe(queue, "sink", trace_rtsp_queue);
-    add_rtsp_frame_probe(queue, "src", trace_rtsp_queue);
+    add_frame_probe(queue, "sink", trace_rtsp_queue, nullptr);
+    add_frame_probe(queue, "src", trace_rtsp_queue, nullptr);
 #endif
     g_signal_connect(sink, "new-sample", G_CALLBACK(h264_sample_callback), this);
 }
@@ -313,7 +302,8 @@ void GStreamerMediaSession::Impl::configure_rtsp_media(
     if (payloader == nullptr) {
         throw std::runtime_error("RTSP media has no H.264 RTP payloader");
     }
-    add_rtsp_frame_probe(payloader.get(), "sink", trace_rtsp_rtp_input);
+    gstreamer_media_detail::add_frame_probe(
+        payloader.get(), "sink", trace_rtsp_rtp_input, nullptr);
 #endif
     GstElement* source = gst_bin_get_by_name_recurse_up(
         GST_BIN(media_element.get()), "rtsp-h264-source");
@@ -402,7 +392,6 @@ GstFlowReturn GStreamerMediaSession::Impl::push_rtsp_buffer(
         return GST_FLOW_OK;
     }
     if (rtsp_waiting_for_keyframe_ && !keyframe) {
-        rtsp_waiting_keyframe_drops_.fetch_add(1);
         return GST_FLOW_OK;
     }
 
@@ -428,12 +417,10 @@ GstFlowReturn GStreamerMediaSession::Impl::push_rtsp_buffer(
         if (keyframe) {
             rtsp_waiting_for_keyframe_ = false;
         }
-        rtsp_pushed_frames_.fetch_add(1);
         return result;
     }
     if (result == GST_FLOW_FLUSHING || result == GST_FLOW_EOS ||
         result == GST_FLOW_NOT_LINKED) {
-        rtsp_no_client_frames_.fetch_add(1);
         return result;
     }
     throw std::runtime_error(
@@ -512,7 +499,6 @@ GstFlowReturn GStreamerMediaSession::Impl::publish_h264_sample(
         if (target != nullptr) {
             gst_object_unref(target);
         }
-        rtsp_no_client_frames_.fetch_add(1);
         gst_sample_unref(sample);
         return GST_FLOW_OK;
     }

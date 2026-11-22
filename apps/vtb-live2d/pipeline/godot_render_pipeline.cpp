@@ -1,15 +1,14 @@
 #include "pipeline/godot_render_pipeline.hpp"
 
+#include <cstdint>
 #include <exception>
-#include <iostream>
 #include <stdexcept>
 #include <utility>
 
 #include "libgodot_instance.hpp"
 #include "vtb/hardware/rga/rga_nv12_frame_transformer.hpp"
-#include "vtb/instrumentation/metrics_jsonl_reporter.hpp"
-#include "vtb/instrumentation/timer.hpp"
 #include "vtb/time/monotonic_clock.hpp"
+#include "vtb/trace/frame_trace.hpp"
 
 namespace vtb {
 
@@ -24,16 +23,7 @@ public:
           iteration_limit_(iteration_limit),
           config_(std::move(config)),
           rga_transformer_(config_.rga_dma_heap_path),
-          nv12_sink_(nv12_sink),
-          prepare_timer_(timers_.register_timer("live2d.parameter_prepare")),
-          iteration_timer_(timers_.register_timer("live2d.godot_iteration")),
-          render_wait_timer_(
-              timers_.register_timer("live2d.gpu_render_wait")),
-          publish_timer_(timers_.register_timer("live2d.rgba_publish")),
-          rga_timer_(timers_.register_timer("live2d.rga_transform")),
-          nv12_publish_timer_(
-              timers_.register_timer("live2d.nv12_publish")),
-          total_timer_(timers_.register_timer("live2d.render_total")) {
+          nv12_sink_(nv12_sink) {
         if (nv12_sink_.context == nullptr || nv12_sink_.submit == nullptr) {
             throw std::invalid_argument(
                 "GodotRenderPipeline requires a complete NV12 sink");
@@ -46,14 +36,9 @@ public:
             throw std::invalid_argument(
                 "Godot render RGA DMA heap path must not be empty");
         }
-        if (config_.metrics_report_interval.count() <= 0) {
-            throw std::invalid_argument(
-                "Godot render metrics interval must be positive");
-        }
     }
 
     ~Impl() {
-        finish_metrics();
         if (godot_) {
             godot_->shutdown();
         }
@@ -73,62 +58,68 @@ public:
             throw std::logic_error(
                 "GodotRenderPipeline is already finished");
         }
-        if (!config_.metrics_path.empty()) {
-            metrics_reporter_ =
-                std::make_unique<instrumentation::MetricsJsonlReporter>(
-                    timers_,
-                    "vtb-live2d.render",
-                    config_.metrics_path,
-                    config_.metrics_report_interval);
-            metrics_reporter_->start();
-        }
         godot_ = std::make_unique<LibGodotInstance>(
             passthrough_arguments_, config_.render);
         godot_->start();
     }
 
     void submit(const Live2DTrackingSnapshot& snapshot) {
+        VTB_FRAME_EVENT(
+            "render.snapshot_dequeue", frame_trace_track(),
+            perfetto::Flow::ProcessScoped(snapshot.snapshot_generation(), "snapshot"),
+            "snapshot_generation", snapshot.snapshot_generation(),
+            "frame_id", snapshot.source_frame_id());
         require_godot().submit(snapshot);
+#ifdef VTB_FRAME_TRACING
+        snapshot_generation_ = snapshot.snapshot_generation();
+        source_frame_id_ = snapshot.source_frame_id();
+        tracking_valid_ = snapshot.mapping().tracking_valid();
+        new_snapshot_ = true;
+#endif
     }
 
     bool run_frame() {
         LibGodotInstance& godot = require_godot();
-        auto total_scope = total_timer_.scope();
         {
-            auto scope = prepare_timer_.scope();
+            VTB_FRAME_SLICE("render.prepare", frame_trace_track());
             godot.prepare_frame(MonotonicClock::now_ns());
         }
-        bool iteration_finished = false;
+        const bool iteration_finished = [&] {
+            VTB_FRAME_SLICE("render.iterate", frame_trace_track());
+            return godot.iterate();
+        }();
         {
-            auto scope = iteration_timer_.scope();
-            iteration_finished = godot.iterate();
-        }
-        {
-            auto scope = render_wait_timer_.scope();
+            VTB_FRAME_SLICE("render.wait_gpu", frame_trace_track());
             godot.wait_gpu_render();
         }
         const std::uint64_t ready_timestamp_ns = MonotonicClock::now_ns();
-        RgbaFrameView rgba_frame;
-        {
-            auto scope = publish_timer_.scope();
-            rgba_frame = godot.publish_rgba_frame(ready_timestamp_ns);
+        const RgbaFrameView rgba_frame =
+            godot.publish_rgba_frame(ready_timestamp_ns);
+        VTB_FRAME_EVENT(
+            "render.rgba_ready", frame_trace_track(), "sequence", rgba_frame.sequence);
+        Nv12FrameLease nv12 = [&] {
+            VTB_FRAME_SLICE("rga.nv12_convert", frame_trace_track());
+            return rga_transformer_.transform(rgba_frame);
+        }();
+#ifdef VTB_FRAME_TRACING
+        if (new_snapshot_) {
+            VTB_FRAME_EVENT(
+                "render.snapshot_output", frame_trace_track(),
+                perfetto::TerminatingFlow::ProcessScoped(snapshot_generation_, "snapshot"),
+                "snapshot_generation", snapshot_generation_,
+                "frame_id", source_frame_id_);
         }
-        Nv12FrameLease nv12 = transform_rgba(rgba_frame);
-        {
-            auto publish_scope = nv12_publish_timer_.scope();
-            if (nv12_sink_.submit(nv12_sink_.context, &nv12) != 0) {
-                throw std::runtime_error(
-                    "NV12 sink rejected an RGA output frame lease");
-            }
+        VTB_FRAME_EVENT(
+            "render.nv12_ready", frame_trace_track(), "sequence", nv12.view().sequence,
+            "snapshot_generation", snapshot_generation_, "frame_id", source_frame_id_,
+            "tracking_valid", tracking_valid_, "new_snapshot", new_snapshot_);
+        new_snapshot_ = false;
+#endif
+        if (nv12_sink_.submit(nv12_sink_.context, &nv12) != 0) {
+            throw std::runtime_error(
+                "NV12 sink rejected an RGA output frame lease");
         }
         return iteration_finished || godot.should_stop();
-    }
-
-    std::uint64_t completed_frames() const noexcept {
-        if (!godot_) {
-            return 0;
-        }
-        return godot_->completed_frames();
     }
 
     void finish() {
@@ -144,7 +135,6 @@ public:
         }
         godot_.reset();
         rga_transformer_.finish();
-        finish_metrics();
         finished_ = true;
         if (godot_failure) {
             std::rethrow_exception(godot_failure);
@@ -162,11 +152,6 @@ public:
     }
 
 private:
-    Nv12FrameLease transform_rgba(const RgbaFrameView& frame) {
-        auto rga_scope = rga_timer_.scope();
-        return rga_transformer_.transform(frame);
-    }
-
     LibGodotInstance& require_godot() {
         if (!godot_) {
             throw std::logic_error(
@@ -175,42 +160,19 @@ private:
         return *godot_;
     }
 
-    void finish_metrics() noexcept {
-        if (!metrics_reporter_ || metrics_finished_) {
-            return;
-        }
-        metrics_reporter_->stop();
-        metrics_finished_ = true;
-        std::cout << "VTB_METRICS_RESULT source="
-                  << metrics_reporter_->source()
-                  << " path=" << metrics_reporter_->output_path()
-                  << " records=" << metrics_reporter_->record_count()
-                  << " failed=";
-        if (metrics_reporter_->failed()) {
-            std::cout << "1 error=" << metrics_reporter_->last_error();
-        } else {
-            std::cout << "0";
-        }
-        std::cout << "\n";
-    }
-
     std::vector<std::string> passthrough_arguments_;
     unsigned long iteration_limit_ = 0;
     GodotRenderPipelineConfig config_;
     RgaNv12FrameTransformer rga_transformer_;
     Nv12FrameSink nv12_sink_;
-    instrumentation::TimerRegistry timers_;
-    instrumentation::TimerHandle prepare_timer_;
-    instrumentation::TimerHandle iteration_timer_;
-    instrumentation::TimerHandle render_wait_timer_;
-    instrumentation::TimerHandle publish_timer_;
-    instrumentation::TimerHandle rga_timer_;
-    instrumentation::TimerHandle nv12_publish_timer_;
-    instrumentation::TimerHandle total_timer_;
-    std::unique_ptr<instrumentation::MetricsJsonlReporter> metrics_reporter_;
     std::unique_ptr<LibGodotInstance> godot_;
+#ifdef VTB_FRAME_TRACING
+    std::uint64_t snapshot_generation_ = 0;
+    std::uint64_t source_frame_id_ = 0;
+    bool tracking_valid_ = false;
+    bool new_snapshot_ = false;
+#endif
     bool finished_ = false;
-    bool metrics_finished_ = false;
 };
 
 std::unique_ptr<GodotRenderPipeline> GodotRenderPipeline::create(
@@ -242,10 +204,6 @@ void GodotRenderPipeline::submit(
 
 bool GodotRenderPipeline::run_frame() {
     return impl_->run_frame();
-}
-
-std::uint64_t GodotRenderPipeline::completed_frames() const noexcept {
-    return impl_->completed_frames();
 }
 
 void GodotRenderPipeline::finish() {

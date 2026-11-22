@@ -1,10 +1,8 @@
 #include "vtb_application.hpp"
 
 #include <atomic>
-#include <chrono>
 #include <cstdint>
 #include <exception>
-#include <filesystem>
 #include <memory>
 #include <stdexcept>
 #include <string>
@@ -24,15 +22,6 @@
 
 namespace vtb {
 namespace {
-
-std::string metrics_path(
-    const InstrumentationConfiguration& config,
-    const char* filename) {
-    if (!config.metrics_persistence_enabled()) {
-        return {};
-    }
-    return (std::filesystem::path(config.metrics_directory) / filename).string();
-}
 
 class CommandLineArguments final {
 public:
@@ -150,19 +139,11 @@ public:
         std::unique_ptr<VideoSource> video_input =
             video_input_factory.create(config_.video_input);
 
-        const std::chrono::milliseconds metrics_report_interval(
-            config_.instrumentation.report_interval_ms);
         VideoFrameChannel frame_channel(
             1, messaging::ChannelOverflowPolicy::drop_oldest);
         Live2DTrackingChannel tracking_channel(
             1, messaging::ChannelOverflowPolicy::drop_oldest);
 
-        const std::string render_metrics_path = metrics_path(
-            config_.instrumentation,
-            "vtb-live2d-render.metrics.jsonl");
-        const std::string media_metrics_path = metrics_path(
-            config_.instrumentation,
-            "vtb-live2d-gstreamer-media.metrics.jsonl");
         GStreamerMediaSessionConfig media_config;
         media_config.rtsp_enabled = config_.output.rtsp_enabled;
         media_config.rtsp_url = config_.output.rtsp_url;
@@ -172,8 +153,6 @@ public:
         media_config.uvc_enabled = config_.output.uvc_enabled;
         media_config.uvc_device = config_.output.uvc_device;
         media_config.plugin_path = config_.output.gstreamer_plugin_path;
-        media_config.metrics_path = media_metrics_path;
-        media_config.metrics_report_interval = metrics_report_interval;
         GStreamerMediaSession media(std::move(media_config));
         std::unique_ptr<FacePipeline> face_pipeline =
             FacePipeline::create(config_.face_pipeline);
@@ -197,8 +176,6 @@ public:
         godot_render_config.render = config_.render;
         godot_render_config.rga_dma_heap_path =
             config_.render.rga_dma_heap;
-        godot_render_config.metrics_path = render_metrics_path;
-        godot_render_config.metrics_report_interval = metrics_report_interval;
         std::unique_ptr<GodotRenderPipeline> godot_render_pipeline =
             GodotRenderPipeline::create(
                 command_line_.passthrough_arguments(),

@@ -1,10 +1,13 @@
 #include "pipeline/godot_render_stage.hpp"
 
 #include <chrono>
-#include <iostream>
 #include <optional>
 #include <stdexcept>
 #include <utility>
+
+#if defined(__linux__)
+#include <pthread.h>
+#endif
 
 namespace vtb {
 
@@ -73,6 +76,9 @@ void GodotRenderStage::finish() {
 }
 
 void GodotRenderStage::thread_main() noexcept {
+#if defined(__linux__)
+    (void)pthread_setname_np(pthread_self(), "vtb-render");
+#endif
     std::unique_ptr<GodotRenderPipeline> render_pipeline =
         std::move(render_pipeline_);
     try {
@@ -139,17 +145,10 @@ void GodotRenderStage::run_frame_loop(
         }
         std::this_thread::sleep_until(next_frame_deadline);
     }
-    completed_frames_ = render_pipeline.completed_frames();
 }
 
 void GodotRenderStage::finish_pipeline(
     GodotRenderPipeline& render_pipeline) noexcept {
-    if (completed_frames_ == 0) {
-        completed_frames_ = render_pipeline.completed_frames();
-    }
-    std::cout << "VTB_LIBGODOT_RESULT iterations=" << iterations_
-              << " completed_frames=" << completed_frames_ << "\n";
-
     try {
         render_pipeline.finish();
     } catch (...) {

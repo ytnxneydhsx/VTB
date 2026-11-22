@@ -24,14 +24,20 @@ float Live2DTrackingViewState::offset_y() const noexcept {
 
 Live2DTrackingSnapshot::Live2DTrackingSnapshot(
     std::uint64_t snapshot_generation,
+    std::uint64_t source_frame_id,
     Live2DMappingResult mapping,
     Live2DTrackingViewState view)
     : snapshot_generation_(snapshot_generation),
+      source_frame_id_(source_frame_id),
       mapping_(std::move(mapping)),
       view_(std::move(view)) {}
 
 std::uint64_t Live2DTrackingSnapshot::snapshot_generation() const noexcept {
     return snapshot_generation_;
+}
+
+std::uint64_t Live2DTrackingSnapshot::source_frame_id() const noexcept {
+    return source_frame_id_;
 }
 
 const Live2DMappingResult& Live2DTrackingSnapshot::mapping() const noexcept {
