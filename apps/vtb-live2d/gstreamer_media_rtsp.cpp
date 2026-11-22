@@ -1,13 +1,157 @@
 #include "gstreamer_media_session_internal.hpp"
 
+#include <atomic>
 #include <iostream>
+#include <memory>
 #include <stdexcept>
 #include <string>
 #include <thread>
 
 #include <gst/rtsp/gstrtsptransport.h>
 
+#include "vtb/trace/frame_trace.hpp"
+
 namespace vtb {
+
+#ifdef VTB_FRAME_TRACING
+namespace {
+
+constexpr char kRtspTraceMeta[] = "VtbRtspTraceMeta";
+constexpr char kEncodedId[] = "encoded_id";
+constexpr char kDeliveryId[] = "delivery_id";
+constexpr char kRtspQueueFlow[] = "rtsp-h264-queue";
+constexpr char kRtspAppsrcFlow[] = "rtsp-appsrc";
+
+std::atomic<guint64> next_rtsp_trace_id{1};
+
+void add_rtsp_frame_probe(
+    GstElement* element, const char* pad_name, GstPadProbeCallback callback) {
+    GstPad* pad = gst_element_get_static_pad(element, pad_name);
+    if (pad == nullptr) {
+        throw std::runtime_error(
+            std::string("GStreamer RTSP frame probe pad is missing: ") + pad_name);
+    }
+    gst_pad_add_probe(pad, GST_PAD_PROBE_TYPE_BUFFER, callback, nullptr, nullptr);
+    gst_object_unref(pad);
+}
+
+GstStructure* rtsp_trace_fields(GstBuffer* buffer) {
+    GstCustomMeta* meta = gst_buffer_get_custom_meta(buffer, kRtspTraceMeta);
+    if (meta == nullptr) {
+        return nullptr;
+    }
+    return gst_custom_meta_get_structure(meta);
+}
+
+GstStructure* ensure_rtsp_trace_fields(GstBuffer* buffer) {
+    static const gchar* tags[] = {nullptr};
+    // The default transform preserves these fields across a GstBuffer copy.
+    static const GstMetaInfo* const registration = gst_meta_register_custom(
+        kRtspTraceMeta, tags, nullptr, nullptr, nullptr);
+    if (registration == nullptr) {
+        return nullptr;
+    }
+    GstStructure* fields = rtsp_trace_fields(buffer);
+    if (fields == nullptr) {
+        GstCustomMeta* meta = gst_buffer_add_custom_meta(buffer, kRtspTraceMeta);
+        if (meta != nullptr) {
+            fields = gst_custom_meta_get_structure(meta);
+        }
+    }
+    return fields;
+}
+
+GstPadProbeReturn trace_rtsp_queue(
+    GstPad* pad, GstPadProbeInfo* info, gpointer) {
+    if (!TRACE_EVENT_CATEGORY_ENABLED(VTB_FRAME_TRACE_CATEGORY)) {
+        return GST_PAD_PROBE_OK;
+    }
+    GstBuffer* buffer = gst_pad_probe_info_get_buffer(info);
+    if (buffer == nullptr) {
+        return GST_PAD_PROBE_OK;
+    }
+
+    if (gst_pad_get_direction(pad) == GST_PAD_SINK) {
+        // The H.264 tee can share this buffer with WebRTC.
+        if (!gst_buffer_is_writable(buffer)) {
+            GstBuffer* copy = gst_buffer_copy(buffer);
+            if (copy == nullptr) {
+                return GST_PAD_PROBE_OK;
+            }
+            gst_pad_probe_info_set_buffer(info, copy);
+            buffer = copy;
+        }
+        GstStructure* fields = ensure_rtsp_trace_fields(buffer);
+        if (fields == nullptr) {
+            return GST_PAD_PROBE_OK;
+        }
+        const guint64 encoded_id = next_rtsp_trace_id.fetch_add(1);
+        gst_structure_set(fields, kEncodedId, G_TYPE_UINT64, encoded_id, nullptr);
+        VTB_FRAME_EVENT(
+            "media.rtsp.queue.input", frame_trace_track(),
+            perfetto::Flow::ProcessScoped(encoded_id, kRtspQueueFlow),
+            "encoded_id", encoded_id);
+    } else {
+        const GstStructure* fields = rtsp_trace_fields(buffer);
+        guint64 encoded_id = 0;
+        if (fields != nullptr &&
+            gst_structure_get_uint64(fields, kEncodedId, &encoded_id)) {
+            VTB_FRAME_EVENT(
+                "media.rtsp.queue.output", frame_trace_track(),
+                perfetto::TerminatingFlow::ProcessScoped(
+                    encoded_id, kRtspQueueFlow),
+                "encoded_id", encoded_id);
+        }
+    }
+    return GST_PAD_PROBE_OK;
+}
+
+void trace_rtsp_submit(GstBuffer* buffer, bool preroll_request) {
+    if (!TRACE_EVENT_CATEGORY_ENABLED(VTB_FRAME_TRACE_CATEGORY)) {
+        return;
+    }
+    GstStructure* fields = ensure_rtsp_trace_fields(buffer);
+    if (fields == nullptr) {
+        return;
+    }
+    guint64 encoded_id = 0;
+    gst_structure_get_uint64(fields, kEncodedId, &encoded_id);
+    // Cached keyframes can be submitted again in a new RTSP media session.
+    const guint64 delivery_id = next_rtsp_trace_id.fetch_add(1);
+    gst_structure_set(fields, kDeliveryId, G_TYPE_UINT64, delivery_id, nullptr);
+    VTB_FRAME_EVENT(
+        "media.rtsp.appsrc.submit", frame_trace_track(),
+        perfetto::Flow::ProcessScoped(delivery_id, kRtspAppsrcFlow),
+        "encoded_id", encoded_id, "delivery_id", delivery_id,
+        "preroll", preroll_request);
+}
+
+GstPadProbeReturn trace_rtsp_rtp_input(
+    GstPad*, GstPadProbeInfo* info, gpointer) {
+    if (!TRACE_EVENT_CATEGORY_ENABLED(VTB_FRAME_TRACE_CATEGORY)) {
+        return GST_PAD_PROBE_OK;
+    }
+    GstBuffer* buffer = gst_pad_probe_info_get_buffer(info);
+    if (buffer == nullptr) {
+        return GST_PAD_PROBE_OK;
+    }
+    const GstStructure* fields = rtsp_trace_fields(buffer);
+    guint64 delivery_id = 0;
+    if (fields != nullptr &&
+        gst_structure_get_uint64(fields, kDeliveryId, &delivery_id)) {
+        guint64 encoded_id = 0;
+        gst_structure_get_uint64(fields, kEncodedId, &encoded_id);
+        VTB_FRAME_EVENT(
+            "media.rtsp.rtp_input", frame_trace_track(),
+            perfetto::TerminatingFlow::ProcessScoped(
+                delivery_id, kRtspAppsrcFlow),
+            "encoded_id", encoded_id, "delivery_id", delivery_id);
+    }
+    return GST_PAD_PROBE_OK;
+}
+
+}  // namespace
+#endif
 
 void GStreamerMediaSession::Impl::configure_rtsp_sink(GstElement* upstream) {
     using namespace gstreamer_media_detail;
@@ -24,6 +168,10 @@ void GStreamerMediaSession::Impl::configure_rtsp_sink(GstElement* upstream) {
     add_elements(pipeline_, {queue});
     configure_queue(queue, kEncodedQueueCapacity);
     link_elements({upstream, queue, sink});
+#ifdef VTB_FRAME_TRACING
+    add_rtsp_frame_probe(queue, "sink", trace_rtsp_queue);
+    add_rtsp_frame_probe(queue, "src", trace_rtsp_queue);
+#endif
     g_signal_connect(sink, "new-sample", G_CALLBACK(h264_sample_callback), this);
 }
 
@@ -104,8 +252,7 @@ void GStreamerMediaSession::Impl::start_rtsp_server() {
         factory,
         "( appsrc name=rtsp-h264-source is-live=true format=time "
         "block=false max-buffers=8 leaky-type=downstream ! "
-        "queue max-size-buffers=8 max-size-bytes=0 max-size-time=0 "
-        "leaky=downstream ! rtph264pay name=pay0 pt=96 "
+        "rtph264pay name=pay0 pt=96 "
         "config-interval=-1 )");
     gst_rtsp_media_factory_set_shared(factory, TRUE);
     gst_rtsp_media_factory_set_stop_on_disconnect(factory, FALSE);
@@ -154,13 +301,22 @@ void GStreamerMediaSession::Impl::start_rtsp_server() {
 
 void GStreamerMediaSession::Impl::configure_rtsp_media(
     GstRTSPMedia* media) {
-    GstElement* media_element = gst_rtsp_media_get_element(media);
+    const std::unique_ptr<GstElement, decltype(&gst_object_unref)> media_element(
+        gst_rtsp_media_get_element(media), gst_object_unref);
     if (media_element == nullptr) {
         throw std::runtime_error("RTSP media has no pipeline element");
     }
+#ifdef VTB_FRAME_TRACING
+    const std::unique_ptr<GstElement, decltype(&gst_object_unref)> payloader(
+        gst_bin_get_by_name_recurse_up(GST_BIN(media_element.get()), "pay0"),
+        gst_object_unref);
+    if (payloader == nullptr) {
+        throw std::runtime_error("RTSP media has no H.264 RTP payloader");
+    }
+    add_rtsp_frame_probe(payloader.get(), "sink", trace_rtsp_rtp_input);
+#endif
     GstElement* source = gst_bin_get_by_name_recurse_up(
-        GST_BIN(media_element), "rtsp-h264-source");
-    gst_object_unref(media_element);
+        GST_BIN(media_element.get()), "rtsp-h264-source");
     if (source == nullptr) {
         throw std::runtime_error("RTSP media has no H.264 appsrc");
     }
@@ -258,6 +414,9 @@ GstFlowReturn GStreamerMediaSession::Impl::push_rtsp_buffer(
     GST_BUFFER_PTS(output_buffer) = rtsp_next_timestamp_;
     GST_BUFFER_DTS(output_buffer) = rtsp_next_timestamp_;
     const GstClockTime duration = GST_BUFFER_DURATION(output_buffer);
+#ifdef VTB_FRAME_TRACING
+    trace_rtsp_submit(output_buffer, preroll_request);
+#endif
     const GstFlowReturn result = gst_app_src_push_buffer(
         source, output_buffer);
     if (result == GST_FLOW_OK) {

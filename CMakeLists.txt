@@ -18,6 +18,10 @@ option(VTB_ENABLE_OPENCV_FACE_PIPELINE
     "Build the OpenCV-based OpenSeeFace geometry estimator" ON)
 option(VTB_ENABLE_EMBEDDED_GODOT
     "Build the VTB-owned LibGodot host executable" OFF)
+option(VTB_ENABLE_FRAME_TRACING
+    "Enable Perfetto frame tracing in the Live2D RTSP output" OFF)
+set(VTB_PERFETTO_SDK_ROOT "" CACHE PATH
+    "Target SDK root containing include/perfetto.h and lib/libperfetto.a")
 set(VTB_ROCKCHIP_SYSROOT "" CACHE PATH
     "Target-board sysroot containing Rockchip MPP and RGA development files")
 set(VTB_RKNN_SYSROOT "" CACHE PATH
@@ -547,6 +551,24 @@ if(VTB_ENABLE_EMBEDDED_GODOT)
             vtb_instrumentation
             "${VTB_LIBGODOT_LIBRARY}"
     )
+    if(VTB_ENABLE_FRAME_TRACING)
+        if(NOT EXISTS "${VTB_PERFETTO_SDK_ROOT}/include/perfetto.h" OR
+           NOT EXISTS "${VTB_PERFETTO_SDK_ROOT}/lib/libperfetto.a")
+            message(FATAL_ERROR
+                "VTB_PERFETTO_SDK_ROOT must point to the target Perfetto SDK")
+        endif()
+        add_library(vtb_frame_trace STATIC src/trace/frame_trace.cpp)
+        target_include_directories(vtb_frame_trace PUBLIC include)
+        target_include_directories(vtb_frame_trace SYSTEM PUBLIC
+            "${VTB_PERFETTO_SDK_ROOT}/include")
+        target_compile_definitions(vtb_frame_trace PUBLIC VTB_FRAME_TRACING=1)
+        target_link_libraries(vtb_frame_trace PRIVATE
+            "${VTB_PERFETTO_SDK_ROOT}/lib/libperfetto.a"
+            Threads::Threads ${CMAKE_DL_LIBS})
+        vtb_configure_target(vtb_frame_trace)
+        target_link_libraries(vtb_gstreamer_media_session PRIVATE vtb_frame_trace)
+        target_link_libraries(vtb-live2d PRIVATE vtb_frame_trace)
+    endif()
     target_link_options(vtb-live2d PRIVATE -Wl,--allow-shlib-undefined)
     foreach(dependency_directory IN LISTS VTB_EMBEDDED_RPATH_LINK)
         target_link_options(vtb-live2d PRIVATE

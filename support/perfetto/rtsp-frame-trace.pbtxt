@@ -1,0 +1,16 @@
+# Build Live2D with VTB_ENABLE_FRAME_TRACING=ON and VTB_PERFETTO_SDK_ROOT.
+# Start Perfetto with this config on the board, then connect an RTSP client.
+buffers {
+  size_kb: 16384
+  fill_policy: RING_BUFFER
+}
+data_sources {
+  config {
+    name: "track_event"
+    track_event_config {
+      disabled_categories: "*"
+      enabled_categories: "vtb.thread_frame_trace_flow"
+    }
+  }
+}
+duration_ms: 10000

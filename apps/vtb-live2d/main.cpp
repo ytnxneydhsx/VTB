@@ -4,6 +4,7 @@
 #include <iostream>
 
 #include "vtb_application.hpp"
+#include "vtb/trace/frame_trace.hpp"
 
 namespace {
 
@@ -23,6 +24,7 @@ int main(int argc, char** argv) {
         std::signal(SIGINT, handle_signal);
         std::signal(SIGTERM, handle_signal);
         vtb::VtbApplication application(argc, argv);
+        vtb::initialize_frame_tracing();
         return application.run(stop_requested);
     } catch (const std::exception& error) {
         std::cerr << "VTB_LIBGODOT_ERROR " << error.what() << "\n";
