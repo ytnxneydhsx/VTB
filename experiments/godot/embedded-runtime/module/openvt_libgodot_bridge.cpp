@@ -67,13 +67,14 @@ extern "C" int openvt_libgodot_iteration(void *p_instance) {
 	return 0;
 }
 
-extern "C" int openvt_libgodot_application_initialize_v7(
+extern "C" int openvt_libgodot_application_initialize_v8(
 		const OpenVTEmbeddedApplicationConfig *p_config) {
 	if (application != nullptr) {
 		application_error = "Embedded Live2D application is already initialized";
 		return static_cast<int>(ERR_ALREADY_IN_USE);
 	}
 	if (p_config == nullptr || p_config->live2d_model == nullptr ||
+			p_config->rgba_dma_heap == nullptr ||
 			p_config->abi_version != OPENVT_LIBGODOT_ABI_VERSION ||
 			p_config->config_size != sizeof(OpenVTEmbeddedApplicationConfig) ||
 			p_config->rgba_sink.context == nullptr ||
@@ -88,6 +89,7 @@ extern "C" int openvt_libgodot_application_initialize_v7(
 	application = std::make_unique<vtb::EmbeddedLive2DApplication>();
 	vtb::EmbeddedLive2DApplicationConfig config;
 	config.live2d_model = String::utf8(p_config->live2d_model);
+	config.rgba_dma_heap = String::utf8(p_config->rgba_dma_heap);
 	config.rgba_sink = p_config->rgba_sink;
 	config.output_width = static_cast<int>(p_config->output_width);
 	config.output_height = static_cast<int>(p_config->output_height);
@@ -142,12 +144,20 @@ extern "C" int openvt_libgodot_application_submit_live2d_frame(
 	}
 }
 
-extern "C" int openvt_libgodot_application_prepare_frame(uint64_t p_monotonic_timestamp_ns) {
+extern "C" int openvt_libgodot_application_prepare_frame_v8(
+		uint64_t p_monotonic_timestamp_ns, int *r_ready) {
 	if (application == nullptr) {
 		application_error = "Embedded Live2D application is unavailable";
 		return static_cast<int>(ERR_UNCONFIGURED);
 	}
-	return remember_application_error(application->prepare_frame(p_monotonic_timestamp_ns));
+	if (r_ready == nullptr) {
+		application_error = "Frame readiness output is null";
+		return static_cast<int>(ERR_INVALID_PARAMETER);
+	}
+	bool ready = false;
+	const Error error = application->prepare_frame(p_monotonic_timestamp_ns, ready);
+	*r_ready = static_cast<int>(ready);
+	return remember_application_error(error);
 }
 
 extern "C" int openvt_libgodot_application_wait_gpu_render(void) {

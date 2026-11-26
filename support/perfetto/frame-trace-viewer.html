@@ -121,13 +121,13 @@
         <strong><span class="value">—</span> <span class="unit">FPS</span></strong>
         <small class="count">— 帧</small>
       </div>
-      <div class="card" data-rate="render.nv12_ready">
-        <span>RGA NV12 输出</span>
+      <div class="card" data-rate="render.output_ready">
+        <span>渲染输出</span>
         <strong><span class="value">—</span> <span class="unit">FPS</span></strong>
         <small class="count">— 帧</small>
       </div>
       <div class="card">
-        <span>采集 → 首张 NV12 · P95</span>
+        <span>采集 → 首张渲染帧 · P95</span>
         <strong><span id="latency">—</span> <span class="unit">ms</span></strong>
         <small id="linked">— 帧匹配</small>
       </div>
@@ -150,7 +150,7 @@
           <tr data-stage="render.queue_wait"><td>跟踪快照排队</td><td class="p50">—</td><td class="p95">—</td><td class="samples">—</td></tr>
           <tr data-stage="render.wait_gpu"><td>Godot 等待 GPU</td><td class="p50">—</td><td class="p95">—</td><td class="samples">—</td></tr>
           <tr data-stage="rga.nv12_sync"><td>RGA 同步转换 NV12</td><td class="p50">—</td><td class="p95">—</td><td class="samples">—</td></tr>
-          <tr data-stage="capture_to_nv12"><td>采集 → 首张关联 NV12</td><td class="p50">—</td><td class="p95">—</td><td class="samples">—</td></tr>
+          <tr data-stage="capture_to_render"><td>采集 → 首张关联渲染帧</td><td class="p50">—</td><td class="p95">—</td><td class="samples">—</td></tr>
         </tbody>
       </table>
     </details>

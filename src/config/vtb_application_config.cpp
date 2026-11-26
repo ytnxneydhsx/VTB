@@ -225,7 +225,7 @@ RenderConfiguration parse_render(
     if (config.output_width % 2U != 0U ||
         config.output_height % 2U != 0U) {
         throw std::invalid_argument(
-            "render output dimensions must be even for NV12 encoding");
+            "render output dimensions must be even for H.264 and MJPEG output");
     }
     return config;
 }

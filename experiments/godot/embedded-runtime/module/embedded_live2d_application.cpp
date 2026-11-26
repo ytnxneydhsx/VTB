@@ -58,6 +58,7 @@ Error EmbeddedLive2DApplication::initialize(
 	output_frame_interval_ns_ = 1000000000ULL / static_cast<uint64_t>(output_fps_);
 	total_frames_ = p_config.total_frames;
 	live2d_model_ = p_config.live2d_model;
+	rgba_dma_heap_ = p_config.rgba_dma_heap;
 	rgba_sink_ = p_config.rgba_sink;
 
 	Error error = configure_render_session();
@@ -95,7 +96,7 @@ Error EmbeddedLive2DApplication::configure_render_session() {
 Error EmbeddedLive2DApplication::configure_output() {
 	capture_.instantiate();
 	const Error error = capture_->configure(
-			rgba_sink_, render_session_->viewport_rid(), output_width_, output_height_,
+			rgba_sink_, rgba_dma_heap_, render_session_->viewport_rid(), output_width_, output_height_,
 			output_fps_, total_frames_);
 	if (error != OK) {
 		return fail(error, "DMA-BUF output configuration failed: " + capture_->get_last_error());
@@ -103,14 +104,24 @@ Error EmbeddedLive2DApplication::configure_output() {
 	return OK;
 }
 
-Error EmbeddedLive2DApplication::prepare_frame(uint64_t p_monotonic_timestamp_ns) {
-	if (!initialized_ || render_session_ == nullptr) {
+Error EmbeddedLive2DApplication::prepare_frame(uint64_t p_monotonic_timestamp_ns, bool &r_ready) {
+	r_ready = false;
+	if (!initialized_ || render_session_ == nullptr || capture_.is_null()) {
 		return fail(ERR_UNCONFIGURED, "Embedded Live2D application is not initialized");
 	}
 	if (output_finished_) {
 		return OK;
 	}
-	return apply_pending_parameters(p_monotonic_timestamp_ns);
+	const Error slot_error = capture_->acquire_render_slot();
+	if (slot_error == ERR_BUSY) {
+		return OK;
+	}
+	if (slot_error != OK) {
+		return fail(slot_error, "RGBA render target selection failed: " + capture_->get_last_error());
+	}
+	const Error error = apply_pending_parameters(p_monotonic_timestamp_ns);
+	r_ready = error == OK;
+	return error;
 }
 
 Error EmbeddedLive2DApplication::submit_live2d_frame(
@@ -232,8 +243,6 @@ Error EmbeddedLive2DApplication::publish_rgba_frame(uint64_t p_ready_timestamp_n
 	output_frame_state_ = OutputFrameState::IDLE;
 	++completed_frames_;
 	if (current_frame_end_of_stream_) {
-		// The host synchronously runs RGA after this callback returns. Keep the
-		// direct-render DMA-BUF alive until application shutdown completes.
 		output_finished_ = true;
 	}
 	current_frame_end_of_stream_ = false;

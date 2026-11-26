@@ -44,8 +44,8 @@ GStreamerMediaSession::Impl::~Impl() {
     }
 }
 
-Nv12FrameSink GStreamerMediaSession::Impl::sink() noexcept {
-    Nv12FrameSink result;
+RgbaFrameSink GStreamerMediaSession::Impl::sink() noexcept {
+    RgbaFrameSink result;
     result.context = this;
     result.submit = submit_callback;
     return result;
@@ -86,11 +86,11 @@ void GStreamerMediaSession::Impl::finish() {
 
 std::int32_t GStreamerMediaSession::Impl::submit_callback(
     void* context,
-    Nv12FrameLease* frame) noexcept {
+    RgbaFrameLease* frame) noexcept {
     auto& self = *static_cast<Impl*>(context);
     try {
         if (frame == nullptr) {
-            throw std::invalid_argument("NV12 frame lease is null");
+            throw std::invalid_argument("RGBA frame lease is null");
         }
         self.push(std::move(*frame));
         return 0;
@@ -219,7 +219,7 @@ GStreamerMediaSession::GStreamerMediaSession(
 
 GStreamerMediaSession::~GStreamerMediaSession() = default;
 
-Nv12FrameSink GStreamerMediaSession::sink() noexcept {
+RgbaFrameSink GStreamerMediaSession::sink() noexcept {
     return impl_->sink();
 }
 

@@ -3,7 +3,7 @@
 #include <stdint.h>
 #include "vtb/render/rgba_frame_sink.hpp"
 
-inline constexpr uint32_t OPENVT_LIBGODOT_ABI_VERSION = 7;
+inline constexpr uint32_t OPENVT_LIBGODOT_ABI_VERSION = 8;
 
 #if defined(_WIN32)
 #define OPENVT_LIBGODOT_API __declspec(dllexport)
@@ -33,6 +33,7 @@ public:
 class OpenVTEmbeddedApplicationConfig {
 public:
 	const char *live2d_model;
+	const char *rgba_dma_heap;
 	uint32_t abi_version;
 	uint32_t config_size;
 	vtb::RgbaFrameSink rgba_sink;
@@ -49,11 +50,12 @@ OPENVT_LIBGODOT_API uint32_t openvt_libgodot_bridge_abi_version(void);
 OPENVT_LIBGODOT_API int openvt_libgodot_start(void *p_instance);
 OPENVT_LIBGODOT_API int openvt_libgodot_is_started(void *p_instance);
 OPENVT_LIBGODOT_API int openvt_libgodot_iteration(void *p_instance);
-OPENVT_LIBGODOT_API int openvt_libgodot_application_initialize_v7(
+OPENVT_LIBGODOT_API int openvt_libgodot_application_initialize_v8(
 		const OpenVTEmbeddedApplicationConfig *p_config);
 OPENVT_LIBGODOT_API int openvt_libgodot_application_submit_live2d_frame(
 		const OpenVTLive2DFrameInput *p_input);
-OPENVT_LIBGODOT_API int openvt_libgodot_application_prepare_frame(uint64_t p_monotonic_timestamp_ns);
+OPENVT_LIBGODOT_API int openvt_libgodot_application_prepare_frame_v8(
+		uint64_t p_monotonic_timestamp_ns, int *r_ready);
 OPENVT_LIBGODOT_API int openvt_libgodot_application_wait_gpu_render(void);
 OPENVT_LIBGODOT_API int openvt_libgodot_application_publish_rgba_frame(
 		uint64_t p_ready_timestamp_ns);

@@ -13,17 +13,23 @@ std::size_t checked_size(std::uint64_t size) {
     if (size == 0 ||
         size > static_cast<std::uint64_t>(
             std::numeric_limits<std::size_t>::max())) {
-        throw std::invalid_argument("NV12 DMA-BUF size is invalid");
+        throw std::invalid_argument("RGBA DMA-BUF size is invalid");
     }
     return static_cast<std::size_t>(size);
 }
 
-void validate_frame(const Nv12FrameView& frame) {
-    if (frame.width == 0 || frame.height == 0 ||
+void validate_frame(const RgbaFrameView& frame) {
+    const auto stride_bytes =
+        static_cast<std::uint64_t>(frame.horizontal_stride) * 4;
+    if (frame.format != RgbaFrameFormat::rgba8888 ||
+        frame.width == 0 || frame.height == 0 ||
         frame.horizontal_stride < frame.width ||
         frame.vertical_stride < frame.height ||
-        frame.frames_per_second == 0) {
-        throw std::invalid_argument("GStreamer NV12 stream layout is invalid");
+        stride_bytes != frame.stride_bytes || stride_bytes > G_MAXINT ||
+        frame.vertical_stride > G_MAXINT ||
+        frame.dma_buf_size < stride_bytes * frame.vertical_stride ||
+        frame.frames_per_second == 0 || frame.frames_per_second > G_MAXINT) {
+        throw std::invalid_argument("GStreamer RGBA stream layout is invalid");
     }
 }
 
@@ -140,7 +146,7 @@ std::runtime_error pipeline_error(GstMessage* message) {
     return std::runtime_error(text);
 }
 
-GstCaps* nv12_dma_buf_caps(
+GstCaps* rgba_dma_buf_caps(
     std::uint32_t width,
     std::uint32_t height,
     std::uint32_t frames_per_second) {
@@ -148,7 +154,7 @@ GstCaps* nv12_dma_buf_caps(
         "video/x-raw",
         "format",
         G_TYPE_STRING,
-        "NV12",
+        "RGBA",
         "width",
         G_TYPE_INT,
         static_cast<gint>(width),
@@ -161,7 +167,7 @@ GstCaps* nv12_dma_buf_caps(
         1,
         nullptr);
     if (caps == nullptr) {
-        throw std::runtime_error("Failed to create GStreamer NV12 caps");
+        throw std::runtime_error("Failed to create GStreamer RGBA caps");
     }
     GstCapsFeatures* features =
         gst_caps_features_new("memory:DMABuf", nullptr);

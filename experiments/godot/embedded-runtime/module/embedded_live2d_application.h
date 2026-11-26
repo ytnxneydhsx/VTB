@@ -19,6 +19,7 @@ class Live2DRenderSession;
 class EmbeddedLive2DApplicationConfig {
 public:
 	String live2d_model;
+	String rgba_dma_heap;
 	RgbaFrameSink rgba_sink;
 	int output_width = 0;
 	int output_height = 0;
@@ -44,7 +45,7 @@ public:
 			float p_view_offset_y,
 			uint64_t p_produced_timestamp_ns,
 			uint64_t p_snapshot_generation);
-	Error prepare_frame(uint64_t p_monotonic_timestamp_ns);
+	Error prepare_frame(uint64_t p_monotonic_timestamp_ns, bool &r_ready);
 	Error wait_gpu_render();
 	Error publish_rgba_frame(uint64_t p_ready_timestamp_ns);
 	Error shutdown();
@@ -83,6 +84,7 @@ private:
 	int output_fps_ = 30;
 	int total_frames_ = 0;
 	String live2d_model_;
+	String rgba_dma_heap_;
 	RgbaFrameSink rgba_sink_;
 	uint64_t maximum_parameter_age_ns_ = 150000000ULL;
 	uint64_t output_frame_interval_ns_ = 33333333ULL;

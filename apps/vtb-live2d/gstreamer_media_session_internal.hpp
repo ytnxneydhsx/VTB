@@ -36,7 +36,7 @@ public:
 };
 
 std::size_t checked_size(std::uint64_t size);
-void validate_frame(const Nv12FrameView& frame);
+void validate_frame(const RgbaFrameView& frame);
 GstElement* make_element(const char* factory, const char* name);
 void set_enum_property(
     GstElement* element,
@@ -57,7 +57,7 @@ void add_frame_probe(
 #endif
 void set_pipeline_playing(GstElement* pipeline, const char* name);
 std::runtime_error pipeline_error(GstMessage* message);
-GstCaps* nv12_dma_buf_caps(
+GstCaps* rgba_dma_buf_caps(
     std::uint32_t width,
     std::uint32_t height,
     std::uint32_t frames_per_second);
@@ -78,14 +78,14 @@ public:
     Impl(Impl&&) = delete;
     Impl& operator=(Impl&&) = delete;
 
-    Nv12FrameSink sink() noexcept;
+    RgbaFrameSink sink() noexcept;
     void rethrow_if_failed() const;
     void finish();
 
 private:
     static std::int32_t submit_callback(
         void* context,
-        Nv12FrameLease* frame) noexcept;
+        RgbaFrameLease* frame) noexcept;
     static GstPadProbeReturn h264_input_probe(
         GstPad* pad,
         GstPadProbeInfo* info,
@@ -108,8 +108,8 @@ private:
     void validate_config() const;
     void configure_plugin_path() const;
     void build_pipeline();
-    void build_h264_pipeline(GstElement* nv12_tee);
-    void build_mjpeg_pipeline(GstElement* nv12_tee);
+    void build_h264_pipeline(GstElement* rgba_tee);
+    void build_mjpeg_pipeline(GstElement* rgba_tee);
     void configure_rtsp_sink(GstElement* upstream);
     void configure_webrtc_sink(GstElement* upstream);
 
@@ -124,9 +124,9 @@ private:
     void prime_rtsp_shared_stream(GstAppSrc* source);
     GstFlowReturn publish_h264_sample(GstAppSink* sink);
 
-    void initialize_stream(const Nv12FrameView& frame);
-    void require_stream_contract(const Nv12FrameView& frame) const;
-    void push(Nv12FrameLease frame);
+    void initialize_stream(const RgbaFrameView& frame);
+    void require_stream_contract(const RgbaFrameView& frame) const;
+    void push(RgbaFrameLease frame);
     void set_uvc_device(GstElement* sink) const;
 
     void poll_pipeline_error(GstElement* pipeline);

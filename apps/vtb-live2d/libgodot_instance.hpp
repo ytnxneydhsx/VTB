@@ -31,15 +31,11 @@ public:
 
     void start();
     void submit(const Live2DTrackingSnapshot& snapshot);
-    void prepare_frame(std::uint64_t timestamp_ns);
+    bool prepare_frame(std::uint64_t timestamp_ns);
     bool iterate();
     void wait_gpu_render();
-    /**
-     * @brief 完成本帧发布并返回可同步借用的 RGBA DMA-BUF 描述。
-     *
-     * 返回内容在下一次 iterate() 或本实例销毁前保持不变。
-     */
-    RgbaFrameView publish_rgba_frame(std::uint64_t timestamp_ns);
+    /** @brief 发布当前 RGBA 帧并移动返回槽位租约。 */
+    RgbaFrameLease publish_rgba_frame(std::uint64_t timestamp_ns);
     bool should_stop() const noexcept;
     void finish();
     void shutdown() noexcept;

@@ -14,6 +14,7 @@ if [[ ! -f "$godot_source/platform/linuxbsd/os_linuxbsd.cpp" ]]; then
 	exit 3
 fi
 
+rotation_patch=0007-gles3-fix-rotating-render-target-overrides.patch
 patches=(
 	0001-linuxbsd-add-headless-egl-pbuffer-display-server.patch
 	0002-egl-select-rk3588-pbuffer-config.patch
@@ -21,13 +22,14 @@ patches=(
 	0004-egl-guard-unavailable-blob-cache.patch
 	0005-egl-reuse-initialized-display.patch
 	0006-headless-egl-use-gbm-display-for-window.patch
+	"$rotation_patch"
 )
 patch_paths=()
 for patch_name in "${patches[@]}"; do
 	patch_paths+=("$script_dir/$patch_name")
 done
 series_hash=$(sha256sum "${patch_paths[@]}" | sha256sum | awk '{print $1}')
-marker_path="$godot_source/.openvt-headless-egl-0001-0006.sha256"
+marker_path="$godot_source/.openvt-headless-egl-0001-0007.sha256"
 
 if [[ -f "$marker_path" ]] && [[ "$(<"$marker_path")" == "$series_hash" ]]; then
 	echo "Headless EGL patch series is already present in: $godot_source"
@@ -43,9 +45,8 @@ if [[ -f "$display_source" ]] \
 		&& grep -q "blob_cache_functions_available" "$egl_source" \
 		&& grep -q "preinitialized_egl_display" "$egl_header" \
 		&& grep -q "window_create(DisplayServerEnums::MAIN_WINDOW_ID, gbm" "$display_source"; then
-	printf '%s\n' "$series_hash" > "$marker_path"
-	echo "Headless EGL patch series was already present; marker recorded in: $godot_source"
-	exit 0
+	# Historical snapshots already contain the first six patches.
+	patches=("$rotation_patch")
 fi
 
 for patch_name in "${patches[@]}"; do

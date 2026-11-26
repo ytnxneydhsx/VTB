@@ -42,7 +42,7 @@ function showSummary(summary) {
     row.querySelector(".p95").textContent = stage ? millis.format(stage.p95) : "—";
     row.querySelector(".samples").textContent = number.format(stage?.samples ?? 0);
   }
-  const latency = summary.latency.capture_to_nv12;
+  const latency = summary.latency.capture_to_render;
   document.getElementById("latency").textContent = latency ? millis.format(latency.p95) : "—";
   document.getElementById("linked").textContent =
     `${number.format(summary.linked)} 帧匹配 · ${number.format(summary.valid)} 帧跟踪有效`;
@@ -50,7 +50,7 @@ function showSummary(summary) {
     `队列淘汰 · 采集 ${number.format(summary.capture_drops)} · 快照 ${number.format(summary.snapshot_drops)}`;
   const example = summary.example;
   framePath.textContent = example
-    ? `摄像头 #${example.frame} → 跟踪快照 #${example.snapshot} → 首张 NV12 #${example.output} · ${millis.format(example.ms)} ms`
+    ? `摄像头 #${example.frame} → 跟踪快照 #${example.snapshot} → 首张渲染帧 #${example.output} · ${millis.format(example.ms)} ms`
     : "本片段没有完整匹配的摄像头帧。";
 }
 

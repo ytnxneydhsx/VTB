@@ -416,6 +416,9 @@ Error Live2DRenderSession::create_scene_nodes() {
 	viewport_ = memnew(SubViewport);
 	viewport_->set_name("Live2DEmbeddedViewport");
 	viewport_->set_size(config_.output_size);
+	// Match the encoder's row order when the GLES texture is read as a DMA-BUF.
+	viewport_->set_global_canvas_transform(Transform2D(
+			Vector2(1, 0), Vector2(0, -1), Vector2(0, config_.output_size.y)));
 #ifndef _3D_DISABLED
 	viewport_->set_disable_3d(true);
 #endif

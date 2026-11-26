@@ -20,13 +20,11 @@ V4L2 CameraSource (MMAP / DQBUF / QBUF)
   → openvt_libgodot_application_submit_live2d_frame()
   → Godot main thread parameter input
   → Ayagami model parameters
-  → SubViewport → RGBA DMA-BUF
-  → RgbaFrameSink → host RgaNv12FrameTransformer → Godot RgaTransformSession
-  → Godot 所有者线程直接同步调用 RgaTransformer → NV12
-  → Nv12FrameSink（移动 Nv12FrameLease）
+  → SubViewport 直接写入四槽 RGBA DMA-BUF
+  → RgbaFrameSink（移动 RgbaFrameLease）
   → GStreamer appsrc → tee
       ├─ leaky queue → mpph264enc → h264parse → RTSP Server / 可选 WebRTC
-      └─ leaky queue → videorate → mppjpegenc → jpegparse → uvcsink/UVC
+      └─ leaky queue → mppjpegenc → jpegparse → uvcsink/UVC
 ```
 
 Godot/Ayagami、外部 RGBA DMA-BUF 颜色附件和 GPU 完成等待位于 LibGodot/OpenVT；RGA、GStreamer 与输出
@@ -56,12 +54,11 @@ GStreamer、指标报告或输出源码，也不链接 RGA/MPP/GStreamer。
   非阻塞取得新快照。
 - `Live2DControlServer`：独立的 HTTP 控制组件，借用寿命更长的 `FaceTrackingStage`，
   序列化状态和转发命令。
-- `GStreamerMediaSession`：取得 NV12 Lease，把 DMA-BUF 和租约绑定到 `GstMemory`，通过
+- `GStreamerMediaSession`：取得 RGBA Lease，把 DMA-BUF 和租约绑定到 `GstMemory`，通过
   tee、两条有界 leaky queue 与 Rockchip `mpph264enc`/`mppjpegenc` 管理双输出的线程、
   背压和编码。H.264 供给 RTSP Server 和可选的 `webrtcsink`，MJPEG 交给 UVC。
-- `RgaNv12FrameTransformer`：同步借用 LibGodot 交付的 RGBA DMA-BUF，通过 Godot 私有
-  Session 在 Godot 所有者线程直接执行 RGBA→NV12，完成后把 NV12 Lease 移动给
-  `GStreamerMediaSession`；RGA 硬件核心由驱动调度。
+- `OpenVTDmaBufCapture`：选取空闲的 RGBA 渲染槽。GPU 写入完成后通过
+  `RgbaFrameLease` 交付，最后一个编码输入引用释放时归还该槽。
 - `VtbApplication`：分别创建视频输入、人脸跟踪管线与 Godot 渲染管线，在组合根直接实例化通道和 Stage，
   管理顶层启动、停止和错误传播。
 - `GodotRenderPipeline`：同步渲染任务主体；`create()` 只装配配置与依赖，随后在调用它的
@@ -148,9 +145,8 @@ Godot 内置模块只需要 `OPENVT_VTB_SOURCE_ROOT`、`OPENVT_BOARD_SYSROOT` �
 `VTB_ENABLE_OPENCV_FACE_PIPELINE`、`VTB_ENABLE_RKNN_FACE`、`VTB_ENABLE_RGA_FACE`、
 `VTB_ENABLE_RTSP_OUTPUT`。两个推理后端关闭时，通用会话与消费适配仍可独立编译。
 
-ABI v7 使用 `openvt_libgodot_application_initialize_v7()`、版本查询和配置尺寸校验，
-只把 `RgbaFrameSink` 和输出几何传入 LibGodot。渲染分段计时和 JSONL 报告器由宿主
-`GodotRenderPipeline` 持有。
+ABI v8 使用 `openvt_libgodot_application_initialize_v8()`、版本查询和配置尺寸校验。
+宿主传入 `RgbaFrameSink`、渲染池 DMA heap 与输出几何。
 宿主和 LibGodot 必须成对构建、成对部署。回调契约与关闭顺序见 [模块边界](module-boundaries.md)。
 
 当前 60 FPS 输出路径保留 30 Hz 摄像头和人脸推理。LibGodot 主线程在应用参数前，
@@ -175,7 +171,7 @@ MPP 编码和 RTSP 写出均为 300，丢弃和错误均为 0，渲染吞吐为 
 该数值不包含摄像头曝光、编码、网络和浏览器解码，不能当作端到端延迟。取证完成后
 用 `SIGTERM` 停止持续运行，退出码 143 来自本次主动清理。
 
-历史构建记录不覆盖 ABI v7；本轮以 [模块边界](module-boundaries.md) 的验证范围为准，尚未在
+历史实机记录早于 ABI v8；本轮以 [模块边界](module-boundaries.md) 的验证范围为准，尚未在
 RK3588 上运行。仍需完成新边界的板端回归、C++/Python 数值精度对照、长时间
 稳定性和摄像头到浏览器的关联时间戳端到端延迟测量。
 

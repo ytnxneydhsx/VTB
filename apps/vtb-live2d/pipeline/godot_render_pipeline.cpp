@@ -6,7 +6,6 @@
 #include <utility>
 
 #include "libgodot_instance.hpp"
-#include "vtb/hardware/rga/rga_nv12_frame_transformer.hpp"
 #include "vtb/time/monotonic_clock.hpp"
 #include "vtb/trace/frame_trace.hpp"
 
@@ -17,24 +16,19 @@ public:
     Impl(
         const std::vector<std::string>& passthrough_arguments,
         unsigned long iteration_limit,
-        GodotRenderPipelineConfig config,
-        Nv12FrameSink nv12_sink)
+        RenderConfiguration config,
+        RgbaFrameSink rgba_sink)
         : passthrough_arguments_(passthrough_arguments),
           iteration_limit_(iteration_limit),
           config_(std::move(config)),
-          rga_transformer_(config_.rga_dma_heap_path),
-          nv12_sink_(nv12_sink) {
-        if (nv12_sink_.context == nullptr || nv12_sink_.submit == nullptr) {
+          rgba_sink_(rgba_sink) {
+        if (rgba_sink_.context == nullptr || rgba_sink_.submit == nullptr) {
             throw std::invalid_argument(
-                "GodotRenderPipeline requires a complete NV12 sink");
+                "GodotRenderPipeline requires a complete RGBA sink");
         }
-        if (config_.render.output_fps == 0) {
+        if (config_.output_fps == 0) {
             throw std::invalid_argument(
                 "Godot render output FPS must be positive");
-        }
-        if (config_.rga_dma_heap_path.empty()) {
-            throw std::invalid_argument(
-                "Godot render RGA DMA heap path must not be empty");
         }
     }
 
@@ -59,7 +53,7 @@ public:
                 "GodotRenderPipeline is already finished");
         }
         godot_ = std::make_unique<LibGodotInstance>(
-            passthrough_arguments_, config_.render);
+            passthrough_arguments_, config_);
         godot_->start();
     }
 
@@ -78,11 +72,17 @@ public:
 #endif
     }
 
-    bool run_frame() {
+    FrameResult run_frame() {
         LibGodotInstance& godot = require_godot();
         {
             VTB_FRAME_SLICE("render.prepare", frame_trace_track());
-            godot.prepare_frame(MonotonicClock::now_ns());
+            if (!godot.prepare_frame(MonotonicClock::now_ns())) {
+                if (godot.should_stop()) {
+                    return FrameResult::finished;
+                }
+                VTB_FRAME_EVENT("render.rgba_pool_full", frame_trace_track());
+                return FrameResult::skipped;
+            }
         }
         const bool iteration_finished = [&] {
             VTB_FRAME_SLICE("render.iterate", frame_trace_track());
@@ -93,14 +93,7 @@ public:
             godot.wait_gpu_render();
         }
         const std::uint64_t ready_timestamp_ns = MonotonicClock::now_ns();
-        const RgbaFrameView rgba_frame =
-            godot.publish_rgba_frame(ready_timestamp_ns);
-        VTB_FRAME_EVENT(
-            "render.rgba_ready", frame_trace_track(), "sequence", rgba_frame.sequence);
-        Nv12FrameLease nv12 = [&] {
-            VTB_FRAME_SLICE("rga.nv12_convert", frame_trace_track());
-            return rga_transformer_.transform(rgba_frame);
-        }();
+        RgbaFrameLease rgba = godot.publish_rgba_frame(ready_timestamp_ns);
 #ifdef VTB_FRAME_TRACING
         if (new_snapshot_) {
             VTB_FRAME_EVENT(
@@ -110,16 +103,19 @@ public:
                 "frame_id", source_frame_id_);
         }
         VTB_FRAME_EVENT(
-            "render.nv12_ready", frame_trace_track(), "sequence", nv12.view().sequence,
+            "render.output_ready", frame_trace_track(), "sequence", rgba.view().sequence,
             "snapshot_generation", snapshot_generation_, "frame_id", source_frame_id_,
             "tracking_valid", tracking_valid_, "new_snapshot", new_snapshot_);
         new_snapshot_ = false;
 #endif
-        if (nv12_sink_.submit(nv12_sink_.context, &nv12) != 0) {
+        if (rgba_sink_.submit(rgba_sink_.context, &rgba) != 0) {
             throw std::runtime_error(
-                "NV12 sink rejected an RGA output frame lease");
+                "RGBA sink rejected a Godot frame lease");
         }
-        return iteration_finished || godot.should_stop();
+        if (iteration_finished || godot.should_stop()) {
+            return FrameResult::finished;
+        }
+        return FrameResult::rendered;
     }
 
     void finish() {
@@ -134,7 +130,6 @@ public:
             godot_failure = std::current_exception();
         }
         godot_.reset();
-        rga_transformer_.finish();
         finished_ = true;
         if (godot_failure) {
             std::rethrow_exception(godot_failure);
@@ -148,7 +143,7 @@ public:
     std::chrono::nanoseconds frame_period() const noexcept {
         return std::chrono::nanoseconds(
             1000000000ULL /
-            static_cast<unsigned long>(config_.render.output_fps));
+            static_cast<unsigned long>(config_.output_fps));
     }
 
 private:
@@ -162,9 +157,8 @@ private:
 
     std::vector<std::string> passthrough_arguments_;
     unsigned long iteration_limit_ = 0;
-    GodotRenderPipelineConfig config_;
-    RgaNv12FrameTransformer rga_transformer_;
-    Nv12FrameSink nv12_sink_;
+    RenderConfiguration config_;
+    RgbaFrameSink rgba_sink_;
     std::unique_ptr<LibGodotInstance> godot_;
 #ifdef VTB_FRAME_TRACING
     std::uint64_t snapshot_generation_ = 0;
@@ -178,14 +172,14 @@ private:
 std::unique_ptr<GodotRenderPipeline> GodotRenderPipeline::create(
     const std::vector<std::string>& passthrough_arguments,
     unsigned long iteration_limit,
-    GodotRenderPipelineConfig config,
-    Nv12FrameSink nv12_sink) {
+    RenderConfiguration config,
+    RgbaFrameSink rgba_sink) {
     return std::unique_ptr<GodotRenderPipeline>(
         new GodotRenderPipeline(std::make_unique<Impl>(
             passthrough_arguments,
             iteration_limit,
             std::move(config),
-            nv12_sink)));
+            rgba_sink)));
 }
 
 GodotRenderPipeline::GodotRenderPipeline(std::unique_ptr<Impl> impl)
@@ -202,7 +196,7 @@ void GodotRenderPipeline::submit(
     impl_->submit(snapshot);
 }
 
-bool GodotRenderPipeline::run_frame() {
+GodotRenderPipeline::FrameResult GodotRenderPipeline::run_frame() {
     return impl_->run_frame();
 }
 

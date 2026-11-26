@@ -1,381 +1,145 @@
 /**
- * @defgroup live2d_rendering 专题三：Godot 渲染与 NV12 转换
- * @brief 从 Live2D 跟踪快照到 Godot RGBA DMA-BUF、RGA NV12 租约和下游 Sink 的完整链路。
+ * @defgroup live2d_rendering 专题三：Godot 渲染与 RGBA DMA-BUF 交接
+ * @brief 跟踪快照驱动 Godot 直接渲染，GStreamer 两路编码共用 GPU 槽位租约。
  *
- * 本专题以 GodotRenderStage 从 Live2DTrackingChannel 取得
- * Live2DTrackingSnapshot 为上游边界，以 Nv12FrameSink 接收 Nv12FrameLease 为
- * 下游边界。GStreamer 编码、RTSP、WebRTC 和 UVC 位于该 Sink 之后，继续由媒体输出
- * 模块说明。
+ * 本专题从 GodotRenderStage 取得 Live2DTrackingSnapshot 开始，到 GStreamer
+ * 释放原始帧并归还 RGBA 槽位结束。编码包的协议输出由媒体模块说明。
  *
- * 核心类按职责放入三个入口：
+ * 1. @ref live2d_render_coordination "所有者线程与宿主编排"
+ * 2. @ref live2d_render_runtime "嵌入式 Godot 渲染"
+ * 3. @ref live2d_render_rgba "RGBA 渲染池与帧租约"
  *
- * 1. @ref live2d_render_coordination "所有者线程与宿主编排"：GodotRenderStage、
- *    GodotRenderPipeline、LibGodotInstance。
- * 2. @ref live2d_render_runtime "嵌入式 Godot 渲染"：EmbeddedLive2DApplication、
- *    Live2DRenderSession、OpenVTDmaBufCapture。
- * 3. @ref live2d_render_nv12 "RGBA→NV12 与输出租约"：RgaNv12FrameTransformer、
- *    Nv12FrameLease、Nv12FrameSink。
+ * @par 渲染、编码输入与槽位归还时序
  *
- * Live2DTrackingSnapshot、RgbaFrameView、Nv12FrameView、RgaTransformSession、
- * RgaBufferPool、RgaTransformLease 和 RgaBuffer 作为支持类型，通过核心类页面和
- * 协作图继续可达。
- *
- * @par 专题边界与正常数据路径
- *
- * @code
- * Live2DTrackingChannel::try_pop()
- *     -> Live2DTrackingSnapshot
- *     -> GodotRenderPipeline::submit()
- *     -> LibGodotInstance / EmbeddedLive2DApplication
- *     -> Live2DRenderSession（应用 Live2D 参数并渲染 SubViewport）
- *     -> OpenVTDmaBufCapture（外部 RGBA DMA-BUF 作为 Viewport 颜色附件）
- *     -> RgbaFrameView（同步借用 RGBA DMA-BUF）
- *     -> RgaNv12FrameTransformer::transform()
- *     -> Nv12FrameLease（四槽目标池）
- *     -> Nv12FrameSink::submit()
- * @endcode
- *
- * GodotRenderStage 的工作线程是 LibGodot 的所有者线程。它初始化、提交参数、驱动帧循环
- * 并清理 GodotRenderPipeline。初始化时，OpenVTDmaBufCapture 把外部 GL texture 包装成
- * Godot 纹理 RID，并设为 Viewport RenderTarget 的颜色附件。逐帧 `glFinish()` 和 RGBA
- * 发布通过 `RenderingServer::call_on_render_thread()` 在 Godot render thread 执行；
- * 所有者线程在每个步骤上等待 `Semaphore` 完成通知。RGBA 发布回调复制一个非拥有
- * `RgbaFrameView`，随后所有者线程在下一次 Godot iteration 前同步完成 RGA 转换。
- *
- * RenderConfiguration 的 `rga_dma_heap` 成员来自 `render.rga_dma_heap`，用于分配
- * RGA 的 NV12 目标缓冲区。示例配置将渲染输出设为 `/dev/dma_heap/system-uncached`，
- * 将人脸模型的 RGB8 缓冲区设为可缓存的 `/dev/dma_heap/system`。
- * 旧配置省略 `render.rga_dma_heap` 时继承 `face_pipeline.rga_dma_heap`。
- *
- * @par Godot 直接渲染、RGBA 与 NV12 的完整时序
- *
- * @mermaid{live2d_render_frame_sequence} "跟踪快照经 Godot render thread、RGBA 借用和同步 RGA 形成 NV12 租约"
+ * @mermaid{live2d_render_frame_sequence} "跟踪快照驱动 RGBA 渲染并交给两路编码器"
  * sequenceDiagram
  *     participant Face as 人脸处理线程
- *     participant TrackingChannel as Live2DTrackingChannel<br/>容量一被动通道
- *     participant Owner as GodotRenderStage<br/>LibGodot 所有者线程
- *     participant Host as GodotRenderPipeline<br/>LibGodotInstance
- *     participant Embedded as EmbeddedLive2DApplication<br/>Live2DRenderSession
- *     participant RenderThread as Godot render thread<br/>OpenVTDmaBufCapture
- *     participant RGA as RgaNv12FrameTransformer<br/>所有者线程同步调用
- *     participant Nv12Sink as Nv12FrameSink<br/>下游边界
+ *     participant Channel as Live2DTrackingChannel<br/>容量一通道
+ *     participant Host as GodotRenderStage 所有者线程<br/>GodotRenderPipeline / LibGodotInstance
+ *     participant Render as Godot render thread 执行上下文<br/>OpenVTDmaBufCapture
+ *     participant Media as GStreamer appsrc / tee
+ *     participant H264 as H.264 编码分支
+ *     participant JPEG as MJPEG 编码分支
  *
- *     Note over Face,Owner: 红色边界=Live2DTrackingSnapshot 跨线程交接；TrackingChannel 本身不创建线程
- *     Note over Owner,RenderThread: 所有者线程逐步派发 render-thread 操作，并在 Semaphore 上等待每一步完成
- *     Note over Host,RGA: RgbaFrameView 只同步借用；RGA 必须在下一次 Godot iteration 前读完
- *     Note over Embedded,RenderThread: 初始化时把 RGBA DMA-BUF texture 设为 Viewport 颜色附件
- *
- *     par 人脸线程：发布最新完整快照
- *         Face->>TrackingChannel: publish(Live2DTrackingSnapshot)
- *         TrackingChannel->>TrackingChannel: 满载时释放最旧普通值快照
- *     and Godot 所有者线程：按 output_fps 驱动帧循环
- *         loop 每个渲染周期
- *             Owner->>TrackingChannel: try_pop()（非阻塞）
- *             TrackingChannel-->>Owner: optional<Live2DTrackingSnapshot>
- *             alt 没有快照且 tracking_channel.finished() == true
- *                 rect rgba(163, 113, 247, 0.07)
- *                     Owner->>Owner: 通道排空后结束帧循环
- *                 end
- *             else 本周期继续渲染
- *                 rect rgba(163, 113, 247, 0.07)
- *                     alt 取得新快照
- *                         Owner->>Host: submit(snapshot)
- *                         Host->>Embedded: 保存待应用参数、取景状态和 generation
- *                     else 暂无新快照且通道仍运行
- *                         Note over Owner,Embedded: 保留最近参数；本周期继续渲染
- *                     end
- *                 end
- *
- *                 Owner->>Host: run_frame()
- *                 Host->>Embedded: prepare_frame(monotonic timestamp)
- *                 Embedded->>Embedded: 应用待提交参数或超时回退参数
- *                 Host->>Embedded: LibGodot iterate()
- *                 Embedded->>RenderThread: Live2DRenderSession 直接渲染到 RGBA DMA-BUF
- *
- *             Host->>Embedded: wait_gpu_render()
- *             Embedded->>RenderThread: call_on_render_thread(wait) 后等待
- *             RenderThread->>RenderThread: glFinish，FrameSlot FREE→READY
- *             RenderThread-->>Embedded: operation_finished.post()
- *
- *             Host->>Embedded: publish_rgba_frame(timestamp)
- *             Embedded->>RenderThread: call_on_render_thread(publish) 后等待
- *             RenderThread->>Host: RgbaFrameSink::submit(&RgbaFrameView)
- *             Host->>Host: 复制 fd 数值与布局到 rgba_frame_
- *             RenderThread->>RenderThread: 回调返回后 READY→FREE
- *             RenderThread-->>Embedded: operation_finished.post()
- *             Embedded-->>Host: 返回同步借用 RgbaFrameView
- *
- *             Host->>RGA: transform(rgba_frame)
- *             RGA->>RGA: 注册/复用源，四槽池 acquire，imcvtcolor_t(..., IM_SYNC)
- *             RGA-->>Host: Nv12FrameLease
- *             Host->>Nv12Sink: submit(&Nv12FrameLease)
- *             alt Sink 成功接收
- *                 rect rgba(163, 113, 247, 0.07)
- *                     Note over Nv12Sink: 下游移走 Lease；最后一个持有者释放时目标槽位回池
- *                     Host-->>Owner: run_frame() 返回 finished 状态
- *                     alt Godot 请求停止或达到 iteration_limit
- *                         Owner->>Owner: 结束帧循环
- *                     else 下一渲染周期继续
- *                         Owner->>Owner: sleep_until(next_frame_deadline)
- *                     end
- *                 end
- *             else Sink 拒绝
- *                 rect rgba(163, 113, 247, 0.07)
- *                     Host->>RGA: 局部 Lease 析构，目标槽位立即回池
- *                     Host->>Owner: 抛出错误并结束帧循环
- *                 end
+ *     Face->>Channel: 发布最新跟踪快照
+ *     Host->>Channel: try_pop()
+ *     Channel-->>Host: 移出快照（有新值时）
+ *     loop 每个渲染节拍
+ *         Host->>Render: prepare_frame_v8 派发 acquire_render_slot()
+ *         alt 四个槽位全部在用
+ *             Render-->>Host: ERR_BUSY，ABI 返回成功但 ready=0
+ *             Note over Host: 跳过本次绘制，下一节拍再选槽位
+ *         else 取得空闲槽位
+ *             Render-->>Host: 切换 SubViewport 外部颜色附件
+ *             Host->>Host: 应用参数，执行 Godot iteration
+ *             Host->>Render: 等待 GPU 完成 glFinish()
+ *             Render-->>Host: 写入完成
+ *             Host->>Render: publish_rgba_frame()
+ *             Render-->>Host: 回调移动交付 RgbaFrameLease
+ *             Host->>Media: 绑定到 RGBA GstMemory，提交 appsrc
+ *             par H.264 输入
+ *                 Media->>H264: 有界队列送入启用的 mpph264enc
+ *                 H264-->>Media: 消费后释放输入内存引用
+ *             and MJPEG 输入
+ *                 Media->>JPEG: 有界队列送入启用的 mppjpegenc
+ *                 JPEG-->>Media: 消费后释放输入内存引用
  *             end
- *             end
+ *             Media-->>Render: 最后一个 GstMemory 引用释放，归还槽位
  *         end
  *     end
- *
- *     Owner->>Host: finish()
- *     Host->>Embedded: application shutdown + destroy LibGodot instance
- *     Host->>RGA: retire_source() + finish()
  * @endmermaid
  *
- * @par 一、两个执行线程和宿主对象如何连接
+ * 编码分支启用时获取输入引用。队列淘汰或清理同样释放对应的引用。
+ * 槽位归还仅更新原子占用状态，可在最后一个持有者所在的线程执行。
  *
- * **问题：** Godot 所有者线程与 Godot render thread 分别执行哪些工作，宿主对象如何持有。
- * **起点：** `GodotRenderStage::worker_`，沿线程局部 Pipeline 进入 LibGodot 和 RGA 支路。
- * **箭头：** 红色实线表示值成员、`unique_ptr` 或唯一清理责任，黄色虚线表示通道、
- * 停止标志、回调 context 或同步视图借用，灰色实线表示同步调用和 render-thread 派发。
- * **尺度：** GodotRenderStage 从启动、逐帧循环到同线程清理。
- * **终点：** `Nv12FrameSink` 接收移动租约；其后的媒体处理位于专题三边界外。
+ * @par 所有者线程和执行上下文
  *
- * @mermaid{live2d_render_execution_objects} "Godot 所有者线程、render thread、宿主对象与 NV12 边界"
- * flowchart TB
- *     Stage["GodotRenderStage<br/>线程与帧调度"]
- *     Owner["开始：worker_ / thread_main()<br/>LibGodot 所有者线程"]
- *     Channel["Live2DTrackingChannel<br/>被动输入通道"]
- *     Stop["process_stop_requested_<br/>外部 atomic 借用"]
- *     Pipeline["thread_main() 局部 unique_ptr<br/>GodotRenderPipeline"]
- *     Impl["GodotRenderPipeline::Impl<br/>编排、转换与帧交付"]
- *     Godot["unique_ptr&lt;LibGodotInstance&gt;<br/>所有者线程内创建和销毁"]
- *     Embedded["EmbeddedLive2DApplication<br/>Live2DRenderSession"]
- *     Capture["OpenVTDmaBufCapture<br/>render-thread 调度门面"]
- *     RenderThread["Godot render thread<br/>Viewport / GL / EGL / RGBA 发布"]
- *     Convert["RgaNv12FrameTransformer<br/>所有者线程同步调用"]
- *     Sink["Nv12FrameSink nv12_sink_<br/>下游回调边界"]
- *     Downstream["下游媒体消费者<br/>专题三范围外"]
+ * 从 GodotRenderStage 的工作线程开始，沿同步调用跟到渲染回调和 appsrc 交接。
+ * 设备任务在 GPU 上执行。产品使用的 safe 模式可在所有者线程直接执行 render-thread
+ * 回调，Semaphore 仍表达逐步同步。
  *
- *     Stage -->|"红色：值成员 worker_"| Owner
- *     Stage -->|"红色：unique_ptr 在 thread_main() 移交"| Pipeline
- *     Stage -.->|"黄色：input_channel_ 引用"| Channel
- *     Stage -.->|"黄色：process_stop_requested_ 引用"| Stop
- *     Owner -->|"灰色：try_pop()"| Channel
- *     Owner -->|"灰色：initialize / submit / run_frame / finish"| Pipeline
- *     Pipeline -->|"红色：unique_ptr impl_"| Impl
- *     Impl -->|"红色：initialize() 后 unique_ptr godot_"| Godot
- *     Impl -->|"红色：值成员 rga_transformer_"| Convert
- *     Impl -->|"红色：值成员回调描述"| Sink
- *     Godot -->|"灰色：稳定 C ABI 同步调用"| Embedded
- *     Embedded -->|"红色：Ref 持有 capture_"| Capture
- *     Capture -->|"灰色：call_on_render_thread + Semaphore"| RenderThread
- *     Sink -.->|"黄色：context 与 submit 函数指针"| Downstream
+ * @mermaid{live2d_render_execution_objects} "Godot 所有者线程与媒体流水线的调用关系"
+ * flowchart LR
+ *     Stage["GodotRenderStage 工作线程"] -->|"调用 initialize / run_frame / finish"| Pipeline["GodotRenderPipeline"]
+ *     Pipeline -->|"unique_ptr 独占"| Instance["LibGodotInstance"]
+ *     Instance -->|"ABI v8 调用"| Embedded["EmbeddedLive2DApplication"]
+ *     Embedded -->|"unique_ptr 独占"| Session["Live2DRenderSession"]
+ *     Embedded -->|"尚存的 Ref 持有"| Capture["OpenVTDmaBufCapture"]
+ *     Capture -->|"call_on_render_thread，Semaphore 等待"| Renderer["RenderingServer 回调执行上下文"]
+ *     Pipeline -->|"通过 RgbaFrameSink 移交"| Appsrc["GStreamer appsrc / tee"]
  *
- *     classDef neutral fill:#161b22,stroke:#8b949e,stroke-width:1.5px,color:#ffffff
- *     class Stage,Owner,Channel,Stop,Pipeline,Impl,Godot,Embedded,Capture,RenderThread,Convert,Sink,Downstream neutral
- *     linkStyle 0,1,6,7,8,9,11 stroke:#ff5d5d,stroke-width:3px,color:#ff7b72
- *     linkStyle 2,3,13 stroke:#e3b341,stroke-width:2px,color:#e3b341,stroke-dasharray:6 4
- *     linkStyle 4,5,10,12 stroke:#8b949e,stroke-width:1.5px,color:#8b949e
+ *     classDef node fill:#f4f7fb,stroke:#64748b,color:#182234;
+ *     class Stage,Pipeline,Instance,Embedded,Session,Capture,Renderer,Appsrc node;
+ *     linkStyle 0,2,5,6 stroke:#64748b,stroke-width:2px;
+ *     linkStyle 1,3 stroke:#b91c1c,stroke-width:2px;
+ *     linkStyle 4 stroke:#2563eb,stroke-width:2px;
  * @endmermaid
  *
- * Pipeline 可以在启动调用线程构造，因为 `create()` 只保存配置和值依赖。工作线程接管
- * 独占指针后才创建 LibGodotInstance，并在退出 `thread_main()` 前调用 `finish()` 和析构。
- * 这保证 LibGodot 的创建、应用生命周期和销毁都位于同一所有者线程；GL/EGL 资源的
- * 创建、使用和删除则通过 OpenVTDmaBufCapture 留在 Godot render thread。
+ * @par 四槽渲染池的资源关系
  *
- * @par 二、Godot RGBA DMA-BUF 的长生命周期资源
+ * 从 OpenVTRgbaFramePipeline 看四个槽位从配置到销毁的持有关系。
+ * 原始 fd 由 DmaBuffer 关闭，渲染线程先解除颜色附件，再释放 Godot 纹理和 EGL 资源。
  *
- * **问题：** Godot render thread 如何把外部 DMA-BUF 作为 Viewport 颜色附件，各 GPU 资源由谁释放。
- * **起点：** `OpenVTDmaBufCapture` 在 render thread 初始化的 `OpenVTRgbaFramePipeline`。
- * **箭头：** 红色实线表示值包含或唯一清理责任，灰色实线表示分配、状态转换和销毁动作。
- * **尺度：** 一个 LibGodot 实例的 RGBA 输出资源，跨越全部渲染帧复用同一 FrameSlot。
- * **终点：** render-thread `finish()` 先解除 RenderTarget override，再依次释放 Godot
- * 纹理 RID、GL texture、EGLImage 和 DMA heap fd。
+ * @mermaid{live2d_render_rgba_resources} "每个 RGBA 槽位的 DMA-BUF 与 GL 资源"
+ * flowchart LR
+ *     Pool["OpenVTRgbaFramePipeline"] -->|"数组包含四项"| Slot["FrameSlot"]
+ *     Slot -->|"shared_ptr 保活"| Buffer["FrameBuffer<br/>leased 原子标志"]
+ *     Slot -->|"包含 ExternalDmaBufTarget"| EGL["EGLImage 和 GL texture"]
+ *     Slot -->|"持有 RID，关停时 texture_free"| Texture["Godot 纹理"]
+ *     Buffer -->|"DmaBuffer 拥有原始 fd"| Pixels["RGBA DMA-BUF"]
+ *     EGL -.->|"导入原始 fd"| Pixels
+ *     Pool -->|"逐帧切换颜色附件"| Target["SubViewport RenderTarget"]
+ *     Target -.->|"借用当前槽的纹理 RID"| Texture
  *
- * @mermaid{live2d_render_rgba_resources} "Godot render thread 的单槽 RGBA DMA-BUF、EGLImage 与 GL 资源"
- * flowchart TB
- *     Capture["开始：OpenVTDmaBufCapture<br/>所有者线程调用 / render thread 执行"]
- *     Pipeline["OpenVTRgbaFramePipeline* pipeline<br/>memnew / memdelete 唯一责任"]
- *     Slot["FrameSlot slot<br/>单个跨帧复用槽位"]
- *     Dma["DmaBuffer rgba_buffer<br/>system-uncached DMA heap fd"]
- *     Target["ExternalDmaBufTarget target"]
- *     Image["EGLImageKHR<br/>eglCreateImageKHR"]
- *     Texture["GL texture<br/>glEGLImageTargetTexture2DOES"]
- *     TextureRid["Godot external texture RID<br/>native GL handle"]
- *     RenderTarget["Viewport RenderTarget<br/>override color attachment"]
- *
- *     Free["FREE"]
- *     Ready["READY<br/>直接渲染已由 glFinish 完成"]
- *     Destroy(["_finish_render_thread()<br/>memdelete(pipeline)"])
- *
- *     Capture -->|"红色：raw pointer + 唯一 memdelete 责任"| Pipeline
- *     Pipeline -->|"红色：值成员"| Slot
- *     Slot -->|"红色：值成员"| Dma
- *     Slot -->|"红色：值成员"| Target
- *     Target -->|"红色：唯一 eglDestroyImageKHR 责任"| Image
- *     Target -->|"红色：唯一 glDeleteTextures 责任"| Texture
- *     Texture -->|"红色：native handle 包装"| TextureRid
- *     TextureRid -->|"灰色：render_target_set_override"| RenderTarget
- *
- *     Free -->|"灰色：Godot 直接绘制 + glFinish"| Ready
- *     Ready -->|"灰色：RGBA callback 返回"| Free
- *     Pipeline -->|"灰色：finish / 异常清理"| Destroy
- *
- *     classDef neutral fill:#161b22,stroke:#8b949e,stroke-width:1.5px,color:#ffffff
- *     classDef action fill:#0d1117,stroke:#6e7681,stroke-width:1.5px,stroke-dasharray:5 3,color:#ffffff
- *     class Capture,Pipeline,Slot,Dma,Target,Image,Texture,TextureRid,RenderTarget,Free,Ready neutral
- *     class Destroy action
- *     linkStyle 0,1,2,3,4,5,6 stroke:#ff5d5d,stroke-width:3px,color:#ff7b72
- *     linkStyle 7,8,9,10 stroke:#8b949e,stroke-width:1.5px,color:#8b949e
+ *     classDef node fill:#f4f7fb,stroke:#64748b,color:#182234;
+ *     class Pool,Slot,Buffer,EGL,Texture,Pixels,Target node;
+ *     linkStyle 0,2,3,4 stroke:#b91c1c,stroke-width:2px;
+ *     linkStyle 1 stroke:#2563eb,stroke-width:2px;
+ *     linkStyle 5,7 stroke:#a16207,stroke-width:2px;
+ *     linkStyle 6 stroke:#64748b,stroke-width:2px;
  * @endmermaid
  *
- * RGBA Pipeline 当前只使用一个槽位。Godot iteration 直接写入槽位；`glFinish()` 后
- * 状态从 FREE 进入 READY，同步回调返回后立即回到 FREE。下一次 Godot iteration 前，
- * 宿主必须完成对该 fd 的同步读取。
+ * Godot 给 2D canvas 应用垂直变换，让外部纹理的内存行序与编码端一致。
+ * 每一槽为 RGBA 按编码输入对齐分配内存。配置中的 render.rga_dma_heap 沿用旧键名，
+ * 取值用于分配 GPU 渲染池。
  *
- * @par 三、RGBA 视图如何在借用窗口内建立 RGA 源注册
+ * @par 单帧租约如何保活与归还
  *
- * **问题：** 非拥有 `RgbaFrameView` 如何安全交给 RGA，并在后续帧复用独立导入资源。
- * **起点：** render thread 回调传入的 `RgbaFrameView`。
- * **箭头：** 黄色虚线表示 fd 数值或视图借用，红色实线表示缓存值或唯一释放责任，
- * 蓝色实线表示 `shared_ptr` 保活，灰色实线表示复制、注册、同步转换或清理动作。
- * **尺度：** 当前 RGBA 帧的同步借用窗口，以及 stream generation 内复用的 RGA 注册缓存。
- * **终点：** 本帧在 `transform()` 返回前完成读取；`retire_source()` 清空缓存并最终关闭
- * 复制 fd、释放 RGA handle。
+ * 从 RgbaFrameLease 读一帧。复制的 fd 由 GstMemory 管理，租约中记录原始 fd 的
+ * RgbaFrameView。直导路径上的 MPP 插件保留源 GstMemory 引用直到结束该帧。
  *
- * @mermaid{live2d_render_rgba_borrow_and_registration} "RgbaFrameView 借用窗口与 RGA 源注册缓存"
- * flowchart TB
- *     Slot["OpenVTRgbaFramePipeline::FrameSlot<br/>拥有 RGBA DMA-BUF fd"]
- *     CallbackView["开始：render thread 局部 RgbaFrameView<br/>复制 fd 数值和布局"]
- *     HostView["LibGodotInstance::Impl::rgba_frame_<br/>按值复制非拥有描述"]
- *     Transform["RgaNv12FrameTransformer::transform()<br/>所有者线程同步调用"]
- *     Source["RgaSourceFrame<br/>复制 fd 数值与 generation"]
+ * @mermaid{live2d_render_rgba_lease} "最后一个编码输入引用归还 GPU 槽位"
+ * flowchart LR
+ *     Memory["GstMemory"] -->|"qdata 独占"| Lease["RgbaFrameLease"]
+ *     Memory -->|"接管、关闭复制的 fd"| Duplicate["复制的 DMA-BUF fd"]
+ *     Lease -->|"包含"| View["RgbaFrameView"]
+ *     Lease -->|"归还回调持有 shared_ptr"| Storage["FrameBuffer"]
+ *     View -.->|"借用原始 fd 和布局"| Storage
+ *     H264["H.264 分支"] -->|"持有输入内存引用"| Memory
+ *     JPEG["MJPEG 分支"] -->|"持有输入内存引用"| Memory
+ *     Lease -->|"最后一份引用释放，leased.store(false)"| Storage
+ *     Storage -->|"下一拍可再选"| Pool["Godot 槽位选择"]
  *
- *     Session["RgaTransformSession::Impl"]
- *     Cache["source_buffers_<br/>vector&lt;SourceRegistration&gt;"]
- *     Registration["SourceRegistration<br/>匹配 fd + buffer_id + generation + 布局"]
- *     Buffer["RgaBuffer<br/>独立导入租约"]
- *     DupFd["UniqueFd<br/>F_DUPFD_CLOEXEC"]
- *     Handle["RGA handle<br/>importbuffer_fd()"]
- *     Request["RgaTransformRequest<br/>source shared_ptr"]
- *     Retire(["retire_source / finish<br/>source_buffers_.clear()"])
- *
- *     Slot -.->|"黄色：借出 fd 数值"| CallbackView
- *     CallbackView -->|"灰色：同步回调内复制描述"| HostView
- *     HostView -.->|"黄色：下一次 iteration 前有效"| Transform
- *     Transform -->|"灰色：构造"| Source
- *     Source -.->|"黄色：借出 fd 数值用于查找/注册"| Session
- *
- *     Session -->|"红色：按值拥有容器"| Cache
- *     Cache -->|"红色：按值拥有注册项"| Registration
- *     Registration -->|"蓝色：shared_ptr 保活"| Buffer
- *     Buffer -->|"红色：独占复制 fd"| DupFd
- *     Buffer -->|"红色：独占导入 handle"| Handle
- *     Buffer -->|"蓝色：request.source_ 保活"| Request
- *     Request -->|"灰色：imcvtcolor_t(..., IM_SYNC)"| Transform
- *     Retire -->|"灰色：清空当前代次缓存"| Cache
- *
- *     classDef neutral fill:#161b22,stroke:#8b949e,stroke-width:1.5px,color:#ffffff
- *     classDef action fill:#0d1117,stroke:#6e7681,stroke-width:1.5px,stroke-dasharray:5 3,color:#ffffff
- *     class Slot,CallbackView,HostView,Transform,Source,Session,Cache,Registration,Buffer,DupFd,Handle,Request neutral
- *     class Retire action
- *     linkStyle 5,6,8,9 stroke:#ff5d5d,stroke-width:3px,color:#ff7b72
- *     linkStyle 7,10 stroke:#58a6ff,stroke-width:3px,color:#58a6ff
- *     linkStyle 0,2,4 stroke:#e3b341,stroke-width:2px,color:#e3b341,stroke-dasharray:6 4
- *     linkStyle 1,3,11,12 stroke:#8b949e,stroke-width:1.5px,color:#8b949e
+ *     classDef node fill:#f4f7fb,stroke:#64748b,color:#182234;
+ *     class Memory,Lease,Duplicate,View,Storage,H264,JPEG,Pool node;
+ *     linkStyle 0,1,2 stroke:#b91c1c,stroke-width:2px;
+ *     linkStyle 3,5,6 stroke:#2563eb,stroke-width:2px;
+ *     linkStyle 4 stroke:#a16207,stroke-width:2px;
+ *     linkStyle 7,8 stroke:#64748b,stroke-width:2px;
  * @endmermaid
  *
- * 回调中的 RgbaFrameView 和 LibGodotInstance 保存的副本都不拥有 fd。RGA Session 在
- * 首次看到该源时复制 fd 并导入 handle，后续帧复用注册项；当前帧仍在同一个
- * `run_frame()` 调用栈中完成同步 RGA，满足 RGBA 单槽的借用窗口。
- *
- * @par 四、NV12 四槽目标池和输出 Lease 如何归还
- *
- * **问题：** RGA 输出的 NV12 DMA-BUF 如何跨越 Sink 边界，并防止在途槽位被下一帧复用。
- * **起点：** Godot 私有 `RgaTransformSession` 的四槽 `RgaBufferPool`。
- * **箭头：** 红色实线表示值包含或唯一资源责任，蓝色实线表示强引用保活，黄色虚线
- * 表示 Nv12FrameView 借用 fd，灰色实线表示提交、失败析构或槽位归还动作。
- * **尺度：** 一个 NV12 目标槽位从 acquire、同步转换、Sink 交接到最后一个持有者释放。
- * **终点：** `ReleaseOnLeaseDestroy::~ReleaseOnLeaseDestroy()` 调用
- * `RgaBufferPool::release(index)`，把 `in_use` 设为 false 并唤醒等待者。
- *
- * @mermaid{live2d_render_nv12_lease} "四槽 NV12 目标池、Nv12FrameLease 和 Sink 交接"
- * flowchart TB
- *     Session["开始：RgaTransformSession<br/>Godot 私有"]
- *     Pool["RgaBufferPool<br/>capacity=4"]
- *     Slot["DestinationSlot[4]<br/>RgaBuffer + in_use"]
- *     Buffer["RgaBuffer<br/>NV12 目标存储"]
- *     DmaFd["UniqueFd<br/>DMA heap fd"]
- *     Mapping["CPU mapping<br/>mmap"]
- *     Handle["RGA handle<br/>输出目标"]
- *
- *     TransformLease["shared_ptr&lt;RgaTransformLease&gt;<br/>buffer_ + return_token_"]
- *     Token["ReleaseOnLeaseDestroy<br/>owner_ + index"]
- *     Nv12Lease["Nv12FrameLease<br/>view_ + keep_alive_"]
- *     View["Nv12FrameView<br/>非拥有 fd 与布局"]
- *     Sink["Nv12FrameSink::submit(&lease)<br/>下游边界"]
- *     Accepted["下游最后一个持有者"]
- *     Rejected["Pipeline 局部 Lease<br/>Sink 返回失败"]
- *     Release(["RgaBufferPool::release(index)<br/>槽位重新可用"])
- *
- *     Session -->|"蓝色：destination_pool_ shared_ptr"| Pool
- *     Pool -->|"红色：按值拥有四个槽位"| Slot
- *     Slot -->|"蓝色：shared_ptr"| Buffer
- *     Buffer -->|"红色：独占 DMA heap fd"| DmaFd
- *     Buffer -->|"红色：独占 mmap"| Mapping
- *     Buffer -->|"红色：独占 RGA handle"| Handle
- *
- *     TransformLease -->|"蓝色：buffer_ 保活"| Buffer
- *     TransformLease -->|"蓝色：return_token_ 保活"| Token
- *     Token -->|"蓝色：owner_ 保活 Pool"| Pool
- *     Nv12Lease -->|"红色：值成员 view_"| View
- *     Nv12Lease -->|"蓝色：keep_alive_ 保持 TransformLease"| TransformLease
- *     View -.->|"黄色：借用 NV12 fd 数值"| Buffer
- *     Nv12Lease -->|"灰色：submit 指针传入并移动"| Sink
- *
- *     Sink -->|"灰色：成功后移走"| Accepted
- *     Sink -->|"灰色：失败后调用方仍持有"| Rejected
- *     Accepted -->|"灰色：最后一个引用析构"| Release
- *     Rejected -->|"灰色：局部 Lease 析构"| Release
- *     Release -->|"灰色：Token 析构触发"| Token
- *
- *     classDef neutral fill:#161b22,stroke:#8b949e,stroke-width:1.5px,color:#ffffff
- *     classDef action fill:#0d1117,stroke:#6e7681,stroke-width:1.5px,stroke-dasharray:5 3,color:#ffffff
- *     class Session,Pool,Slot,Buffer,DmaFd,Mapping,Handle,TransformLease,Token,Nv12Lease,View,Sink,Accepted,Rejected neutral
- *     class Release action
- *     linkStyle 1,3,4,5,9 stroke:#ff5d5d,stroke-width:3px,color:#ff7b72
- *     linkStyle 0,2,6,7,8,10 stroke:#58a6ff,stroke-width:3px,color:#58a6ff
- *     linkStyle 11 stroke:#e3b341,stroke-width:2px,color:#e3b341,stroke-dasharray:6 4
- *     linkStyle 12,13,14,15,16,17 stroke:#8b949e,stroke-width:1.5px,color:#8b949e
- * @endmermaid
- *
- * Sink 成功时必须移走 Lease；失败时调用方仍拥有局部 Lease。两条路径最终都释放
- * `keep_alive_`，进而释放 RgaTransformLease 和 Token。目标池在规格变化时等待全部
- * 四个槽位归还，再整体重建匹配的新规格。
- * @htmlonly
- * <script src="doxygen-mermaid-viewer.js"></script>
- * @endhtmlonly
+ * 停机时渲染线程停止写入并销毁 GL/EGL 资源。在途租约继续保活底层 FrameBuffer，
+ * 媒体管线排空或清理时释放余下的引用。
  */
 
-/**
- * @defgroup live2d_render_coordination 所有者线程与宿主编排
+/** @defgroup live2d_render_coordination 所有者线程与宿主编排
  * @ingroup live2d_rendering
- * @brief 跟踪快照消费、LibGodot 所有者线程、宿主 Pipeline 与 ABI 边界。
  */
-
-/**
- * @defgroup live2d_render_runtime 嵌入式 Godot 渲染
+/** @defgroup live2d_render_runtime 嵌入式 Godot 渲染
  * @ingroup live2d_rendering
- * @brief Live2D 参数应用、SubViewport 渲染、Godot render thread 和 RGBA DMA-BUF 发布。
  */
-
-/**
- * @defgroup live2d_render_nv12 RGBA→NV12 与输出租约
+/** @defgroup live2d_render_rgba RGBA 渲染池与帧租约
  * @ingroup live2d_rendering
- * @brief 同步 RGA 色彩转换、四槽 NV12 目标池和下游 Sink 移动交接。
  */
 
 /** @class vtb::GodotRenderStage
@@ -396,12 +160,9 @@
 /** @class OpenVTDmaBufCapture
  * @ingroup live2d_render_runtime
  */
-/** @class vtb::RgaNv12FrameTransformer
- * @ingroup live2d_render_nv12
+/** @class vtb::RgbaFrameLease
+ * @ingroup live2d_render_rgba
  */
-/** @class vtb::Nv12FrameLease
- * @ingroup live2d_render_nv12
- */
-/** @class vtb::Nv12FrameSink
- * @ingroup live2d_render_nv12
+/** @class vtb::RgbaFrameSink
+ * @ingroup live2d_render_rgba
  */

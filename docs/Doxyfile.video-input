@@ -1,5 +1,5 @@
 PROJECT_NAME           = "VTB C++ 专题说明书"
-PROJECT_BRIEF          = "视频输入、人脸跟踪、Godot 渲染与 NV12 转换的对象关系、运行时序和资源生命周期"
+PROJECT_BRIEF          = "视频输入、人脸跟踪、Godot 渲染与 RGBA 帧交接的对象关系、运行时序和资源生命周期"
 OUTPUT_DIRECTORY       = build/docs/video-input-doxygen
 
 OUTPUT_LANGUAGE        = Chinese

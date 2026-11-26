@@ -128,9 +128,11 @@ void GodotRenderStage::run_frame_loop(
             break;
         }
 
-        const bool finished = render_pipeline.run_frame();
-        ++iterations_;
-        if (finished) {
+        const auto result = render_pipeline.run_frame();
+        if (result != GodotRenderPipeline::FrameResult::skipped) {
+            ++iterations_;
+        }
+        if (result == GodotRenderPipeline::FrameResult::finished) {
             break;
         }
         if (render_pipeline.iteration_limit() > 0 &&

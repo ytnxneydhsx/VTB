@@ -1,19 +1,19 @@
 # GStreamer 媒体 Pipeline 全貌
 
-本文说明 Live2D 的 NV12 画面进入 GStreamer 后，如何同时输出 WebRTC、RTSP 和
+本文说明 Live2D 的 RGBA 画面进入 GStreamer 后，如何同时输出 WebRTC、RTSP 和
 USB UVC。图中大框表示独立的 GStreamer pipeline，箭头表示 Buffer 的流动方向。
 
 ## Pipeline 框型图
 
 ```mermaid
 flowchart TB
-    RGA["RGA<br/>输出 NV12"]
+    GODOT["Godot<br/>RGBA DMA-BUF 渲染池"]
 
     subgraph MAIN["Pipeline 1：主媒体 pipeline（vtb-media，长期运行）"]
         direction TB
 
-        RAW_SRC["NV12 appsrc<br/>共用 DMA-BUF caps"]
-        RAW_TEE{{"NV12 tee<br/>nv12-tee"}}
+        RAW_SRC["RGBA appsrc<br/>共用 DMA-BUF caps"]
+        RAW_TEE{{"RGBA tee<br/>rgba-tee"}}
 
         subgraph H264["H.264 编码与分流"]
             direction LR
@@ -84,7 +84,7 @@ flowchart TB
     RTSP_B["RTSP 客户端 B"]
     RTSP_C["RTSP 客户端 C"]
 
-    RGA --> RAW_SRC
+    GODOT --> RAW_SRC
     H264_APPSINK --> CALLBACK
     PUSH --> RTSP_APPSRC
     RTSP_STREAM --> RTSP_A
@@ -96,7 +96,7 @@ flowchart TB
     classDef output fill:#e8f8ee,stroke:#2f855a,stroke-width:2px,color:#163c2a;
     classDef bridge fill:#f4ebff,stroke:#805ad5,stroke-width:2px,color:#322659;
 
-    class RGA,RAW_SRC,RAW_TEE source;
+    class GODOT,RAW_SRC,RAW_TEE source;
     class H264_Q,H264_ENC,H264_PARSE,H264_TEE,MJPEG_Q,MJPEG_ENC,JPEG_PARSE,JPEG_Q encode;
     class WEBRTC_Q,WEBRTC_SINK,WEBRTC_CLIENTS,RTSP_Q,H264_APPSINK,UVC_SINK,UVC_HOST,RTSP_APPSRC,RTSP_MEDIA_Q,RTP_PAY,RTSP_STREAM,RTSP_A,RTSP_B,RTSP_C output;
     class CALLBACK,CACHE,PUSH bridge;
@@ -104,8 +104,9 @@ flowchart TB
 
 ## Pipeline 边界
 
-- `nv12-source` 声明共用的 NV12 DMA-BUF caps。RTSP、WebRTC 和 UVC 的目标帧率
-  都来自 `render.output_fps`，示例配置为 60 fps。
+- `rgba-source` 声明共用的 RGBA DMA-BUF caps。RTSP、WebRTC 和 UVC 的目标帧率
+  都来自 `render.output_fps`，示例配置为 60 fps。启用的编码分支共用输入内存，最后一个
+  `GstMemory` 引用释放时，RGBA 租约归还 Godot 渲染槽位。
 - `Pipeline 1` 在程序运行期间持续工作。H.264 只由 `mpph264enc` 编码一次，编码结果由
   `encoded-h264-tee` 同时交给 WebRTC 和 RTSP 数据出口。
 - WebRTC 位于主 pipeline 内，直接接收已经编码好的 H.264，不会再创建一套 H.264

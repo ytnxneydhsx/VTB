@@ -3,7 +3,7 @@ SELECT
   s.id,
   s.parent_id,
   coalesce(pt.upid, t.upid) AS upid,
-  s.name,
+  CASE s.name WHEN 'render.nv12_ready' THEN 'render.output_ready' ELSE s.name END AS name,
   s.ts,
   s.dur,
   extract_arg(s.arg_set_id, 'debug.frame_id') AS frame_id,
@@ -25,48 +25,48 @@ SELECT
   round((count(*) - 1) * 1e9 / nullif(max(e.ts) - min(e.ts), 0), 2) AS fps
 FROM vtb_frame_events e
 JOIN process p USING (upid)
-WHERE e.name IN ('v4l2.dequeue', 'tracking.frame', 'render.nv12_ready')
+WHERE e.name IN ('v4l2.dequeue', 'tracking.frame', 'render.output_ready')
 GROUP BY e.upid, e.name
 ORDER BY p.pid, min(e.ts);
 
 SELECT p.pid, e.name AS event, count(*) AS events
 FROM vtb_frame_events e
 JOIN process p USING (upid)
-WHERE e.name IN ('capture.drop_oldest', 'tracking.drop_oldest')
+WHERE e.name IN ('capture.drop_oldest', 'tracking.drop_oldest', 'render.rgba_pool_full')
 GROUP BY e.upid, e.name
 ORDER BY p.pid, e.name;
 
--- Select the first NV12 output attributed to each camera frame. Generation
+-- Select the first render output attributed to each camera frame. Generation
 -- zero is an initial render without a tracking snapshot.
 CREATE PERFETTO TABLE vtb_frame_links AS
 WITH candidates AS (
   SELECT
     input.upid,
     input.frame_id,
-    nv12.sequence,
+    rendered.sequence,
     queued.ts - input.ts AS capture_dispatch_ns,
     tracking.ts - queued.ts AS capture_queue_ns,
     consumed.ts - snapshot.ts AS render_queue_ns,
-    nv12.ts - input.ts AS latency_ns,
-    nv12.tracking_valid,
-    row_number() OVER (PARTITION BY input.upid, input.frame_id ORDER BY nv12.ts) AS output_rank
+    rendered.ts - input.ts AS latency_ns,
+    rendered.tracking_valid,
+    row_number() OVER (PARTITION BY input.upid, input.frame_id ORDER BY rendered.ts) AS output_rank
   FROM vtb_frame_events input
   JOIN vtb_frame_events queued USING (upid, frame_id)
   JOIN vtb_frame_events tracking USING (upid, frame_id)
   JOIN vtb_frame_events snapshot USING (upid, frame_id)
   JOIN vtb_frame_events consumed
     ON consumed.upid = snapshot.upid AND consumed.snapshot_generation = snapshot.snapshot_generation
-  JOIN vtb_frame_events nv12
-    ON nv12.upid = consumed.upid AND nv12.snapshot_generation = consumed.snapshot_generation
+  JOIN vtb_frame_events rendered
+    ON rendered.upid = consumed.upid AND rendered.snapshot_generation = consumed.snapshot_generation
   WHERE input.name = 'v4l2.dequeue'
     AND queued.name = 'capture.enqueue'
     AND tracking.name = 'tracking.frame'
     AND snapshot.name = 'tracking.snapshot_enqueue'
     AND consumed.name = 'render.snapshot_dequeue'
-    AND nv12.name = 'render.nv12_ready'
-    AND nv12.new_snapshot = 1
+    AND rendered.name = 'render.output_ready'
+    AND rendered.new_snapshot = 1
     AND input.ts <= queued.ts AND queued.ts <= tracking.ts
-    AND tracking.ts <= snapshot.ts AND snapshot.ts <= consumed.ts AND consumed.ts <= nv12.ts
+    AND tracking.ts <= snapshot.ts AND snapshot.ts <= consumed.ts AND consumed.ts <= rendered.ts
 )
 SELECT * FROM candidates WHERE output_rank = 1;
 
@@ -86,7 +86,7 @@ WITH durations AS (
   UNION ALL
   SELECT upid, 'render.queue_wait', render_queue_ns FROM vtb_frame_links
   UNION ALL
-  SELECT upid, 'v4l2.dequeue_to_first_linked_nv12', latency_ns FROM vtb_frame_links
+  SELECT upid, 'v4l2.dequeue_to_first_linked_render', latency_ns FROM vtb_frame_links
 )
 SELECT
   p.pid,
@@ -104,7 +104,7 @@ SELECT
   count(*) AS linked_camera_frames,
   sum(tracking_valid) AS with_valid_tracking,
   min(frame_id) AS first_linked_camera_frame,
-  min(sequence) AS first_linked_nv12_sequence
+  min(sequence) AS first_linked_render_sequence
 FROM vtb_frame_links
 JOIN process p USING (upid)
 GROUP BY upid;

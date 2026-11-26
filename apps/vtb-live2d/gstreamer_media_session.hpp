@@ -3,7 +3,7 @@
 #include <memory>
 #include <string>
 
-#include "vtb/render/nv12_frame_sink.hpp"
+#include "vtb/render/rgba_frame_sink.hpp"
 
 namespace vtb {
 
@@ -20,10 +20,10 @@ public:
 };
 
 /**
- * @brief 以 GStreamer 管理 NV12 分支、MPP 编码和 RTSP/WebRTC/UVC 输出。
+ * @brief 以 GStreamer 管理 RGBA 分支、MPP 编码和 RTSP/WebRTC/UVC 输出。
  *
- * 启用输出时，输入 Nv12FrameLease 被绑定到 DMA-BUF GstMemory。raw appsrc
- * 声明共用的 NV12 caps，帧率取自渲染输出。tee 和有界 leaky queue 分别驱动
+ * 启用输出时，输入 RgbaFrameLease 被绑定到 DMA-BUF GstMemory。raw appsrc
+ * 声明共用的 RGBA caps，帧率取自渲染输出。tee 和有界 leaky queue 分别驱动
  * 已启用的 mpph264enc 与 mppjpegenc。
  * RTSP 和 WebRTC 可独立启用，同时启用时由编码后的 tee 分发同一份 H.264。
  * RTSP 分支只向进程内
@@ -44,7 +44,7 @@ public:
     GStreamerMediaSession(GStreamerMediaSession&&) = delete;
     GStreamerMediaSession& operator=(GStreamerMediaSession&&) = delete;
 
-    Nv12FrameSink sink() noexcept;
+    RgbaFrameSink sink() noexcept;
     void rethrow_if_failed() const;
     void finish();
 

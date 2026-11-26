@@ -11,6 +11,11 @@
 #include "servers/rendering/rendering_server_globals.h"
 #include "servers/rendering/rendering_server.h"
 
+#include <array>
+#include <atomic>
+#include <limits>
+#include <memory>
+
 #include <drm/drm_fourcc.h>
 #include <linux/dma-heap.h>
 
@@ -25,7 +30,8 @@
 
 namespace {
 
-constexpr const char *DMA_HEAP_PATH = "/dev/dma_heap/system-uncached";
+constexpr size_t RGBA_SLOT_COUNT = 4;
+constexpr int RGBA_ALIGNMENT = 16;
 constexpr EGLenum EGL_LINUX_DMA_BUF_TARGET = 0x3270;
 constexpr EGLint EGL_LINUX_DRM_FOURCC_ATTRIBUTE = 0x3271;
 constexpr EGLint EGL_DMA_BUF_PLANE0_FD_ATTRIBUTE = 0x3272;
@@ -200,10 +206,21 @@ private:
 	GLuint texture = 0;
 };
 
+class FrameBuffer final {
+public:
+	FrameBuffer() = default;
+	~FrameBuffer() = default;
+	FrameBuffer(const FrameBuffer &) = delete;
+	FrameBuffer &operator=(const FrameBuffer &) = delete;
+	FrameBuffer(FrameBuffer &&) = delete;
+	FrameBuffer &operator=(FrameBuffer &&) = delete;
+
+	DmaBuffer dma_buf;
+	std::atomic<bool> leased{false};
+};
+
 class FrameSlot final {
 public:
-	enum class State { FREE, READY };
-
 	FrameSlot() = default;
 	~FrameSlot() = default;
 	FrameSlot(const FrameSlot &) = delete;
@@ -211,26 +228,19 @@ public:
 	FrameSlot(FrameSlot &&) = delete;
 	FrameSlot &operator=(FrameSlot &&) = delete;
 
-	Error initialize(int p_width, int p_height, int p_stride,
+	Error initialize(const String &p_heap, int p_width, int p_height, int p_stride,
 			size_t p_size, String &r_error) {
-		Error error = rgba_buffer.allocate(DMA_HEAP_PATH, p_size, r_error);
+		buffer = std::make_shared<FrameBuffer>();
+		const Error error = buffer->dma_buf.allocate(p_heap, p_size, r_error);
 		if (error != OK) {
 			return error;
 		}
-		return target.initialize(rgba_buffer, p_width, p_height, p_stride, r_error);
+		return target.initialize(buffer->dma_buf, p_width, p_height, p_stride, r_error);
 	}
 
-	int fd() const { return rgba_buffer.get_fd(); }
-	size_t size() const { return rgba_buffer.get_size(); }
-	GLuint texture() const { return target.get_texture(); }
-
-	State state = State::FREE;
-	int frame_index = -1;
-	bool end_of_stream = false;
-
-private:
-	DmaBuffer rgba_buffer;
+	std::shared_ptr<FrameBuffer> buffer;
 	ExternalDmaBufTarget target;
+	RID texture;
 };
 
 } // namespace
@@ -244,70 +254,82 @@ public:
 	OpenVTRgbaFramePipeline(OpenVTRgbaFramePipeline &&) = delete;
 	OpenVTRgbaFramePipeline &operator=(OpenVTRgbaFramePipeline &&) = delete;
 
-	Error initialize(const vtb::RgbaFrameSink &p_sink, RID p_viewport,
+	Error initialize(const vtb::RgbaFrameSink &p_sink, const String &p_heap, RID p_viewport,
 			int p_width, int p_height, int p_fps, int p_total_frames,
 			String &r_error) {
 		width = p_width;
 		height = p_height;
 		fps = p_fps;
 		total_frames = p_total_frames;
-		rgba_stride = width * 4;
-		const size_t size = static_cast<size_t>(rgba_stride) * height;
-		Error error = slot.initialize(width, height, rgba_stride, size, r_error);
-		if (error != OK) {
-			return error;
-		}
+		rgba_stride = ((width + RGBA_ALIGNMENT - 1) & ~(RGBA_ALIGNMENT - 1)) * 4;
+		rgba_vstride = (height + RGBA_ALIGNMENT - 1) & ~(RGBA_ALIGNMENT - 1);
+		const size_t size = static_cast<size_t>(rgba_stride) * rgba_vstride;
 		const RID render_target = RenderingServer::get_singleton()->viewport_get_render_target(p_viewport);
 		if (!render_target.is_valid()) {
 			r_error = "Godot viewport render target is invalid";
 			return ERR_INVALID_DATA;
 		}
-		external_texture = RSG::texture_storage->texture_create_from_native_handle(
-				RSE::TEXTURE_TYPE_2D, Image::FORMAT_RGBA8,
-				static_cast<uint64_t>(slot.texture()), width, height, 1);
-		if (!external_texture.is_valid()) {
-			r_error = "failed to wrap RGBA DMA-BUF texture for Godot";
-			return ERR_CANT_CREATE;
+		for (FrameSlot &slot : slots) {
+			const Error error = slot.initialize(p_heap, width, height, rgba_stride, size, r_error);
+			if (error != OK) {
+				return error;
+			}
+			slot.texture = RSG::texture_storage->texture_create_from_native_handle(
+					RSE::TEXTURE_TYPE_2D, Image::FORMAT_RGBA8,
+					static_cast<uint64_t>(slot.target.get_texture()), width, height, 1);
+			if (!slot.texture.is_valid()) {
+				r_error = "failed to wrap RGBA DMA-BUF texture for Godot";
+				return ERR_CANT_CREATE;
+			}
 		}
 		viewport_render_target = render_target;
-		RSG::texture_storage->render_target_set_override(
-				viewport_render_target, external_texture, RID(), RID(), RID());
-		if (RSG::texture_storage->render_target_get_override_color(
-					viewport_render_target) != external_texture) {
-			r_error = "Godot rejected the RGBA DMA-BUF color attachment";
-			return ERR_CANT_CREATE;
-		}
 		rgba_sink = p_sink;
 		accepting_frames = true;
 		initialized = true;
-		print_line(vformat("OPENVT_RGBA_CONFIG width=%d height=%d fps=%d frames=%d rgba_fd=%d rgba_stride=%d heap=%s",
-				width, height, fps, total_frames, slot.fd(), rgba_stride, DMA_HEAP_PATH));
-		print_line("OPENVT_RGBA_PIPELINE steps=direct_viewport_render,wait_gpu_render,publish_rgba_frame boundary=rgba metrics=host");
+		print_line(vformat("OPENVT_RGBA_CONFIG width=%d height=%d fps=%d frames=%d slots=%d rgba_stride=%d rgba_vstride=%d heap=%s",
+				width, height, fps, total_frames, static_cast<int>(slots.size()), rgba_stride, rgba_vstride, p_heap));
 		return OK;
 	}
 
-	Error wait_for_render(int p_frame_index, bool p_eos, String &r_error) {
-		if (!initialized || pipeline_error != OK || !accepting_frames) {
-			r_error = pipeline_error_message;
-			if (r_error.is_empty()) {
-				r_error = "RGBA pipeline is unavailable";
-			}
-			if (pipeline_error != OK) {
-				return pipeline_error;
-			}
+	Error acquire_slot(String &r_error) {
+		if (!accepting_frames) {
+			r_error = "RGBA pipeline is not accepting frames";
 			return ERR_UNAVAILABLE;
 		}
-		if (slot.state != FrameSlot::State::FREE) {
-			r_error = "RGBA DMA-BUF is still borrowed by the previous frame";
-			return ERR_BUSY;
+		if (render_slot != nullptr) {
+			r_error = "Previous RGBA frame has not been published";
+			return ERR_ALREADY_IN_USE;
 		}
-		slot.frame_index = p_frame_index;
-		slot.end_of_stream = p_eos;
+		for (size_t offset = 0; offset < slots.size(); ++offset) {
+			const size_t index = (next_slot + offset) % slots.size();
+			FrameSlot &slot = slots[index];
+			if (slot.buffer->leased.load()) {
+				continue;
+			}
+			RSG::texture_storage->render_target_set_override(
+					viewport_render_target, slot.texture, RID(), RID(), RID());
+			if (RSG::texture_storage->render_target_get_override_color(viewport_render_target) != slot.texture) {
+				return fail(ERR_CANT_CREATE, "Godot rejected the RGBA DMA-BUF color attachment", r_error);
+			}
+			render_slot = &slot;
+			next_slot = (index + 1) % slots.size();
+			return OK;
+		}
+		return ERR_BUSY;
+	}
+
+	Error wait_for_render(int p_frame_index, bool p_eos, String &r_error) {
+		if (render_slot == nullptr || frame_ready || !accepting_frames) {
+			r_error = "RGBA render slot is not available for GPU completion";
+			return ERR_UNAVAILABLE;
+		}
 		glFinish();
 		if (glGetError() != GL_NO_ERROR) {
 			return fail(FAILED, "Godot render completion wait failed", r_error);
 		}
-		slot.state = FrameSlot::State::READY;
+		frame_index = p_frame_index;
+		end_of_stream = p_eos;
+		frame_ready = true;
 		++rendered_frames;
 		if (p_eos) {
 			accepting_frames = false;
@@ -316,34 +338,36 @@ public:
 	}
 
 	Error publish(uint64_t p_timestamp_ns, String &r_error) {
-		if (slot.state != FrameSlot::State::READY || p_timestamp_ns == 0) {
+		if (render_slot == nullptr || !frame_ready || p_timestamp_ns == 0) {
 			return fail(ERR_INVALID_PARAMETER, "RGBA frame is not ready", r_error);
 		}
+		const std::shared_ptr<FrameBuffer> buffer = render_slot->buffer;
 		vtb::RgbaFrameView frame;
-		frame.dma_buf_fd = slot.fd();
-		frame.dma_buf_size = slot.size();
-		frame.buffer_id = 0;
+		frame.dma_buf_fd = buffer->dma_buf.get_fd();
+		frame.dma_buf_size = buffer->dma_buf.get_size();
+		frame.buffer_id = static_cast<uint64_t>(render_slot - slots.data());
 		frame.stream_generation = 1;
 		frame.width = static_cast<uint32_t>(width);
 		frame.height = static_cast<uint32_t>(height);
 		frame.horizontal_stride = static_cast<uint32_t>(rgba_stride / 4);
-		frame.vertical_stride = static_cast<uint32_t>(height);
+		frame.vertical_stride = static_cast<uint32_t>(rgba_vstride);
 		frame.stride_bytes = static_cast<uint32_t>(rgba_stride);
 		frame.frames_per_second = static_cast<uint32_t>(fps);
 		frame.timestamp_ns = p_timestamp_ns;
-		frame.sequence = static_cast<uint64_t>(slot.frame_index + 1);
-		frame.format = vtb::RgbaFrameFormat::rgba8888;
-		if (slot.end_of_stream) {
-			frame.end_of_stream = 1;
-		}
-		if (rgba_sink.submit(rgba_sink.context, &frame) != 0) {
+		frame.sequence = static_cast<uint64_t>(frame_index) + 1;
+		frame.end_of_stream = static_cast<int32_t>(end_of_stream);
+		buffer->leased.store(true);
+		std::shared_ptr<void> return_slot(buffer.get(), [buffer](void *) noexcept {
+			buffer->leased.store(false);
+		});
+		vtb::RgbaFrameLease lease(frame, std::move(return_slot));
+		if (rgba_sink.submit(rgba_sink.context, &lease) != 0) {
 			return fail(FAILED, "host rejected RGBA DMA-BUF frame", r_error);
 		}
 		++delivered_frames;
-		if (slot.end_of_stream) {
-			end_of_stream_delivered = true;
-		}
-		release_slot();
+		end_of_stream_delivered = end_of_stream;
+		render_slot = nullptr;
+		frame_ready = false;
 		return OK;
 	}
 
@@ -357,7 +381,7 @@ public:
 			r_error = pipeline_error_message;
 			return pipeline_error;
 		}
-		if (slot.state != FrameSlot::State::FREE || delivered_frames != rendered_frames) {
+		if (render_slot != nullptr || delivered_frames != rendered_frames) {
 			r_error = "RGBA frame sequence ended before publication";
 			return FAILED;
 		}
@@ -374,14 +398,18 @@ public:
 
 	void shutdown() {
 		accepting_frames = false;
+		if (render_slot != nullptr) {
+			glFinish();
+		}
 		if (viewport_render_target.is_valid()) {
 			RSG::texture_storage->render_target_set_override(
 					viewport_render_target, RID(), RID(), RID(), RID());
 			viewport_render_target = RID();
 		}
-		if (external_texture.is_valid()) {
-			RSG::texture_storage->texture_free(external_texture);
-			external_texture = RID();
+		for (FrameSlot &slot : slots) {
+			if (slot.texture.is_valid()) {
+				RSG::texture_storage->texture_free(slot.texture);
+			}
 		}
 		initialized = false;
 	}
@@ -391,15 +419,8 @@ private:
 		pipeline_error = p_error;
 		pipeline_error_message = p_message;
 		accepting_frames = false;
-		release_slot();
 		r_error = p_message;
 		return p_error;
-	}
-
-	void release_slot() {
-		slot.state = FrameSlot::State::FREE;
-		slot.frame_index = -1;
-		slot.end_of_stream = false;
 	}
 
 	int width = 0;
@@ -407,13 +428,18 @@ private:
 	int fps = 0;
 	int total_frames = 0;
 	int rgba_stride = 0;
+	int rgba_vstride = 0;
+	int frame_index = 0;
 	bool initialized = false;
 	bool finished = false;
 	bool accepting_frames = false;
 	bool end_of_stream_delivered = false;
 	RID viewport_render_target;
-	RID external_texture;
-	FrameSlot slot;
+	std::array<FrameSlot, RGBA_SLOT_COUNT> slots;
+	FrameSlot *render_slot = nullptr;
+	size_t next_slot = 0;
+	bool frame_ready = false;
+	bool end_of_stream = false;
 	vtb::RgbaFrameSink rgba_sink;
 	Error pipeline_error = OK;
 	String pipeline_error_message;
@@ -435,17 +461,21 @@ void OpenVTDmaBufCapture::_bind_methods() {
 }
 
 Error OpenVTDmaBufCapture::configure(const vtb::RgbaFrameSink &p_sink,
-		RID p_viewport, int p_width, int p_height, int p_fps, int p_total_frames) {
+		const String &p_heap, RID p_viewport, int p_width, int p_height, int p_fps,
+		int p_total_frames) {
 	if (configured || pipeline != nullptr) {
 		operation_error_message = "capture is already configured";
 		return ERR_ALREADY_IN_USE;
 	}
 	if (p_sink.context == nullptr || p_sink.submit == nullptr || !p_viewport.is_valid() ||
-			p_width <= 0 || p_height <= 0 || p_fps <= 0 || p_total_frames < 0) {
+			p_heap.is_empty() || p_width <= 0 || p_height <= 0 || p_fps <= 0 || p_total_frames < 0 ||
+			p_width > std::numeric_limits<int>::max() / 4 - RGBA_ALIGNMENT ||
+			p_height > std::numeric_limits<int>::max() - RGBA_ALIGNMENT) {
 		operation_error_message = "invalid RGBA capture configuration";
 		return ERR_INVALID_PARAMETER;
 	}
 	rgba_sink = p_sink;
+	dma_heap = p_heap;
 	viewport = p_viewport;
 	width = p_width;
 	height = p_height;
@@ -461,6 +491,17 @@ Error OpenVTDmaBufCapture::configure(const vtb::RgbaFrameSink &p_sink,
 	if (operation_error != OK) {
 		configured = false;
 	}
+	return operation_error;
+}
+
+Error OpenVTDmaBufCapture::acquire_render_slot() {
+	if (!configured || finished || pipeline == nullptr) {
+		operation_error_message = "RGBA direct render target is unavailable";
+		return ERR_UNCONFIGURED;
+	}
+	RenderingServer::get_singleton()->call_on_render_thread(
+			callable_mp(this, &OpenVTDmaBufCapture::_acquire_render_slot_thread));
+	operation_finished.wait();
 	return operation_error;
 }
 
@@ -514,11 +555,17 @@ void OpenVTDmaBufCapture::_initialize_pipeline_render_thread() {
 	String message;
 	pipeline = memnew(OpenVTRgbaFramePipeline);
 	const Error error = pipeline->initialize(
-			rgba_sink, viewport, width, height, fps, total_frames, message);
+			rgba_sink, dma_heap, viewport, width, height, fps, total_frames, message);
 	if (error != OK) {
 		memdelete(pipeline);
 		pipeline = nullptr;
 	}
+	_complete_operation(error, message);
+}
+
+void OpenVTDmaBufCapture::_acquire_render_slot_thread() {
+	String message;
+	const Error error = pipeline->acquire_slot(message);
 	_complete_operation(error, message);
 }
 
@@ -548,7 +595,7 @@ void OpenVTDmaBufCapture::_finish_render_thread() {
 void OpenVTDmaBufCapture::_complete_operation(Error p_error, const String &p_message) {
 	operation_error = p_error;
 	operation_error_message = p_message;
-	if (p_error != OK) {
+	if (p_error != OK && !p_message.is_empty()) {
 		ERR_PRINT("OPENVT_RGBA_ERROR " + p_message);
 	}
 	operation_finished.post();

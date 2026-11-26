@@ -170,17 +170,13 @@ public:
         Live2DControlServer control_server(
             config_.control, face_tracking_stage);
 
-        // create() 装配渲染、线程内同步 RGA 转换与异步 GStreamer 接收器。
-        // Godot 所有者线程移动交付 Nv12FrameLease；编码和输出由 GStreamer 分支完成。
-        GodotRenderPipelineConfig godot_render_config;
-        godot_render_config.render = config_.render;
-        godot_render_config.rga_dma_heap_path =
-            config_.render.rga_dma_heap;
+        // create() 装配 Godot 渲染和异步 GStreamer 接收器。
+        // Godot 所有者线程移动交付 RgbaFrameLease；编码和输出由 GStreamer 分支完成。
         std::unique_ptr<GodotRenderPipeline> godot_render_pipeline =
             GodotRenderPipeline::create(
                 command_line_.passthrough_arguments(),
                 command_line_.iteration_limit(),
-                std::move(godot_render_config),
+                config_.render,
                 media.sink());
         GodotRenderStage godot_render_stage(
             std::move(godot_render_pipeline),

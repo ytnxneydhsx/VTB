@@ -1,5 +1,6 @@
 #include "libgodot_instance.hpp"
 
+#include <optional>
 #include <stdexcept>
 #include <string>
 #include <utility>
@@ -148,6 +149,7 @@ public:
         }
         OpenVTEmbeddedApplicationConfig embedded_config{};
         embedded_config.live2d_model = render_config_.live2d_model.c_str();
+        embedded_config.rgba_dma_heap = render_config_.rga_dma_heap.c_str();
         embedded_config.abi_version = OPENVT_LIBGODOT_ABI_VERSION;
         embedded_config.config_size = sizeof(embedded_config);
         embedded_config.rgba_sink = rgba_sink();
@@ -157,7 +159,7 @@ public:
         embedded_config.total_frames = render_config_.total_frames;
         application_cleanup_required_ = true;
         const int application_result =
-            openvt_libgodot_application_initialize_v7(&embedded_config);
+            openvt_libgodot_application_initialize_v8(&embedded_config);
         if (application_result != 0) {
             throw_application_error(
                 "C++ Live2D application initialization failed",
@@ -193,13 +195,15 @@ public:
         }
     }
 
-    void prepare_frame(std::uint64_t timestamp_ns) {
+    bool prepare_frame(std::uint64_t timestamp_ns) {
+        int ready = 0;
         const int result =
-            openvt_libgodot_application_prepare_frame(timestamp_ns);
+            openvt_libgodot_application_prepare_frame_v8(timestamp_ns, &ready);
         if (result != 0) {
             throw_application_error(
                 "C++ Live2D frame preparation failed", result);
         }
+        return ready != 0;
     }
 
     bool iterate() {
@@ -217,16 +221,18 @@ public:
             "Direct viewport render completion wait failed");
     }
 
-    RgbaFrameView publish_rgba_frame(std::uint64_t timestamp_ns) {
-        rgba_frame_available_ = false;
+    RgbaFrameLease publish_rgba_frame(std::uint64_t timestamp_ns) {
+        rgba_frame_.reset();
         call_application_step(
             openvt_libgodot_application_publish_rgba_frame(timestamp_ns),
             "RGBA frame publication failed");
-        if (!rgba_frame_available_) {
+        if (!rgba_frame_) {
             throw std::runtime_error(
                 "LibGodot did not expose the published RGBA frame");
         }
-        return rgba_frame_;
+        RgbaFrameLease frame(std::move(*rgba_frame_));
+        rgba_frame_.reset();
+        return frame;
     }
 
     bool should_stop() const noexcept {
@@ -256,13 +262,12 @@ public:
 private:
     static std::int32_t capture_rgba_frame(
         void* context,
-        const RgbaFrameView* frame) noexcept {
+        RgbaFrameLease* frame) noexcept {
         if (context == nullptr || frame == nullptr) {
             return -1;
         }
         auto& self = *static_cast<Impl*>(context);
-        self.rgba_frame_ = *frame;
-        self.rgba_frame_available_ = true;
+        self.rgba_frame_.emplace(std::move(*frame));
         return 0;
     }
 
@@ -308,9 +313,8 @@ private:
     RenderConfiguration render_config_;
     ApplicationArguments arguments_;
     GDExtensionObjectPtr instance_ = nullptr;
-    RgbaFrameView rgba_frame_;
+    std::optional<RgbaFrameLease> rgba_frame_;
     bool application_cleanup_required_ = false;
-    bool rgba_frame_available_ = false;
     bool started_ = false;
 };
 
@@ -330,8 +334,8 @@ void LibGodotInstance::submit(const Live2DTrackingSnapshot& snapshot) {
     impl_->submit(snapshot);
 }
 
-void LibGodotInstance::prepare_frame(std::uint64_t timestamp_ns) {
-    impl_->prepare_frame(timestamp_ns);
+bool LibGodotInstance::prepare_frame(std::uint64_t timestamp_ns) {
+    return impl_->prepare_frame(timestamp_ns);
 }
 
 bool LibGodotInstance::iterate() {
@@ -342,7 +346,7 @@ void LibGodotInstance::wait_gpu_render() {
     impl_->wait_gpu_render();
 }
 
-RgbaFrameView LibGodotInstance::publish_rgba_frame(
+RgbaFrameLease LibGodotInstance::publish_rgba_frame(
     std::uint64_t timestamp_ns) {
     return impl_->publish_rgba_frame(timestamp_ns);
 }

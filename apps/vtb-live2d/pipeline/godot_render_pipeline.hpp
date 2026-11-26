@@ -7,15 +7,9 @@
 
 #include "live2d_tracking_snapshot.hpp"
 #include "vtb/config/vtb_application_config.hpp"
-#include "vtb/render/nv12_frame_sink.hpp"
+#include "vtb/render/rgba_frame_sink.hpp"
 
 namespace vtb {
-
-class GodotRenderPipelineConfig final {
-public:
-    RenderConfiguration render;
-    std::string rga_dma_heap_path;
-};
 
 /**
  * @brief 在调用线程内初始化、驱动并清理 LibGodot 的同步渲染任务主体。
@@ -26,18 +20,18 @@ public:
  * 因此 LibGodotInstance 从创建到销毁始终位于同一个所有者线程。
  *
  * 本类不包含 LibGodot ABI、启动参数和资源清理实现，也不创建线程或持有消息通道。
- * 它编排独立的 LibGodotInstance 和 RgaNv12FrameTransformer，从实例取得同步借用的
- * RgbaFrameView，并把 Nv12FrameLease 移交给 GStreamer 媒体会话。底层
- * RgbaFrameSink 回调只由 LibGodotInstance 内部接收；RGBA 到 NV12 的 RGA 转换在
- * Godot 所有者线程同步执行，编码和协议输出由 GStreamer 分支异步完成。
+ * 它从 LibGodotInstance 取得 RgbaFrameLease，并将其移动交给 GStreamer。
+ * 最后一个编码输入引用释放后归还 GPU 槽位。槽位全部在用时跳过这次渲染。
  */
 class GodotRenderPipeline final {
 public:
+    enum class FrameResult { skipped, rendered, finished };
+
     static std::unique_ptr<GodotRenderPipeline> create(
         const std::vector<std::string>& passthrough_arguments,
         unsigned long iteration_limit,
-        GodotRenderPipelineConfig config,
-        Nv12FrameSink nv12_sink);
+        RenderConfiguration config,
+        RgbaFrameSink rgba_sink);
 
     ~GodotRenderPipeline();
 
@@ -48,7 +42,7 @@ public:
 
     void initialize();
     void submit(const Live2DTrackingSnapshot& snapshot);
-    bool run_frame();
+    FrameResult run_frame();
     void finish();
 
     unsigned long iteration_limit() const noexcept;

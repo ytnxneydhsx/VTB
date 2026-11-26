@@ -61,7 +61,7 @@ python3 support/perfetto/watch-frame-trace.py
 ```
 
 打开 `http://127.0.0.1:8770/`。页面通过 `rk3588-direct` 采集一次 9 秒短片段，
-显示采集、跟踪和 NV12 输出帧率、队列淘汰、分段耗时及一条帧关联，并将片段载入
+显示采集、跟踪和渲染输出帧率、队列淘汰、分段耗时及一条帧关联，并将片段载入
 官方 Perfetto Web UI。之后点击「刷新片段」才会再次采集，完成后更新统计和时间线。
 关闭页面取消进行中的采集。终端按 Ctrl-C 停止 Mac 本地入口，板端常驻录制继续运行。
 
@@ -71,18 +71,19 @@ python3 support/perfetto/watch-frame-trace.py
 
 ## 帧关联和统计
 
-`v4l2.dequeue` 在成功 `DQBUF` 后生成，`render.nv12_ready` 在 NV12 租约返回且尚未
-交给媒体 Sink 时生成。两段跨线程传递基于 camera frame ID 和 snapshot generation
+`v4l2.dequeue` 在成功 `DQBUF` 后生成，`render.output_ready` 在 RGBA 租约返回且尚未
+交给媒体 Sink 时生成。统计也识别旧 trace 中的 `render.nv12_ready`。
+`render.rgba_pool_full` 记录四个 GPU 槽位忙时跳过的渲染节拍。两段跨线程传递基于 camera frame ID 和 snapshot generation
 分别建立 Flow。摄像头序号从零开始。输出上的 snapshot generation 为零表示初始帧尚未
 取得跟踪快照。视角更新和无有效人脸时仍保留摄像头来源，`tracking_valid` 区分推理状态。
-`new_snapshot` 表示消费这份快照后的首张 NV12。后续帧可复用或插值参数。
+`new_snapshot` 表示消费这份快照后的首张渲染帧。后续帧可复用或插值参数。
 这一关联记录宿主消费快照的时间，最终像素开始响应某个参数的时间还受插值影响。
 
-启用媒体输出时，`media.appsrc.submit` 与 `media.appsrc.output` 按 NV12 输出序号
+启用媒体输出时，`media.appsrc.submit` 与 `media.appsrc.output` 按渲染输出序号
 建立 Flow。输出序号在应用侧写成 `GstBuffer::offset = sequence - 1`，采集端从原始
-NV12 缓冲区还原它。appsrc 输出端为每个已启用的原始 NV12 编码队列开启独立 Flow，
+RGBA 缓冲区还原它。appsrc 输出端为每个已启用的原始 RGBA 编码队列开启独立 Flow，
 在各自的 `media.raw_queue.input` 和 `media.raw_queue.output` 上显示流转，轨道按
-实际执行线程归入「帧链路」。这组事件的范围到原始 NV12 队列出队为止。
+实际执行线程归入「帧链路」。这组事件的范围到原始 RGBA 队列出队为止。
 
 RTSP 的 H.264 队列使用 `media.rtsp.queue.input` 和 `media.rtsp.queue.output`
 记录等待时间，按 `encoded_id` 建立 Flow。共享媒体内由 appsrc 直接接到 RTP

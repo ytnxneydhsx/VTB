@@ -3,7 +3,7 @@
 状态：第一版实现完成，实机验收记录见 `godot-embedded-runtime-validation-2026-10-30.md`
 日期：2026-10-30；2026-11-03 增补当前模块边界。
 
-历史实机验收不覆盖 ABI v7。2026-11-17 已按
+历史实机验收早于当前 ABI v8。2026-11-17 已按
 [ADR 0009](adr/0009-render-live2d-directly-into-rgba-dmabuf.md) 改为直接渲染到外部
 RGBA DMA-BUF，ARM64 编译通过，RK3588 回归待完成。当前实现的模块职责与验证范围以
 [模块边界](module-boundaries.md) 为准，下文保留尚未接入产品的接口设计。
@@ -56,9 +56,8 @@ VTB C++ main()
   → C++ 每帧向 Godot 提交已完成的 Live2D 参数并驱动 iteration
   → Headless EGL/GBM / Mali-G610 驱动 Godot RenderingServer 完成离屏绘制
   → RGBA DMA-BUF texture 作为 SubViewport RenderTarget 颜色附件
-  → Godot 直接渲染 → LibGodotInstance 返回同步借用 RgbaFrameView
-  → 宿主 RgaNv12FrameTransformer → Godot RgaTransformSession
-  → Godot 所有者线程直接同步调用 RgaTransformer → NV12 DMA-BUF → Nv12FrameSink
+  → Godot 直接渲染至空闲 RGBA 槽位
+  → LibGodotInstance 移动交付 RgbaFrameLease → RgbaFrameSink
   → GStreamer appsrc → tee → 两条 leaky queue
   → MPP H.264 → RTSP/MediaMTX；MPP MJPEG → uvcsink/UVC
   → LibGodotInstance::finish() → GStreamer EOS/排空与实例销毁
@@ -211,7 +210,7 @@ VtbApplication
 直接实例化采集 Stage、人脸 Stage、Godot 渲染 Stage 和两条容量一通道，并排序采集、
 推理、渲染和输出边界的生命周期。
 
-`GodotRenderPipeline::create()` 只装配配置、桥接参数与 NV12 输出借用，不调用 LibGodot；
+`GodotRenderPipeline::create()` 只装配配置、桥接参数与 RGBA 输出接收器，不调用 LibGodot；
 `GodotRenderStage` 绑定跟踪通道并拥有专用线程。工作线程接管 Pipeline 的独占所有权后，
 依次完成 LibGodot 初始化、快照提交、iteration、输出排空和销毁。
 
@@ -276,12 +275,9 @@ RGBA DMA-BUF → EGLImage → native GL texture
   → RgbaFrameSink
 ```
 
-该模块负责单个 RGBA DMA-BUF 槽位、外部颜色附件、GPU 完成等待和同步借用交付。
-宿主 `RgaNv12FrameTransformer` 在回调内通过私有 `RgaTransformSession` 直接同步调用
-librga，随后把移动专属 NV12 Lease 绑定到 GStreamer DMA-BUF `GstMemory`。RGBA 由
-同步回调调用栈保持；NV12 由 GStreamer 内存引用计数保持，直到两个分支都
-释放缓冲区。桥接 ABI v7 删除逐帧 acquire/blit 调用，宿主的 `VtbApplication`、
-RGA 和媒体输出边界保持不变。
+模块管理四个 RGBA DMA-BUF 槽位。GPU 完成写入后交付独占租约，宿主绑定到
+GStreamer DMA-BUF `GstMemory`。最后一个编码输入引用释放时归还槽位。
+桥接 ABI v8 携带渲染池 DMA heap，要求宿主与 LibGodot 成对构建。
 
 ## 7. Runtime 生命周期和状态机
 

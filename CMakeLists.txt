@@ -500,14 +500,13 @@ if(VTB_ENABLE_EMBEDDED_GODOT)
         apps/vtb-live2d/gstreamer_media_session_support.cpp
     )
     target_include_directories(vtb_gstreamer_media_session
-        PUBLIC apps/vtb-live2d
+        PUBLIC apps/vtb-live2d include
         SYSTEM PRIVATE
             "${VTB_GSTREAMER_INCLUDE_DIR}"
             "${VTB_GLIB_INCLUDE_DIR}"
             "${VTB_GLIB_CONFIG_INCLUDE_DIR}"
     )
     target_link_libraries(vtb_gstreamer_media_session
-        PUBLIC vtb_rga_core
         PRIVATE
             Threads::Threads
             ${VTB_GSTREAMER_LIBRARIES}

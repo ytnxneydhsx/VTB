@@ -1,7 +1,9 @@
 -- One JSON result for the Mac viewer. Restrict the window to one Live2D process.
 CREATE PERFETTO TABLE vtb_viewer_events AS
 WITH events AS (
-  SELECT s.id, coalesce(pt.upid, t.upid) AS upid, s.name, s.ts, s.dur, s.arg_set_id
+  SELECT s.id, coalesce(pt.upid, t.upid) AS upid,
+         CASE s.name WHEN 'render.nv12_ready' THEN 'render.output_ready' ELSE s.name END AS name,
+         s.ts, s.dur, s.arg_set_id
   FROM slice s
   LEFT JOIN process_track pt ON pt.id = s.track_id
   LEFT JOIN thread_track tt ON tt.id = s.track_id
@@ -17,7 +19,7 @@ SELECT
   extract_arg(arg_set_id, 'debug.tracking_valid') AS tracking_valid
 FROM events
 WHERE upid = (
-  SELECT upid FROM events WHERE name IN ('v4l2.dequeue', 'render.nv12_ready')
+  SELECT upid FROM events WHERE name IN ('v4l2.dequeue', 'render.output_ready')
   ORDER BY ts DESC, id DESC LIMIT 1
 );
 
@@ -26,7 +28,7 @@ WITH
     SELECT name, count(*) AS frames,
            round((count(*) - 1) * 1e9 / nullif(max(ts) - min(ts), 0), 2) AS fps
     FROM vtb_viewer_events
-    WHERE name IN ('v4l2.dequeue', 'tracking.frame', 'render.nv12_ready')
+    WHERE name IN ('v4l2.dequeue', 'tracking.frame', 'render.output_ready')
     GROUP BY name
   ),
   candidates AS (
@@ -46,7 +48,7 @@ WITH
     JOIN vtb_viewer_events output ON output.snapshot_generation = snapshot.snapshot_generation
     WHERE camera.name = 'v4l2.dequeue' AND queued.name = 'capture.enqueue'
       AND tracking.name = 'tracking.frame' AND snapshot.name = 'tracking.snapshot_enqueue'
-      AND consumed.name = 'render.snapshot_dequeue' AND output.name = 'render.nv12_ready'
+      AND consumed.name = 'render.snapshot_dequeue' AND output.name = 'render.output_ready'
       AND output.new_snapshot = 1 AND output.snapshot_generation > 0
       AND camera.ts <= queued.ts AND queued.ts <= tracking.ts AND tracking.ts <= snapshot.ts
       AND snapshot.ts <= consumed.ts AND consumed.ts <= output.ts
@@ -63,7 +65,7 @@ WITH
     )
     UNION ALL SELECT 'capture.queue_wait', capture_queue_ns FROM linked
     UNION ALL SELECT 'render.queue_wait', render_queue_ns FROM linked
-    UNION ALL SELECT 'capture_to_nv12', total_ns FROM linked
+    UNION ALL SELECT 'capture_to_render', total_ns FROM linked
   ),
   latency AS (
     SELECT name, count(*) AS samples, round(percentile(ns, 50) / 1e6, 3) AS p50,

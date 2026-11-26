@@ -1,6 +1,8 @@
 #pragma once
 
 #include <cstdint>
+#include <memory>
+#include <utility>
 
 namespace vtb {
 
@@ -11,9 +13,7 @@ enum class RgbaFrameFormat : std::uint32_t {
 /**
  * @brief 不拥有资源的 RGBA DMA-BUF 帧描述。
  *
- * RgbaFrameSink 消费者只可在 submit 回调返回前借用内容。LibGodotInstance 返回的
- * 同步视图可借用到下一次 Viewport 帧获取或实例销毁；调用方必须在此之前完成RGA读取。
- * 消费者如需异步持有帧，必须引入显式槽位租约和归还协议。
+ * 视图中的 fd 在对应的 RgbaFrameLease 持有期间可用。
  */
 class RgbaFrameView final {
 public:
@@ -33,12 +33,36 @@ public:
     std::int32_t end_of_stream = 0;
 };
 
-/** @brief LibGodot 向宿主同步交付 RGBA DMA-BUF 的稳定 ABI 回调。 */
+/**
+ * @brief 独占一次 RGBA 帧交付，析构时归还 GPU 渲染槽位。
+ *
+ * 槽位的持有对象保活 DMA-BUF。消费者将租约绑定到 GstMemory 后，
+ * 最后一个内存引用释放时才归还槽位。
+ */
+class RgbaFrameLease final {
+public:
+    RgbaFrameLease(RgbaFrameView view, std::shared_ptr<void> slot) noexcept
+        : view_(view), slot_(std::move(slot)) {}
+    ~RgbaFrameLease() = default;
+
+    RgbaFrameLease(const RgbaFrameLease&) = delete;
+    RgbaFrameLease& operator=(const RgbaFrameLease&) = delete;
+    RgbaFrameLease(RgbaFrameLease&&) noexcept = default;
+    RgbaFrameLease& operator=(RgbaFrameLease&&) noexcept = delete;
+
+    const RgbaFrameView& view() const noexcept { return view_; }
+
+private:
+    RgbaFrameView view_;
+    std::shared_ptr<void> slot_;
+};
+
+/** @brief LibGodot 通过回调把 RGBA 租约移动交付给宿主。 */
 class RgbaFrameSink final {
 public:
     void* context = nullptr;
     std::int32_t (*submit)(
-        void* context, const RgbaFrameView* frame) noexcept = nullptr;
+        void* context, RgbaFrameLease* frame) noexcept = nullptr;
 };
 
 }  // namespace vtb

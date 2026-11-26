@@ -1,51 +1,21 @@
 # Godot/Ayagami → RGBA DMA-BUF 人物输出
 
-这个模块把外部分配的 RGBA DMA-BUF 导入为 EGLImage 和 GLES texture，再用 Godot
-4.7.1 的 native texture 包装与 RenderTarget override 能力，把该纹理设为 SubViewport
-颜色附件。Godot render thread 直接把人物画面写入 DMA-BUF，等待 GPU 写入完成后，
-通过同步 `RgbaFrameSink` 把描述交给 `LibGodotInstance`；Pipeline 随后取得借用视图并调用 RGA。
+模块把四块带 DMA-BUF 的 GLES 纹理轮流设为 SubViewport 的颜色附件。
+Godot 渲染前翻转 2D canvas，使纹理内存行序与编码端一致。GPU 完成写入后，
+宿主把当前 RGBA 租约绑到 `GstMemory`，H.264 和 MJPEG 编码分支共用该输入。
 
 ```text
-Ayagami / Godot SubViewport
-    ↓ RenderTarget external color attachment
-RGBA DMA-BUF / EGLImage / GL texture
-    ↓ LibGodotInstance 返回 RgbaFrameView（同步借用）
-宿主 RgaNv12FrameTransformer / Godot RgaTransformSession
-    ↓ Godot 所有者线程直接同步调用 RgaTransformer
-NV12 DMA-BUF
-    ↓ Nv12FrameSink（移动 Lease 到 GstBuffer）
-GStreamer appsrc → tee
-    ├─ leaky queue → appsink → MPP H.264 → rtspclientsink → MediaMTX
-    └─ leaky queue → appsink → MPP MJPEG → uvcsink → UVC
+Godot SubViewport → 四槽 RGBA DMA-BUF → RgbaFrameLease → appsrc → tee
+    ├─ mpph264enc → RTSP / WebRTC
+    └─ mppjpegenc → UVC
 ```
 
-## 为什么使用外部颜色附件
+`render_target_set_override()` 逐帧选择空闲纹理。Headless EGL 补丁 0007 修复
+多纹理轮换时 GLES3 帧缓冲对象缓存和退出清理的问题。四个槽位都在用时跳过当前节拍，
+最后一个 `GstMemory` 引用释放后槽位才可复用。停机时渲染线程负责释放 GL 和 EGL 资源，
+底层 DMA-BUF 由仍在途的租约继续保活。宿主和 LibGodot 使用 ABI v8。
 
-Godot 4.7.1 的 GLES3 后端已提供 `texture_create_from_native_handle()` 和
-`render_target_set_override()`。内置模块复用这两个接口即可删除逐帧
-`glBlitFramebuffer()`，无需维护 Godot 核心补丁。模块关闭时先解除 override，再释放
-Godot 纹理 RID、GL texture、EGLImage 和 DMA-BUF fd。
-
-## 当前资源与执行语义
-
-- 输出尺寸、帧率和有限/连续帧数由宿主配置；常用配置为 1920×1080；
-- 1 个 RGBA DMA-BUF FrameSlot；
-- Godot/OpenVT 按帧顺序执行直接渲染、`glFinish` 和 `RgbaFrameSink::submit`；
-  `LibGodotInstance` 保存帧描述，Pipeline 在下一次 Godot iteration 前
-  同步等待RGA完成；
-- 宿主 `RgaNv12FrameTransformer` 通过 Godot 私有 Session 缓存 DMA-BUF 导入和 NV12
-  目标池，并在 Godot 所有者线程直接同步调用 RGA；
-- 宿主 `GStreamerMediaSession` 把 NV12 Lease 绑定到 `GstBuffer`，由 tee 和两条容量 2
-  的 leaky queue 分发给独立的 H.264/MJPEG 分支线程；
-- 当前没有项目自建 READY 帧队列或 RGA 命令 Worker。`GodotRenderPipeline::run_frame()`
-  在返回前完成当前帧转换和 raw appsrc 提交；MPP 编码异步执行；
-- MPP 的 SPS/PPS 在输出启动前注册到 H.264 流描述；H.264/MJPEG 包都携带单调时钟
-  PTS/DTS、帧序号和关键帧标记；
-- RTSP 与 UVC 使用独立 GStreamer pipeline；慢分支通过自己的 leaky queue 丢旧帧；
-- Godot 直接使用外部 EGLImage 颜色附件，纹理方向保持现有约定；
-- 使用 `/dev/dma_heap/system-uncached`；
-- 仍保留 X11，只验证人物到硬件编码的共享缓冲链路；
-- 不修改 Xorg、驱动、内核、设备树、权限或开机服务。
+## 历史测量
 
 实时推流由 `Engine.max_fps = OUTPUT_FPS` 把 Godot 提交节奏限制为 30 FPS。启动命令不使用
 `--fixed-fps`，因为该选项会关闭实时同步并让离线帧以设备可达到的速度生成；在实时 RTSP
@@ -114,7 +84,7 @@ Ayagami 项目、模型、动画输入和验证脚本：
 分别移到宿主。2026-11-15 又将 Face 与 Godot 的 RGA 业务缓存分成两个 Session，并通过
 共享双 Worker Executor 执行命令；每个业务生产者仍同步等待自己的单个在途请求，MPP 继续
 由 Godot 所有者线程顺序调用。上表继续作为历史对照；
-当前 ABI v7 直接渲染实现已经通过 ARM64 编译，尚未在 RK3588 上重新测量吞吐、
+历史 ABI v7 直接渲染实现已通过 ARM64 编译。ABI v8 的 RK3588 验证还需测量吞吐、
 P95/P99、画面正确性和退出资源释放。
 
 以下结果来自改为 RTSP 之前的文件输出基线。三次输出均为 1920×1080、30 FPS、300 帧、9.9999 秒、H.264/yuv420p。`ffprobe` 统计 300 帧，FFmpeg 完整解码无错误。同步版和两轮流水版的 H.264、MP4 以及 6 个抽帧均逐字节相同；视觉检查确认方向、颜色、透明边缘和人物动作正确。新的 RTSP 路径仍需在 RK3588 上单独验证。

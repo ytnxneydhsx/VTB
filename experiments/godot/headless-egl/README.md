@@ -2,8 +2,8 @@
 
 This directory contains the first-stage display-backend migration for the
 VTB-owned LibGodot runtime. Patches `0001` through `0006` add a LinuxBSD
-display driver named `headless_egl` while retaining the existing GLES3
-renderer and the current `glBlitFramebuffer()` DMA-BUF capture path.
+display driver named `headless_egl`. Patch `0007` fixes GLES3 FBO cache reuse and
+texture cleanup when the product rotates its DMA-BUF color attachments.
 
 The patch baseline is Godot `4.7.1-stable`, commit
 `a13da4feb8d8aefc283c3763d33a2f170a18d541`. Apply the series after restoring
@@ -35,17 +35,9 @@ and does not create an X11 display or native window. The board launch script
 removes `DISPLAY`, `XAUTHORITY`, and `MALI_DEFAULT_WINSYS` from the child
 environment.
 
-This stage intentionally keeps the existing render-output boundary:
-
-```text
-Godot SubViewport texture
-  -> glBlitFramebuffer()
-  -> RGBA DMA-BUF
-  -> RGA -> MPP -> EncodedVideoSink
-```
-
-The RenderTarget override patch and direct-DMA-BUF capture changes are a
-separate second stage. They must not be mixed into the first-stage validation.
+The product rotates the SubViewport color attachment across four RGBA DMA-BUF
+slots. See the [capture module](../openvt-dmabuf-capture/README.md) for the frame
+lease and encoder handoff.
 
 Before deployment, verify the rebuilt LibGodot artifact is AArch64, has no
 direct `DT_NEEDED` entry for X11/XCB/Wayland, exports the

@@ -2,7 +2,7 @@
 
 This directory contains the product path where `vtb-live2d` owns the process
 entry point, frame clock, face tracking, Godot iteration, Live2D rendering,
-DMA-BUF capture, RGA conversion, GStreamer-managed MPP branches, RTSP/UVC output,
+DMA-BUF rendering, GStreamer-managed MPP branches, RTSP/UVC output,
 and shutdown order.
 
 The product bootstrap project contains one empty scene and no GDScript. C++
@@ -94,19 +94,15 @@ absent from the LibGodot module source list and link list. The module compiles o
 
 The application directly owns the pipeline stages, their bounded channels,
 `Live2DControlServer`, and `GStreamerMediaSession`. The module receives parameters, wraps an
-external RGBA DMA-BUF texture as the Viewport RenderTarget color attachment, renders into it,
-waits for GPU completion, and returns a borrowed RGBA DMA-BUF through `RgbaFrameSink`. The host
-submits it through the Godot-owned `RgaNv12FrameTransformer` session, calls librga
-synchronously on the Godot owner thread, and moves the leased NV12 result into a GStreamer
-DMA-BUF `GstBuffer`. A tee and two bounded leaky queues drive independent H.264 and MJPEG
-MPP sessions; their encoded packets are copied into GStreamer-owned buffers for RTSP and
-UVC output. Face preprocessing uses a
-separate session, target pool, and synchronous RGA execution object on the face thread.
+free RGBA DMA-BUF texture as the Viewport color attachment before each iteration.
+Godot flips the 2D canvas for the encoder's row order, renders into the selected slot,
+and waits for GPU completion before moving its lease to the host. `GStreamerMediaSession`
+binds the lease to RGBA `GstMemory`. The enabled H.264 and MJPEG encoders share that input,
+and the last input reference returns the slot. The render loop skips a tick when all
+four slots are in use. Face preprocessing uses its own synchronous RGA session.
 
-Bridge ABI v7 carries only the RGBA sink and output geometry in the versioned initialize
-contract, with version/size checks. Render metrics and all persistence are owned by the host.
-The optional UVC frame rate belongs to the host media configuration. Rebuild and deploy the
-host and LibGodot together.
+Bridge ABI v8 transfers move-only RGBA frame leases and includes the DMA heap in
+the versioned initialize contract. Rebuild and deploy the host and LibGodot together.
 `output.rtsp_url` configures the H.264 network branch; optional `output.uvc` configures
 the host MPP MJPEG and GStreamer 1.28.9 UVC branch. Source and
 verification details are in
